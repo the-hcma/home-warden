@@ -373,6 +373,13 @@ check_unit_templates() {
   else
     record fail setup_service "scripts/setup-service missing"
   fi
+  if [[ -x "${REPO_DIR}/scripts/on-deploy" ]]; then
+    record pass on_deploy "scripts/on-deploy executable"
+  elif [[ -f "${REPO_DIR}/scripts/on-deploy" ]]; then
+    record warn on_deploy "scripts/on-deploy not executable"
+  else
+    record fail on_deploy "scripts/on-deploy missing"
+  fi
 }
 
 check_distro_nginx() {

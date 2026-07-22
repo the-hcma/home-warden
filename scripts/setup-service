@@ -10,7 +10,7 @@
 #   2. Verify packages / home nginx.conf / unit templates
 #   3. Prepare scratch runtime (logs, modules symlink)
 #   4. Validate nginx config (sudo nginx -t) — abort if invalid
-#   5. Install units, mask distro nginx, enable socket, start service
+#   5. Run on-deploy (when present), install units, mask distro nginx, start service
 #
 # Usage:
 #   ./scripts/setup-service [--status] [--dry-run]
@@ -37,6 +37,7 @@ readonly host_fqdn_file="${host_config_dir}/user-services-host-fqdn"
 OWNER="${OWNER:-$(id -un)}"
 SCRATCH_DIR="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 HOME_NGINX_CONF="${HOME_NGINX_CONF:-}"
+DEPLOYED_COMMIT="${DEPLOYED_COMMIT:-}"
 readonly default_home_nginx_conf="${HOME}/home/nginx/server/nginx.conf"
 
 dry_run=0
@@ -228,6 +229,7 @@ expand_unit() {
       -e "s|@@SCRATCH_DIR@@|${SCRATCH_DIR}|g" \
       -e "s|@@HOME_NGINX_CONF@@|${HOME_NGINX_CONF}|g" \
       -e "s|@@REPO_DIR@@|${repo_dir}|g" \
+      -e "s|@@DEPLOYED_COMMIT@@|${DEPLOYED_COMMIT}|g" \
       "${src}"
   )"
 
@@ -261,12 +263,49 @@ expand_unit() {
   rm -f "${tmp}"
 }
 
+run_on_deploy() {
+  local -r hook="${repo_dir}/scripts/on-deploy"
+  local rc=0
+  if [[ ! -x "${hook}" ]]; then
+    echo "WARNING: ${hook} missing or not executable — skipping on-deploy" >&2
+    return 0
+  fi
+  echo "Running scripts/on-deploy..."
+  if ((dry_run)); then
+    echo "DRY-RUN: OWNER=${OWNER} SCRATCH_DIR=${SCRATCH_DIR} HOME_NGINX_CONF=${HOME_NGINX_CONF} ${hook}"
+    return 0
+  fi
+  set +e
+  OWNER="${OWNER}" SCRATCH_DIR="${SCRATCH_DIR}" HOME_NGINX_CONF="${HOME_NGINX_CONF}" "${hook}"
+  rc=$?
+  set -e
+  case "${rc}" in
+    0)
+      echo "on-deploy: changed (will reload/restart when units are active)"
+      return 0
+      ;;
+    1)
+      echo "on-deploy: no change"
+      return 1
+      ;;
+    *)
+      echo "ERROR: on-deploy failed (exit ${rc})" >&2
+      exit "${rc}"
+      ;;
+  esac
+}
+
+
 print_status() {
   echo "home-warden setup-service status"
   echo "  repo:            ${repo_dir}"
   echo "  owner:           ${OWNER}"
   echo "  scratch:         ${SCRATCH_DIR}"
   echo "  home nginx.conf: ${HOME_NGINX_CONF:-<unset>}"
+  echo "  deployed commit: ${DEPLOYED_COMMIT:-$(git -C "${repo_dir}" rev-parse --short HEAD 2>/dev/null || echo '<unset>')}"
+  echo "  service log:     ${SCRATCH_DIR}/home-warden.log"
+  echo "  nginx error log: ${SCRATCH_DIR}/logs/error.log"
+  echo "  nginx access log:${SCRATCH_DIR}/logs/access.log"
   echo "  host name file:  $(config_file_first_line "${host_name_file}" 2>/dev/null || echo '<missing>')"
   echo "  machine-id file: $(config_file_first_line "${host_machine_id_file}" 2>/dev/null || echo '<missing>')"
   echo "  local hostname:  $(current_hostname_short)"
@@ -332,6 +371,13 @@ main() {
   prepare_scratch
   validate_nginx_config
 
+  local on_deploy_rc=0
+  set +e
+  run_on_deploy
+  on_deploy_rc=$?
+  set -e
+
+  DEPLOYED_COMMIT="$(git -C "${repo_dir}" rev-parse HEAD 2>/dev/null || true)"
   expand_unit "${unit_template_dir}/home-warden.socket" "${system_unit_dir}/home-warden.socket"
   expand_unit "${unit_template_dir}/home-warden.service" "${system_unit_dir}/home-warden.service"
 
@@ -339,8 +385,17 @@ main() {
 
   run sudo systemctl daemon-reload
   run sudo systemctl enable --now home-warden.socket
-  echo "Starting home-warden.service..."
-  run sudo systemctl start home-warden.service
+
+  if systemctl is-active --quiet home-warden.service 2>/dev/null; then
+    if ((on_deploy_rc == 0)); then
+      echo "Reloading home-warden.service (on-deploy changed)..."
+      run sudo systemctl reload home-warden.service \
+        || run sudo systemctl restart home-warden.service
+    fi
+  else
+    echo "Starting home-warden.service..."
+    run sudo systemctl start home-warden.service
+  fi
 
   if ((dry_run == 0)); then
     confirm_running

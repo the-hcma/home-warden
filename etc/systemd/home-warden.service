@@ -8,9 +8,8 @@ After=network.target home-warden.socket
 Type=simple
 User=@@OWNER@@
 Group=@@OWNER@@
-# systemd hands ListenStream fds starting at 3 (see PLAN.md / systemd.io).
-# Order must match first listen sockets in config: http :80 then http :443 ssl.
 Environment=NGINX=3:4;
+Environment=DEPLOYED_COMMIT=@@DEPLOYED_COMMIT@@
 # -p sets prefix for relative pid/temp/log paths in the home nginx.conf.
 ExecStart=/usr/sbin/nginx -p @@SCRATCH_DIR@@/ -c @@HOME_NGINX_CONF@@ -g 'daemon off;'
 ExecReload=/usr/sbin/nginx -p @@SCRATCH_DIR@@/ -c @@HOME_NGINX_CONF@@ -s reload
@@ -18,6 +17,10 @@ Restart=on-failure
 RestartSec=5
 # Bind privileged ports only via inherited fds from home-warden.socket.
 NoNewPrivileges=true
+# Systemd / process logs (nginx access/error also under @@SCRATCH_DIR@@/logs/).
+# Follow with: tail --follow=name --retry @@SCRATCH_DIR@@/home-warden.log
+StandardOutput=append:@@SCRATCH_DIR@@/home-warden.log
+StandardError=append:@@SCRATCH_DIR@@/home-warden.log
 
 [Install]
 WantedBy=multi-user.target
