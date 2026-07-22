@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+# Install home-warden system socket + service (privileged ports via systemd).
+# Expands etc/systemd templates into /etc/systemd/system/ with sudo.
+#
+# Placeholders: @@OWNER@@ @@SCRATCH_DIR@@ @@HOME_NGINX_CONF@@
+# Injects ConditionHost=|<machine-id> and ConditionHost=|<hostname> (OR).
+#
+# Usage:
+#   ./scripts/setup-service [--status] [--dry-run]
+#   HOME_NGINX_CONF=/path/to/home/nginx/server/nginx.conf ./scripts/setup-service
+#
+# Env overrides:
+#   HOME_NGINX_CONF  Absolute path to thehcma/home nginx.conf (required unless default exists)
+#   OWNER            Service user (default: current user)
+#   SCRATCH_DIR      Runtime prefix for nginx -p (default: ~/scratch/home-warden)
+
+set -euo pipefail
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+readonly UNIT_TEMPLATE_DIR="${REPO_DIR}/etc/systemd"
+readonly SYSTEM_UNIT_DIR="/etc/systemd/system"
+readonly HOST_CONFIG_DIR="${HOME}/.config"
+readonly HOST_NAME_FILE="${HOST_CONFIG_DIR}/user-services-host"
+readonly HOST_MACHINE_ID_FILE="${HOST_CONFIG_DIR}/user-services-machine-id"
+readonly HOST_FQDN_FILE="${HOST_CONFIG_DIR}/user-services-host-fqdn"
+
+OWNER="${OWNER:-$(id -un)}"
+SCRATCH_DIR="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
+DEFAULT_HOME_NGINX_CONF="${HOME}/home/nginx/server/nginx.conf"
+HOME_NGINX_CONF="${HOME_NGINX_CONF:-}"
+
+DRY_RUN=0
+STATUS_ONLY=0
+
+usage() {
+  cat <<'EOF'
+Usage: setup-service [--status] [--dry-run] [-h|--help]
+
+Install/enable home-warden.socket + home-warden.service into /etc/systemd/system.
+
+  --status   Show resolved paths and unit state; do not install
+  --dry-run  Print actions without writing units or calling systemctl
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --status) STATUS_ONLY=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+current_hostname_short() {
+  hostname -s 2>/dev/null || hostname
+}
+
+machine_id_local() {
+  tr -d '[:space:]' </etc/machine-id
+}
+
+ensure_host_config() {
+  mkdir -p "${HOST_CONFIG_DIR}"
+  if [[ ! -f "${HOST_NAME_FILE}" ]]; then
+    current_hostname_short >"${HOST_NAME_FILE}"
+  fi
+  if [[ ! -f "${HOST_MACHINE_ID_FILE}" ]]; then
+    machine_id_local >"${HOST_MACHINE_ID_FILE}"
+  fi
+  if [[ ! -f "${HOST_FQDN_FILE}" ]]; then
+    hostname >"${HOST_FQDN_FILE}" || current_hostname_short >"${HOST_FQDN_FILE}"
+  fi
+}
+
+resolve_home_nginx_conf() {
+  if [[ -n "${HOME_NGINX_CONF}" ]]; then
+    printf '%s\n' "${HOME_NGINX_CONF}"
+    return 0
+  fi
+  if [[ -f "${DEFAULT_HOME_NGINX_CONF}" ]]; then
+    printf '%s\n' "${DEFAULT_HOME_NGINX_CONF}"
+    return 0
+  fi
+  # Common clone location used on tron during migration.
+  if [[ -f /home/house_meister/home/nginx/server/nginx.conf ]]; then
+    printf '%s\n' /home/house_meister/home/nginx/server/nginx.conf
+    return 0
+  fi
+  return 1
+}
+
+run() {
+  if ((DRY_RUN)); then
+    printf 'DRY-RUN:'; printf ' %q' "$@"
+    printf '\n'
+    return 0
+  fi
+  "$@"
+}
+
+expand_unit() {
+  local -r src="$1"
+  local -r dest="$2"
+  local generated host_name machine_id
+
+  host_name="$(config_file_first_line "${HOST_NAME_FILE}")"
+  machine_id="$(config_file_first_line "${HOST_MACHINE_ID_FILE}")"
+
+  generated="$(
+    sed \
+      -e "s|@@OWNER@@|${OWNER}|g" \
+      -e "s|@@SCRATCH_DIR@@|${SCRATCH_DIR}|g" \
+      -e "s|@@HOME_NGINX_CONF@@|${HOME_NGINX_CONF}|g" \
+      -e "s|@@REPO_DIR@@|${REPO_DIR}|g" \
+      "${src}"
+  )"
+
+  # Inject ConditionHost guards after the first [Unit] section header.
+  generated="$(
+    awk -v mid="${machine_id}" -v host="${host_name}" '
+      BEGIN { done = 0 }
+      /^\[Unit\]$/ && !done {
+        print
+        print "# Service host guard (OR): machine-id or hostname"
+        print "ConditionHost=|" mid
+        print "ConditionHost=|" host
+        done = 1
+        next
+      }
+      { print }
+    ' <<<"${generated}"
+  )"
+
+  if ((DRY_RUN)); then
+    echo "DRY-RUN: would write ${dest}"
+    echo "-----"
+    printf '%s\n' "${generated}"
+    echo "-----"
+    return 0
+  fi
+
+  local tmp
+  tmp="$(mktemp)"
+  printf '%s\n' "${generated}" >"${tmp}"
+  run sudo install -o root -g root -m 644 "${tmp}" "${dest}"
+  rm -f "${tmp}"
+}
+
+config_file_first_line() {
+  local -r path="$1"
+  local line=""
+  IFS= read -r line <"${path}" || true
+  printf '%s\n' "${line}"
+}
+
+prepare_scratch() {
+  run mkdir -p \
+    "${SCRATCH_DIR}/logs" \
+    "${SCRATCH_DIR}/certs/live" \
+    "${SCRATCH_DIR}/client_body_temp" \
+    "${SCRATCH_DIR}/proxy_temp" \
+    "${SCRATCH_DIR}/fastcgi_temp" \
+    "${SCRATCH_DIR}/uwsgi_temp" \
+    "${SCRATCH_DIR}/scgi_temp"
+  # Ubuntu module snippets use relative modules/*.so; with nginx -p they resolve under scratch.
+  if [[ -d /usr/lib/nginx/modules ]]; then
+    run ln -sfn /usr/lib/nginx/modules "${SCRATCH_DIR}/modules"
+  fi
+}
+
+print_status() {
+  echo "home-warden setup-service status"
+  echo "  repo:            ${REPO_DIR}"
+  echo "  owner:           ${OWNER}"
+  echo "  scratch:         ${SCRATCH_DIR}"
+  echo "  home nginx.conf: ${HOME_NGINX_CONF:-<unset>}"
+  echo "  host name file:  $(config_file_first_line "${HOST_NAME_FILE}" 2>/dev/null || echo '<missing>')"
+  echo "  machine-id file: $(config_file_first_line "${HOST_MACHINE_ID_FILE}" 2>/dev/null || echo '<missing>')"
+  echo "  local hostname:  $(current_hostname_short)"
+  echo "  local machine-id:$(machine_id_local)"
+  if command -v systemctl >/dev/null 2>&1; then
+    for pair in "socket:home-warden.socket" "service:home-warden.service"; do
+      label="${pair%%:*}"
+      unit="${pair##*:}"
+      en="$(systemctl is-enabled "${unit}" 2>/dev/null || true)"
+      ac="$(systemctl is-active "${unit}" 2>/dev/null || true)"
+      echo "  ${label} enabled: ${en:-n/a}"
+      echo "  ${label} active:  ${ac:-n/a}"
+    done
+    en="$(systemctl is-enabled nginx.service 2>/dev/null || true)"
+    ac="$(systemctl is-active nginx.service 2>/dev/null || true)"
+    echo "  distro nginx:   enabled=${en:-n/a} active=${ac:-n/a}"
+  fi
+}
+
+mask_distro_nginx() {
+  echo "Ensuring distro nginx.service does not own 80/443..."
+  if systemctl list-unit-files nginx.service >/dev/null 2>&1; then
+    run sudo systemctl disable --now nginx.service 2>/dev/null || true
+    run sudo systemctl mask nginx.service 2>/dev/null || true
+  fi
+}
+
+main() {
+  ensure_host_config
+
+  if ! HOME_NGINX_CONF="$(resolve_home_nginx_conf)"; then
+    echo "ERROR: set HOME_NGINX_CONF to thehcma/home nginx/server/nginx.conf" >&2
+    exit 1
+  fi
+  if [[ ! -f "${HOME_NGINX_CONF}" ]]; then
+    echo "ERROR: HOME_NGINX_CONF not found: ${HOME_NGINX_CONF}" >&2
+    exit 1
+  fi
+
+  if ((STATUS_ONLY)); then
+    print_status
+    exit 0
+  fi
+
+  if [[ ! -f "${UNIT_TEMPLATE_DIR}/home-warden.service" || ! -f "${UNIT_TEMPLATE_DIR}/home-warden.socket" ]]; then
+    echo "ERROR: missing unit templates under ${UNIT_TEMPLATE_DIR}" >&2
+    exit 1
+  fi
+
+  prepare_scratch
+  expand_unit "${UNIT_TEMPLATE_DIR}/home-warden.socket" "${SYSTEM_UNIT_DIR}/home-warden.socket"
+  expand_unit "${UNIT_TEMPLATE_DIR}/home-warden.service" "${SYSTEM_UNIT_DIR}/home-warden.service"
+
+  mask_distro_nginx
+
+  run sudo systemctl daemon-reload
+  run sudo systemctl enable --now home-warden.socket
+
+  echo "Installed home-warden.socket (enabled). Start service with:"
+  echo "  sudo systemctl start home-warden.service"
+  echo "or wait for traffic on 80/443 (socket activation)."
+  echo
+  echo "Validate config:"
+  echo "  nginx -p ${SCRATCH_DIR}/ -t -c ${HOME_NGINX_CONF}"
+  print_status
+}
+
+main "$@"
