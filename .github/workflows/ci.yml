@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, edited]
+    branches-ignore:
+      - '**/graphite-base/**'
+
+  push:
+    branches-ignore:
+      - main
+      - '**/graphite-base/**'
+  workflow_dispatch:
+
+# Cancel in-progress reruns for the same trigger only. push and pull_request must
+# not share a group: cancel-in-progress would leave CANCELLED required checks on
+# the PR commit and block merge even when pull_request CI passed. pull_request
+# actions are also split (opened/synchronize vs edited) so review-bot description
+# patches do not cancel an in-flight test run for the same commit.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.event.action || github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    permissions:
+      contents: read
+      pull-requests: read
+    name: Guard
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.set-skip.outputs.skip }}
+    steps:
+      - id: pr-state
+        uses: nick-fields/retry@v4
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        with:
+          timeout_seconds: 15
+          max_attempts: 3
+          retry_wait_seconds: 5
+          command: |
+            if [[ -z "$PR_NUMBER" ]]; then exit 0; fi
+            state=$(gh pr view "$PR_NUMBER" --repo "$REPOSITORY" --json state -q .state)
+            echo "state=$state" >> "$GITHUB_OUTPUT"
+
+      - id: set-skip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.head_ref || github.ref_name }}
+          PR_STATE: ${{ steps.pr-state.outputs.state }}
+        run: |
+          # Skip merge-queue staging branches — the merge queue validates the
+          # integrated state itself; CI there duplicates work.
+          # Skip when the PR is already merged — Graphite pushes a restack
+          # commit to the next branch after a merge lands, which would otherwise
+          # trigger a redundant CI run on an already-validated diff.
+          if [[ "$HEAD_REF" == gtmq_merge_* ]] || [[ "$PR_STATE" == "MERGED" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # CodeRabbit appends review summaries to the PR description (pull_request
+          # edited). We want its review comments only, not a second full CI run.
+          if [[ "${{ github.event_name }}" == "pull_request" ]] \
+              && [[ "${{ github.event.action }}" == "edited" ]] \
+              && [[ "${{ github.event.sender.login }}" == "coderabbitai[bot]" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Pull request CI skipped: CodeRabbit description edit (review metadata only)"
+            exit 0
+          fi
+          # Skip push CI when an open PR already covers this branch.
+          # GitHub always delivers pull_request synchronize for PR-head pushes;
+          # the push trigger is only for restacks without an open PR.
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            BRANCH="${GITHUB_REF#refs/heads/}"
+            PR_COUNT=0
+            if count="$(gh pr list --repo "$GITHUB_REPOSITORY" \
+                --head "$BRANCH" --state open \
+                --json number --jq 'length' 2>/dev/null)"; then
+              PR_COUNT="$count"
+            fi
+            if [[ "$PR_COUNT" -gt 0 ]]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "Push CI skipped: open PR exists; pull_request handles this push"
+              exit 0
+            fi
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+  validate:
+    name: Validate
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - name: Required files
+        run: |
+          test -f README.md
+          test -f LICENSE
+          test -f PLAN.md
+          test -f AGENTS.md
+          test -f .github/CODEOWNERS
+          test -f .github/stacking-tool
+          test -f nginx/nginx.conf
+          test -f .cursor/rules/pr-ship-and-review.mdc
+          test -f .cursor/rules/stacking-tool.mdc
+
+      - name: nginx -t
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nginx
+          nginx -t -c "$PWD/nginx/nginx.conf"
+
+  secret-scan:
+    name: Secret Scan
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Secret Scan
+        env:
+          GITLEAKS_BASE: ${{ github.event.pull_request.base.sha || '' }}
+          GITLEAKS_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: bash .github/ci/secret-scan

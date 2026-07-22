@@ -1,0 +1,30 @@
+name: Dependabot Auto Merge
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  label-dependabot-pr:
+    if: github.actor == 'dependabot[bot]' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Add Graphite merge queue labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          labels_to_add=(merge-it)
+          repo_labels="$(gh api "repos/${REPOSITORY}/labels" --paginate --jq '.[].name')"
+          if grep -qx 'merge-mq' <<<"${repo_labels}"; then
+            labels_to_add+=(merge-mq)
+          fi
+          labels="$(IFS=,; printf '%s' "${labels_to_add[*]}")"
+          gh pr edit "${PR_NUMBER}" --repo "${REPOSITORY}" --add-label "${labels}"
