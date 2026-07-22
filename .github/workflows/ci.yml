@@ -10,6 +10,9 @@ on:
     branches-ignore:
       - main
       - '**/graphite-base/**'
+      # GitHub merge queue temporary branches — use merge_group, not push.
+      - 'gh-readonly-queue/**'
+  merge_group:
   workflow_dispatch:
 
 # Cancel in-progress reruns for the same trigger only. push and pull_request must
@@ -18,7 +21,7 @@ on:
 # actions are also split (opened/synchronize vs edited) so review-bot description
 # patches do not cancel an in-flight test run for the same commit.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.event.action || github.event_name }}
+  group: ci-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}-${{ github.event.action || github.event_name }}
   cancel-in-progress: true
 
 jobs:
@@ -52,10 +55,8 @@ jobs:
           HEAD_REF: ${{ github.head_ref || github.ref_name }}
           PR_STATE: ${{ steps.pr-state.outputs.state }}
         run: |
-          # Skip merge-queue staging branches — the merge queue validates the
-          # integrated state itself; CI there duplicates work.
-          # Skip when the PR is already merged — Graphite pushes a restack
-          # commit to the next branch after a merge lands, which would otherwise
+          # Skip Graphite merge-queue staging branches if present.
+          # Skip when the PR is already merged — restack pushes would otherwise
           # trigger a redundant CI run on an already-validated diff.
           if [[ "$HEAD_REF" == gtmq_merge_* ]] || [[ "$PR_STATE" == "MERGED" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -109,6 +110,7 @@ jobs:
           test -f nginx/nginx.conf
           test -f .cursor/rules/pr-ship-and-review.mdc
           test -f .cursor/rules/stacking-tool.mdc
+          test "$(tr -d '[:space:]' < .github/stacking-tool)" = 'gh-stack'
 
       - name: nginx -t
         run: |
@@ -126,9 +128,9 @@ jobs:
       - uses: actions/checkout@v7.0.0
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
       - name: Secret Scan
         env:
-          GITLEAKS_BASE: ${{ github.event.pull_request.base.sha || '' }}
-          GITLEAKS_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          GITLEAKS_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || '' }}
+          GITLEAKS_HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
         run: bash .github/ci/secret-scan

@@ -37,8 +37,10 @@ systemctl list-timers home-warden-certbot.timer
 ~/work/ai/repository-helpers/scripts/dev/start-development --worktree <stack> --no-interactive
 ```
 
-CI validates tracked files and runs `nginx -t` when nginx is available (or skips
-gracefully in environments without the package).
+Stacking is **`gh-stack`**; merges land via **GitHub’s merge queue**
+(`gh pr merge --auto --squash`). See [AGENTS.md](./AGENTS.md).
+
+CI validates tracked files and runs `nginx -t`.
 
 ## License
 
