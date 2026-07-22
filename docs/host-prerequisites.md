@@ -14,6 +14,13 @@ and start the service (refuses to start if validation fails).
 ./scripts/setup-service
 ```
 
+## Optional preflight
+
+```bash
+./scripts/bootstrap           # report only
+./scripts/bootstrap --fix     # create scratch, dhparam, staging certs, modules symlink
+```
+
 ## Clones
 
 | Path | Repo |

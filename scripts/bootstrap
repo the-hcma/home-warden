@@ -1,0 +1,472 @@
+#!/usr/bin/env bash
+# Check (and optionally remediate) host prerequisites for home-warden Milestone 1.
+#
+# Usage:
+#   ./scripts/bootstrap           # check only; exit 1 if anything required is missing
+#   ./scripts/bootstrap --fix     # create scratch, modules symlink, dhparam, staging certs
+#   ./scripts/bootstrap --json    # machine-readable summary on stdout
+#
+# Env overrides (same as setup-service):
+#   HOME_NGINX_CONF  OWNER  SCRATCH_DIR
+
+set -euo pipefail
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+OWNER="${OWNER:-$(id -un)}"
+SCRATCH_DIR="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
+HOME_NGINX_CONF="${HOME_NGINX_CONF:-}"
+
+FIX=0
+JSON=0
+PASS=0
+WARN=0
+FAIL=0
+
+# Collect JSON rows: status|code|message
+declare -a RESULTS=()
+
+usage() {
+  cat <<'EOF'
+Usage: bootstrap [--fix] [--json] [-h|--help]
+
+Check host prerequisites for home-warden (Ubuntu 26 / nginx 1.28 / systemd socket activation).
+
+  --fix   Remediate safe items (scratch dirs, modules symlink, dhparam, self-signed staging certs)
+  --json   Print a JSON summary instead of human text
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --fix) FIX=1 ;;
+    --json) JSON=1 ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+record() {
+  local -r status="$1"
+  local -r code="$2"
+  local -r message="$3"
+  RESULTS+=("${status}|${code}|${message}")
+  case "${status}" in
+    pass) PASS=$((PASS + 1)) ;;
+    warn) WARN=$((WARN + 1)) ;;
+    fail) FAIL=$((FAIL + 1)) ;;
+  esac
+  if ((JSON == 0)); then
+    local tag
+    case "${status}" in
+      pass) tag='OK  ' ;;
+      warn) tag='WARN' ;;
+      fail) tag='FAIL' ;;
+    esac
+    printf '[%s] %s — %s\n' "${tag}" "${code}" "${message}"
+  fi
+}
+
+resolve_home_nginx_conf() {
+  if [[ -n "${HOME_NGINX_CONF}" ]]; then
+    printf '%s\n' "${HOME_NGINX_CONF}"
+    return 0
+  fi
+  local candidate
+  for candidate in \
+    "${HOME}/home/nginx/server/nginx.conf" \
+    /home/house_meister/home/nginx/server/nginx.conf; do
+    if [[ -f "${candidate}" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+version_ge() {
+  # True if $1 >= $2 (dotted numeric versions).
+  printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1 | grep -qx "$2"
+}
+
+extract_server_names() {
+  local -r conf="$1"
+  awk '/^[[:space:]]*server_name / && !/^[[:space:]]*#/ { print $2 }' "${conf}" \
+    | tr -d ';' \
+    | grep -v '^_$' \
+    | sort -u
+}
+
+ensure_scratch_layout() {
+  mkdir -p \
+    "${SCRATCH_DIR}/logs" \
+    "${SCRATCH_DIR}/certs/live" \
+    "${SCRATCH_DIR}/client_body_temp" \
+    "${SCRATCH_DIR}/proxy_temp" \
+    "${SCRATCH_DIR}/fastcgi_temp" \
+    "${SCRATCH_DIR}/uwsgi_temp" \
+    "${SCRATCH_DIR}/scgi_temp"
+  if [[ -d /usr/lib/nginx/modules ]]; then
+    ln -sfn /usr/lib/nginx/modules "${SCRATCH_DIR}/modules"
+  fi
+}
+
+check_os() {
+  if [[ -f /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    source /etc/os-release
+    if [[ "${ID:-}" == ubuntu ]] && version_ge "${VERSION_ID:-0}" "26.04"; then
+      record pass os "Ubuntu ${VERSION_ID} (${VERSION_CODENAME:-})"
+    elif [[ "${ID:-}" == ubuntu ]]; then
+      record warn os "Ubuntu ${VERSION_ID:-?} — target is 26.04+"
+    else
+      record warn os "OS ${ID:-unknown} ${VERSION_ID:-} — target is Ubuntu 26.04"
+    fi
+  else
+    record fail os "/etc/os-release missing"
+  fi
+}
+
+check_systemd() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    record fail systemd "systemctl not found"
+    return
+  fi
+  local ver major
+  ver="$(systemctl --version 2>/dev/null | head -n1 | awk '{print $2}')"
+  major="${ver%%.*}"
+  if [[ "${major}" =~ ^[0-9]+$ ]] && ((major >= 259)); then
+    record pass systemd "systemd ${ver} (ConditionHost machine-id OK)"
+  elif [[ -n "${ver}" ]]; then
+    record warn systemd "systemd ${ver} — machine-id ConditionHost needs 259+; hostname guard still works"
+  else
+    record fail systemd "could not read systemd version"
+  fi
+}
+
+check_nginx_binary() {
+  if ! command -v nginx >/dev/null 2>&1; then
+    record fail nginx_bin "nginx not on PATH — apt install nginx"
+    return
+  fi
+  local ver
+  ver="$(nginx -v 2>&1 | sed -n 's/.*nginx\///p' | awk '{print $1}')"
+  if [[ "${ver}" == 1.28.* ]]; then
+    record pass nginx_bin "nginx ${ver}"
+  elif [[ -n "${ver}" ]]; then
+    record warn nginx_bin "nginx ${ver} — target is 1.28.3"
+  else
+    record fail nginx_bin "could not parse nginx -v"
+  fi
+}
+
+check_packages() {
+  local pkg
+  for pkg in nginx nginx-common libnginx-mod-stream; do
+    if dpkg-query -W -f='${Status}' "${pkg}" 2>/dev/null | grep -q 'install ok installed'; then
+      record pass "pkg_${pkg}" "${pkg} installed ($(dpkg-query -W -f='${Version}' "${pkg}"))"
+    else
+      record fail "pkg_${pkg}" "${pkg} missing — sudo apt-get install -y nginx libnginx-mod-stream"
+    fi
+  done
+  if command -v openssl >/dev/null 2>&1; then
+    record pass pkg_openssl "openssl available"
+  else
+    record warn pkg_openssl "openssl missing — needed to generate dhparam / staging certs"
+  fi
+}
+
+check_modules_enabled() {
+  if [[ -L /etc/nginx/modules-enabled/50-mod-stream.conf || -f /etc/nginx/modules-enabled/50-mod-stream.conf ]]; then
+    record pass modules_enabled "stream module enabled under /etc/nginx/modules-enabled"
+  else
+    record fail modules_enabled "stream module snippet missing — install libnginx-mod-stream"
+  fi
+  if [[ -e "${SCRATCH_DIR}/modules/ngx_stream_module.so" || -L "${SCRATCH_DIR}/modules" ]]; then
+    record pass scratch_modules "scratch modules path OK (${SCRATCH_DIR}/modules)"
+  else
+    if ((FIX)); then
+      ensure_scratch_layout
+      if [[ -e "${SCRATCH_DIR}/modules/ngx_stream_module.so" || -L "${SCRATCH_DIR}/modules" ]]; then
+        record pass scratch_modules "created modules symlink under ${SCRATCH_DIR}"
+      else
+        record fail scratch_modules "could not link ${SCRATCH_DIR}/modules → /usr/lib/nginx/modules"
+      fi
+    else
+      record fail scratch_modules "missing ${SCRATCH_DIR}/modules → /usr/lib/nginx/modules (re-run with --fix)"
+    fi
+  fi
+}
+
+check_home_conf() {
+  local conf
+  if ! conf="$(resolve_home_nginx_conf)"; then
+    record fail home_conf "thehcma/home nginx/server/nginx.conf not found (set HOME_NGINX_CONF)"
+    HOME_NGINX_CONF=""
+    return
+  fi
+  HOME_NGINX_CONF="${conf}"
+  if [[ -r "${HOME_NGINX_CONF}" ]]; then
+    record pass home_conf "readable ${HOME_NGINX_CONF}"
+  else
+    record fail home_conf "not readable: ${HOME_NGINX_CONF}"
+    return
+  fi
+  if grep -qE '^\s*user\s+' "${HOME_NGINX_CONF}"; then
+    record warn home_conf_user "conf still has 'user' directive — drop for systemd User="
+  else
+    record pass home_conf_user "no 'user' directive"
+  fi
+  if grep -qE 'listen[[:space:]]+443[[:space:]]+ssl' "${HOME_NGINX_CONF}"; then
+    record pass home_conf_listen443 "listen 443 ssl present (socket activation)"
+  else
+    record fail home_conf_listen443 "no listen 443 ssl — conf not adapted for home-warden sockets"
+  fi
+  if grep -qE 'listen[[:space:]]+8443' "${HOME_NGINX_CONF}"; then
+    record warn home_conf_listen8443 "legacy listen 8443 still present"
+  else
+    record pass home_conf_listen8443 "no legacy listen 8443"
+  fi
+}
+
+check_scratch() {
+  if [[ -d "${SCRATCH_DIR}" ]]; then
+    record pass scratch_dir "${SCRATCH_DIR} exists"
+  elif ((FIX)); then
+    ensure_scratch_layout
+    record pass scratch_dir "created ${SCRATCH_DIR}"
+  else
+    record fail scratch_dir "missing ${SCRATCH_DIR} (re-run with --fix or setup-service)"
+    return
+  fi
+  local sub
+  for sub in logs certs/live client_body_temp proxy_temp; do
+    if [[ -d "${SCRATCH_DIR}/${sub}" ]]; then
+      record pass "scratch_${sub}" "${sub}/ OK"
+    elif ((FIX)); then
+      ensure_scratch_layout
+      record pass "scratch_${sub}" "created ${sub}/"
+    else
+      record fail "scratch_${sub}" "missing ${SCRATCH_DIR}/${sub} (re-run with --fix)"
+    fi
+  done
+}
+
+check_dhparam() {
+  local path="${SCRATCH_DIR}/dhparam.pem"
+  if [[ -f "${path}" && -s "${path}" ]]; then
+    record pass dhparam "${path}"
+    return
+  fi
+  if ((FIX)); then
+    if ! command -v openssl >/dev/null 2>&1; then
+      record fail dhparam "cannot generate — openssl missing"
+      return
+    fi
+    ensure_scratch_layout
+    echo "Generating ${path} (may take a minute)..." >&2
+    openssl dhparam -out "${path}" 2048 >/dev/null 2>&1
+    record pass dhparam "generated ${path}"
+  else
+    record fail dhparam "missing ${path} (re-run with --fix)"
+  fi
+}
+
+check_certs() {
+  if [[ -z "${HOME_NGINX_CONF}" || ! -f "${HOME_NGINX_CONF}" ]]; then
+    record warn certs "skipped — no home nginx.conf"
+    return
+  fi
+  local name d missing=0
+  local -a names=()
+  mapfile -t names < <(extract_server_names "${HOME_NGINX_CONF}")
+  if ((${#names[@]} == 0)); then
+    record warn certs "no server_name entries found in conf"
+    return
+  fi
+  for name in "${names[@]}"; do
+    d="${SCRATCH_DIR}/certs/live/${name}"
+    if [[ -f "${d}/fullchain.pem" && -f "${d}/privkey.pem" ]]; then
+      record pass "cert_${name}" "${d}/{fullchain,privkey}.pem"
+    elif ((FIX)); then
+      if ! command -v openssl >/dev/null 2>&1; then
+        record fail "cert_${name}" "missing certs and openssl unavailable"
+        missing=1
+        continue
+      fi
+      mkdir -p "${d}"
+      openssl req -x509 -nodes -newkey rsa:2048 -days 30 \
+        -keyout "${d}/privkey.pem" -out "${d}/fullchain.pem" \
+        -subj "/CN=${name}" >/dev/null 2>&1
+      record warn "cert_${name}" "staged self-signed ${d} (replace before cutover)"
+    else
+      record fail "cert_${name}" "missing ${d}/{fullchain,privkey}.pem (re-run with --fix for staging)"
+      missing=1
+    fi
+  done
+  if ((missing == 0)); then
+    :
+  fi
+}
+
+check_downloads_root() {
+  local root="/home/house_meister/home/nginx/files/downloads"
+  if [[ -n "${HOME_NGINX_CONF}" && -f "${HOME_NGINX_CONF}" ]]; then
+    local extracted
+    extracted="$(grep -E 'root .*/nginx/files/downloads' "${HOME_NGINX_CONF}" | head -n1 | awk '{print $2}' | tr -d ';' || true)"
+    if [[ -n "${extracted}" ]]; then
+      root="${extracted}"
+    fi
+  fi
+  if [[ -d "${root}" ]]; then
+    record pass downloads_root "${root}"
+  else
+    record warn downloads_root "missing ${root} (downloads vhost)"
+  fi
+}
+
+check_unit_templates() {
+  local f
+  for f in home-warden.socket home-warden.service; do
+    if [[ -f "${REPO_DIR}/etc/systemd/${f}" ]]; then
+      record pass "template_${f}" "${REPO_DIR}/etc/systemd/${f}"
+    else
+      record fail "template_${f}" "missing ${REPO_DIR}/etc/systemd/${f}"
+    fi
+  done
+  if [[ -x "${REPO_DIR}/scripts/setup-service" ]]; then
+    record pass setup_service "scripts/setup-service executable"
+  elif [[ -f "${REPO_DIR}/scripts/setup-service" ]]; then
+    record warn setup_service "scripts/setup-service not executable"
+  else
+    record fail setup_service "scripts/setup-service missing"
+  fi
+}
+
+check_distro_nginx() {
+  local en ac
+  en="$(systemctl is-enabled nginx.service 2>/dev/null || true)"
+  ac="$(systemctl is-active nginx.service 2>/dev/null || true)"
+  if [[ "${en}" == masked ]]; then
+    record pass distro_nginx "nginx.service masked"
+  elif [[ "${ac}" == active ]]; then
+    record warn distro_nginx "nginx.service active — setup-service will disable/mask it (needs sudo)"
+  elif [[ "${en}" == enabled ]]; then
+    record warn distro_nginx "nginx.service enabled but inactive — should be masked before home-warden owns 80/443"
+  else
+    record pass distro_nginx "nginx.service not competing (enabled=${en:-n/a} active=${ac:-n/a})"
+  fi
+}
+
+check_ports() {
+  if command -v ss >/dev/null 2>&1; then
+    if ss -tln | grep -qE ':80\s'; then
+      record warn port_80 "something listening on :80 — confirm it will be home-warden.socket"
+    else
+      record pass port_80 "nothing listening on :80"
+    fi
+    if ss -tln | grep -qE ':443\s'; then
+      record warn port_443 "something listening on :443"
+    else
+      record pass port_443 "nothing listening on :443"
+    fi
+  else
+    record warn ports "ss not available — skipped port check"
+  fi
+}
+
+check_home_warden_units() {
+  local en ac
+  en="$(systemctl is-enabled home-warden.socket 2>/dev/null || true)"
+  ac="$(systemctl is-active home-warden.socket 2>/dev/null || true)"
+  if [[ "${en}" == enabled || "${ac}" == active || "${ac}" == listening ]]; then
+    record pass home_warden_socket "home-warden.socket enabled=${en:-n/a} active=${ac:-n/a}"
+  else
+    record warn home_warden_socket "not installed/enabled yet — run ./scripts/setup-service (sudo)"
+  fi
+}
+
+print_json() {
+  local row status code message first=1
+  printf '{"pass":%d,"warn":%d,"fail":%d,"scratch_dir":%s,"home_nginx_conf":%s,"checks":[' \
+    "${PASS}" "${WARN}" "${FAIL}" \
+    "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${SCRATCH_DIR}")" \
+    "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${HOME_NGINX_CONF:-}")"
+  for row in "${RESULTS[@]}"; do
+    status="${row%%|*}"
+    rest="${row#*|}"
+    code="${rest%%|*}"
+    message="${rest#*|}"
+    if ((first)); then first=0; else printf ','; fi
+    printf '{"status":%s,"code":%s,"message":%s}' \
+      "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${status}")" \
+      "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${code}")" \
+      "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${message}")"
+  done
+  printf ']}\n'
+}
+
+print_summary() {
+  echo
+  echo "Summary: ${PASS} pass, ${WARN} warn, ${FAIL} fail"
+  echo "  scratch:  ${SCRATCH_DIR}"
+  echo "  nginx.conf: ${HOME_NGINX_CONF:-<unset>}"
+  echo "  owner:    ${OWNER}"
+  if ((FAIL > 0)); then
+    echo
+    echo "Next: re-run with --fix for safe remediations, then:"
+    echo "  ./scripts/setup-service"
+    echo "See docs/host-prerequisites.md"
+  elif ((WARN > 0)); then
+    echo
+    echo "Required checks passed with warnings. Review WARN lines before cutover."
+  else
+    echo
+    echo "All checks passed. Install with: ./scripts/setup-service"
+  fi
+}
+
+main() {
+  if ((JSON == 0)); then
+    echo "home-warden bootstrap (check$([[ ${FIX} -eq 1 ]] && echo '+fix'))"
+    echo "repo: ${REPO_DIR}"
+    echo
+  fi
+
+  check_os
+  check_systemd
+  check_nginx_binary
+  check_packages
+  check_home_conf
+  check_scratch
+  check_modules_enabled
+  check_dhparam
+  check_certs
+  check_downloads_root
+  check_unit_templates
+  check_distro_nginx
+  check_ports
+  check_home_warden_units
+
+  if ((JSON)); then
+    print_json
+  else
+    print_summary
+  fi
+
+  if ((FAIL > 0)); then
+    exit 1
+  fi
+  exit 0
+}
+
+main "$@"
