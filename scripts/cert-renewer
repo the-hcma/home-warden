@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# Renew or obtain Let's Encrypt certs (DNS-01 via Cloudflare) for home-warden.
+#
+# Migrated from thehcma/home nginx/scripts/cert_renewer. Paths default to the
+# home-warden scratch layout used by nginx -p / systemd units.
+#
+# Env overrides:
+#   SCRATCH_DIR                 default: ~/scratch/home-warden
+#   CERTBOT_CONFIG_DIR          default: $SCRATCH_DIR/certs  (live/ under here)
+#   CLOUDFLARE_CREDENTIALS      default: ~/cloudflare.conf
+#   CERTBOT_EMAIL               default: hcma@hcma.info
+#   HOME_WARDEN_RELOAD          if 1 (default), systemctl reload home-warden.service
+#   CERTBOT_DOMAINS_FILE        optional file with one domain per line
+#
+# Usage:
+#   ./scripts/cert-renewer
+#   CERTBOT_DOMAINS_FILE=./etc/certbot-domains ./scripts/cert-renewer
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly script_dir
+repo_dir="$(cd "${script_dir}/.." && pwd)"
+readonly repo_dir
+
+SCRATCH_DIR="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
+CERTBOT_CONFIG_DIR="${CERTBOT_CONFIG_DIR:-${SCRATCH_DIR}/certs}"
+CLOUDFLARE_CREDENTIALS="${CLOUDFLARE_CREDENTIALS:-${HOME}/cloudflare.conf}"
+CERTBOT_EMAIL="${CERTBOT_EMAIL:-hcma@hcma.info}"
+HOME_WARDEN_RELOAD="${HOME_WARDEN_RELOAD:-1}"
+CERTBOT_DOMAINS_FILE="${CERTBOT_DOMAINS_FILE:-${repo_dir}/etc/certbot-domains}"
+certbot_bin="${CERTBOT:-/usr/bin/certbot}"
+
+DEFAULT_DOMAINS=(
+  bunnify.hcma.info
+  db.hcma.info
+  downloads.hcma.info
+  fpdf.hcma.info
+  login.house.hcma.info
+  mytracks.hcma.info
+  stash.house.hcma.info
+  status.house.hcma.info
+  voxlane.hcma.info
+)
+
+load_domains() {
+  local -a domains=()
+  local line
+  if [[ -f "${CERTBOT_DOMAINS_FILE}" ]]; then
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
+      domains+=("${line}")
+    done <"${CERTBOT_DOMAINS_FILE}"
+  else
+    domains=("${DEFAULT_DOMAINS[@]}")
+  fi
+  printf '%s\n' "${domains[@]}"
+}
+
+if [[ ! -x "${certbot_bin}" ]]; then
+  echo "cert-renewer: certbot not found at ${certbot_bin}" >&2
+  exit 2
+fi
+if [[ ! -f "${CLOUDFLARE_CREDENTIALS}" ]]; then
+  echo "cert-renewer: Cloudflare credentials missing: ${CLOUDFLARE_CREDENTIALS}" >&2
+  exit 2
+fi
+
+mkdir -p "${CERTBOT_CONFIG_DIR}" "${SCRATCH_DIR}/logs"
+
+mapfile -t domains < <(load_domains)
+if ((${#domains[@]} == 0)); then
+  echo "cert-renewer: no domains configured" >&2
+  exit 2
+fi
+
+echo "cert-renewer: config-dir=${CERTBOT_CONFIG_DIR} domains=${#domains[@]}"
+
+for domain in "${domains[@]}"; do
+  live_cert="${CERTBOT_CONFIG_DIR}/live/${domain}/fullchain.pem"
+  if [[ -f "${live_cert}" ]]; then
+    echo "cert-renewer: renew existing ${domain}"
+    "${certbot_bin}" renew \
+      --server https://acme-v02.api.letsencrypt.org/directory \
+      --dns-cloudflare \
+      --dns-cloudflare-credentials "${CLOUDFLARE_CREDENTIALS}" \
+      --preferred-challenges dns-01 \
+      --work-dir "${CERTBOT_CONFIG_DIR}" \
+      --logs-dir "${SCRATCH_DIR}/logs/certbot" \
+      --config-dir "${CERTBOT_CONFIG_DIR}" \
+      -m "${CERTBOT_EMAIL}" \
+      --agree-tos \
+      --cert-name "${domain}" \
+      --non-interactive
+  else
+    echo "cert-renewer: obtain new certificate for ${domain}"
+    "${certbot_bin}" certonly \
+      -d "${domain}" \
+      --server https://acme-v02.api.letsencrypt.org/directory \
+      --dns-cloudflare \
+      --dns-cloudflare-credentials "${CLOUDFLARE_CREDENTIALS}" \
+      --preferred-challenges dns-01 \
+      --work-dir "${CERTBOT_CONFIG_DIR}" \
+      --logs-dir "${SCRATCH_DIR}/logs/certbot" \
+      --config-dir "${CERTBOT_CONFIG_DIR}" \
+      -m "${CERTBOT_EMAIL}" \
+      --agree-tos \
+      --non-interactive
+  fi
+done
+
+# Readable by the unprivileged nginx User= (no world-readable private keys ideally;
+# group/ACL can be tightened later). Match legacy chmod for bring-up.
+chmod -R u+rwX,g+rX,o-rwx "${CERTBOT_CONFIG_DIR}" || true
+find "${CERTBOT_CONFIG_DIR}/live" -type f -name 'privkey.pem' -exec chmod 640 {} \; 2>/dev/null || true
+
+if [[ "${HOME_WARDEN_RELOAD}" == "1" ]]; then
+  if systemctl is-active --quiet home-warden.service 2>/dev/null; then
+    echo "cert-renewer: reloading home-warden.service"
+    sudo systemctl reload home-warden.service
+  else
+    echo "cert-renewer: home-warden.service not active — skip reload"
+  fi
+fi
+
+echo "cert-renewer: done"

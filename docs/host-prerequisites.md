@@ -52,11 +52,21 @@ Default: `~/scratch/home-warden/` (pid, logs, temp dirs, modules symlink). Creat
 
 ## Certificates
 
-Stage readable certs for the service user before first start (or use staging self-signed):
+Live certs for nginx live under:
 
 ```text
 ~/scratch/home-warden/certs/live/<server_name>/{fullchain.pem,privkey.pem}
 ```
+
+Renew / obtain (DNS-01 Cloudflare) — scripts in **this** repo (not `thehcma/home`):
+
+```bash
+# credentials: ~/cloudflare.conf (or CLOUDFLARE_CREDENTIALS=…)
+./scripts/cert-renewer
+./scripts/cert-checker -v
+```
+
+Domain list: [`etc/certbot-domains`](../etc/certbot-domains).
 
 ```bash
 openssl dhparam -out ~/scratch/home-warden/dhparam.pem 2048
@@ -67,4 +77,4 @@ openssl dhparam -out ~/scratch/home-warden/dhparam.pem 2048
 - Units are **system** (not user linger): systemd binds 80/443 and passes fds via `Environment=NGINX=3:4;`.
 - `ConditionHost` pins the units to the designated host (machine-id **or** hostname).
 - IPv4-only listens in Milestone 1; dual-stack fd mapping is a follow-up.
-- Config watch / certbot timer are out of scope for Milestone 1 (separate issues).
+- Config watch / certbot timer systemd units are a follow-up milestone.

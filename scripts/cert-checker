@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Report SSL certificates nearing expiration under the home-warden cert tree.
+#
+# Bash replacement for the former Python cert_checker in thehcma/home
+# (avoids adding Python deps to this repo). Uses openssl x509.
+#
+# Env:
+#   CERTS_LIVE_DIR   default: ~/scratch/home-warden/certs/live
+#   ALERT_DAYS       default: 10
+#
+# Usage:
+#   ./scripts/cert-checker
+#   ./scripts/cert-checker -v
+
+set -euo pipefail
+
+CERTS_LIVE_DIR="${CERTS_LIVE_DIR:-${HOME}/scratch/home-warden/certs/live}"
+ALERT_DAYS="${ALERT_DAYS:-10}"
+VERBOSE=0
+
+usage() {
+  cat <<'EOF'
+Usage: cert-checker [-v] [-h]
+
+Report certificates under CERTS_LIVE_DIR that expire within ALERT_DAYS (default 10).
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -v | --verbose) VERBOSE=1 ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+if [[ ! -d "${CERTS_LIVE_DIR}" ]]; then
+  echo "cert-checker: missing ${CERTS_LIVE_DIR}" >&2
+  exit 2
+fi
+
+now_epoch="$(date -u +%s)"
+
+shopt -s nullglob
+for dir in "${CERTS_LIVE_DIR}"/*/; do
+  host="$(basename "${dir}")"
+  cert="${dir}/fullchain.pem"
+  [[ -f "${cert}" ]] || continue
+  # Prefer -enddate; fall back for odd builds.
+  end_raw="$(openssl x509 -in "${cert}" -noout -enddate 2>/dev/null | sed 's/^notAfter=//')"
+  if [[ -z "${end_raw}" ]]; then
+    echo "cert-checker: could not parse ${cert}" >&2
+    continue
+  fi
+  end_epoch="$(date -u -d "${end_raw}" +%s 2>/dev/null || true)"
+  if [[ -z "${end_epoch}" ]]; then
+    echo "cert-checker: could not parse date '${end_raw}' for ${host}" >&2
+    continue
+  fi
+  days=$(( (end_epoch - now_epoch) / 86400 ))
+  if ((VERBOSE)); then
+    if ((days > 0)); then
+      echo "info: ${host} expires in ${days} day(s) (${end_raw})"
+    elif ((days == 0)); then
+      echo "info: ${host} expires today (${end_raw})"
+    else
+      echo "info: ${host} expired $((-days)) day(s) ago (${end_raw})"
+    fi
+  fi
+  if ((days < ALERT_DAYS)); then
+    if ((days > 0)); then
+      echo "the SSL certificate for '${host}' will lapse in ${days} day(s)"
+    elif ((days == 0)); then
+      echo "the SSL certificate for '${host}' will expire today"
+    else
+      echo "the SSL certificate for '${host}' lapsed $((-days)) day(s) ago"
+    fi
+  fi
+done
+
+exit 0
