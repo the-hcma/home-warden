@@ -27,13 +27,13 @@ repository root using [repository-helpers](https://github.com/the-hcma/repositor
 ~/work/ai/repository-helpers/scripts/dev/start-development --worktree <stack-name> --no-interactive
 ```
 
-- **`--refresh`** (first): syncs `main` with Graphite (`gt sync`), prunes merged
-  worktrees and branches, pulls latest `main`, then exits.
+- **`--refresh`** (first): syncs `main` (marker-aware; this repo is `gh-stack`),
+  prunes merged worktrees and branches, pulls latest `main`, then exits.
 - **plain / `--worktree`** (second): repeats sync/cleanup, then creates or resumes
   a worktree under `.worktrees/<stack-name>-wt`.
 - AI agents must always pass **`--no-interactive`** and an explicit **`--worktree`** name.
-- Do not manually create worktrees or run `gt sync` separately — `start-development`
-  is the single entry point for new work.
+- Do not manually create worktrees — `start-development` is the single entry point
+  for new work.
 
 ---
 
@@ -59,16 +59,18 @@ nginx -t -c "$PWD/nginx/nginx.conf"
 
 ## Commits, Stacking & Pull Requests
 
-- This project uses **Graphite (`gt`)** for branch stacking
-  (`.github/stacking-tool` = `graphite`).
+- This project uses **GitHub Stacked PRs (`gh stack`)**
+  (`.github/stacking-tool` = `gh-stack`). Canonical skill:
+  [repository-helpers gh-stack](https://github.com/the-hcma/repository-helpers/blob/main/.cursor/skills/gh-stack/SKILL.md).
 - **Worktree-per-stack.** Every new stack is created via
   `start-development --worktree <name> --no-interactive`.
-- Never work directly on `main`. Create stacked branches with
-  `gt create <stack>/<description> -m "feat: ..."`.
+- Never work directly on `main`. Prefer
+  `~/work/ai/repository-helpers/scripts/dev/submit-stack` (dispatches via the
+  stacking marker), or `gh stack init` / `gh stack add` / `gh stack submit`.
 - Keep each branch focused on one logical change.
-- Submit with `gt submit --no-interactive --publish`.
-- To merge, add the `merge-it` label: `gh pr edit <number> --add-label merge-it`.
-  Never use `gh pr merge` directly.
+- **Do not** use Graphite (`gt`) or the `merge-it` label in this repo.
+- Merge path: **GitHub native merge queue** on `main` (squash). Enqueue with
+  `gh pr merge --auto --squash` (Enable auto-merge / Merge when ready).
 - Follow **Conventional Commits**: `feat:`, `fix:`, `chore:`, `docs:`, `test:`, `refactor:`.
 - PR descriptions must include **Summary** and **Test plan** at minimum.
 

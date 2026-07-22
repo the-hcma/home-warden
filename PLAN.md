@@ -168,7 +168,7 @@ longer than necessary.
 
 | # | Phase | Deliverable |
 | --- | --- | --- |
-| 0 | Repo bootstrap | This plan, org practices scaffolding, CI smoke |
+| 0 | Repo bootstrap | This plan, org practices scaffolding, CI smoke; **gh-stack** + GitHub MQ |
 | 1 | Minimal nginx.conf | User-writable pid/temp/log paths; `nginx -t` in CI |
 | 2 | Systemd units + setup-service | Install to `/etc/systemd/system/`, host guards |
 | 3 | Socket-activation proof | Bind 80/443 on a lab host; confirm `NGINX=` fds |
@@ -200,4 +200,4 @@ longer than necessary.
 - [ ] `certbot renew --dry-run` succeeds; timer armed
 - [ ] Sibling upstream(s) reachable through the proxy
 - [ ] `scripts/setup-service` idempotent on the designated service host
-- [ ] `github-repo-lint --strict-onboarding` clean for `the-hcma/home-warden`
+- [ ] `github-repo-lint` clean for `the-hcma/home-warden` (GitHub MQ path)
