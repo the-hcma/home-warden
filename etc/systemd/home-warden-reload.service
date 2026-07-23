@@ -4,7 +4,7 @@
 
 [Unit]
 Description=home-warden nginx -t and reload (oneshot)
-Documentation=https://github.com/the-hcma/home-warden/blob/main/PLAN.md
+Documentation=https://github.com/the-hcma/home-warden/blob/main/docs/host-prerequisites.md
 After=home-warden.service
 Requires=home-warden.socket
 

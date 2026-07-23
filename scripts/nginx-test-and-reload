@@ -8,23 +8,24 @@
 #   OWNER            unused; reload uses systemctl
 #
 # Exit:
-#   0 — test OK and reload attempted/succeeded (or service inactive: skip reload)
-#   1 — nginx -t failed (no reload)
+#   0 — test OK and reload/restart succeeded (or service inactive: skip reload)
+#   1 — nginx -t failed, or reload+restart both failed
 #   2 — usage / missing conf
+#
+# Logging: write to stdout/stderr only. When run from home-warden-reload.service,
+# systemd appends those streams to ~/scratch/home-warden/nginx-test-and-reload.log.
 
 set -euo pipefail
 
-
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 home_nginx_conf="${HOME_NGINX_CONF:-}"
-log_file="${scratch_dir}/nginx-test-and-reload.log"
 
 log() {
   local msg=$1
   local ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   mkdir -p "${scratch_dir}"
-  printf '%s %s\n' "${ts}" "${msg}" | tee -a "${log_file}"
+  printf '%s %s\n' "${ts}" "${msg}"
 }
 
 if [[ -z "${home_nginx_conf}" ]]; then
@@ -56,8 +57,12 @@ if systemctl is-active --quiet home-warden.service 2>/dev/null; then
     log "reload OK"
   else
     log "reload failed — trying restart"
-    systemctl restart home-warden.service
-    log "restart OK"
+    if systemctl restart home-warden.service; then
+      log "restart OK"
+    else
+      log "FAIL: reload and restart both failed"
+      exit 1
+    fi
   fi
 else
   log "home-warden.service not active — skip reload"

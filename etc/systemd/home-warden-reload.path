@@ -1,15 +1,18 @@
-# Watch thehcma/home nginx server conf directory; trigger test-and-reload oneshot.
+# Watch thehcma/home nginx server conf; trigger test-and-reload oneshot.
 # Template: etc/systemd/home-warden-reload.path — expanded by scripts/setup-service.
 #
-# Debounce: systemd coalesces bursts of PathModified into one activation.
-# Editors that write via rename into this directory may fire extra events;
-# fail-closed nginx -t still prevents bad reloads.
+# Watches both the conf file and its directory:
+#   - PathModified on the file catches in-place edits (e.g. sed -i)
+#   - PathModified on the directory catches rename-based editor saves
+# Debounce: systemd coalesces bursts into one activation.
+# Fail-closed nginx -t still prevents applying a broken conf.
 
 [Unit]
 Description=home-warden — watch home nginx conf for reload
-Documentation=https://github.com/the-hcma/home-warden/blob/main/PLAN.md
+Documentation=https://github.com/the-hcma/home-warden/blob/main/docs/host-prerequisites.md
 
 [Path]
+PathModified=@@HOME_NGINX_CONF@@
 PathModified=@@HOME_NGINX_CONF_DIR@@
 Unit=home-warden-reload.service
 
