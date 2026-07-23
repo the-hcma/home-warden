@@ -1,10 +1,7 @@
 # Domains managed by scripts/cert-renewer (one per line; # comments OK).
-bunnify.hcma.info
-db.hcma.info
-downloads.hcma.info
-fpdf.hcma.info
-login.house.hcma.info
-mytracks.hcma.info
-stash.house.hcma.info
-status.house.hcma.info
-voxlane.hcma.info
+# Copy to conf/certbot-domains (gitignored) and replace with your real names.
+app.example.com
+api.example.com
+downloads.example.com
+login.example.com
+status.example.com

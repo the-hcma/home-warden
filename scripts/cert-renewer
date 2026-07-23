@@ -23,7 +23,7 @@ readonly repo_dir
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 certbot_config_dir="${CERTBOT_CONFIG_DIR:-${scratch_dir}/certs}"
 cloudflare_credentials="${CLOUDFLARE_CREDENTIALS:-${repo_dir}/conf/cloudflare.ini}"
-certbot_email="${CERTBOT_EMAIL:-hcma@hcma.info}"
+certbot_email="${CERTBOT_EMAIL:-admin@example.com}"
 home_warden_reload="${HOME_WARDEN_RELOAD:-1}"
 certbot_domains_file="${CERTBOT_DOMAINS_FILE:-${repo_dir}/conf/certbot-domains}"
 certbot_bin="${CERTBOT:-/usr/bin/certbot}"
