@@ -188,7 +188,7 @@ prepare_scratch() {
     run ln -sfn /usr/lib/nginx/modules "${SCRATCH_DIR}/modules"
   fi
   if ((dry_run)); then
-    echo "DRY-RUN: would touch ${SCRATCH_DIR}/home-warden.log and logs/{error,access}.log"
+    echo "DRY-RUN: would touch ${SCRATCH_DIR}/{home-warden,cert-renewer}.log and logs/{error,access}.log"
   else
     local log
     for log in \

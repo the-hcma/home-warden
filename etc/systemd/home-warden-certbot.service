@@ -25,7 +25,7 @@ Environment=HOME_WARDEN_RELOAD=0
 EnvironmentFile=-%h/.config/home-warden-certbot.env
 # Script does the renew; reload runs privileged so the timer needs no passwordless sudo.
 ExecStart=@@REPO_DIR@@/scripts/cert-renewer
-ExecStartPost=+-/usr/bin/systemctl try-reload-or-restart home-warden.service
+ExecStartPost=-+/usr/bin/systemctl try-reload-or-restart home-warden.service
 TimeoutStartSec=1h
 TimeoutStopSec=2min
 StandardOutput=append:@@SCRATCH_DIR@@/cert-renewer.log
