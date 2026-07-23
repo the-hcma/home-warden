@@ -94,4 +94,19 @@ openssl dhparam -out ~/scratch/home-warden/dhparam.pem 2048
 - `ConditionHost` pins the units to the designated host (machine-id **or** hostname).
 - IPv4-only listens in Milestone 1; dual-stack fd mapping is a follow-up.
 - Certbot runs as the service owner; reload of `home-warden.service` is done via a privileged `ExecStartPost` on the oneshot unit (no passwordless sudo required for the timer).
-- Config-watch path unit (edit → `nginx -t` → reload) is a follow-up on this milestone stack.
+
+## Config watch → nginx -t → reload
+
+`setup-service` enables `home-warden-reload.path`, which watches the directory
+containing `HOME_NGINX_CONF` (`PathModified=`). On change it runs
+`scripts/nginx-test-and-reload` (fail closed: no reload if `-t` fails).
+
+```bash
+systemctl status home-warden-reload.path
+# Edit the home nginx.conf (valid) → expect reload in:
+tail --follow=name --retry ~/scratch/home-warden/nginx-test-and-reload.log
+# Break syntax → log shows FAIL and workers keep the last good conf
+```
+
+Editor save storms / temp files in that directory may trigger extra runs; `-t`
+still prevents applying a broken conf.

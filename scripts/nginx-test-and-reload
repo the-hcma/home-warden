@@ -16,8 +16,6 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly script_dir
-repo_dir="$(cd "${script_dir}/.." && pwd)"
-readonly repo_dir
 
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 home_nginx_conf="${HOME_NGINX_CONF:-}"
