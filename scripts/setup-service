@@ -157,6 +157,16 @@ check_prerequisites() {
       missing=1
     fi
   done
+  if ! command -v certbot >/dev/null 2>&1; then
+    echo "ERROR: certbot not on PATH — sudo apt-get install -y certbot python3-certbot-dns-cloudflare" >&2
+    missing=1
+  fi
+  for pkg in certbot python3-certbot-dns-cloudflare; do
+    if ! package_installed "${pkg}"; then
+      echo "ERROR: package ${pkg} not installed — sudo apt-get install -y certbot python3-certbot-dns-cloudflare" >&2
+      missing=1
+    fi
+  done
   if [[ ! -f "${unit_template_dir}/home-warden.service" || ! -f "${unit_template_dir}/home-warden.socket" ]]; then
     echo "ERROR: missing unit templates under ${unit_template_dir}" >&2
     missing=1
@@ -172,7 +182,7 @@ check_prerequisites() {
   if ((missing)); then
     exit 1
   fi
-  echo "Prerequisites OK (nginx + stream module + conf + unit templates)"
+  echo "Prerequisites OK (nginx + certbot + conf + unit templates)"
 }
 
 prepare_scratch() {
