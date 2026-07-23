@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Local/CI helper: bash -n + shellcheck -S info for all executable scripts/.
+set -euo pipefail
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_dir}"
+mapfile -t scripts < <(find scripts -type f -executable ! -name 'ci-shellcheck' | sort)
+if [[ ${#scripts[@]} -eq 0 ]]; then
+  echo "No executable scripts under scripts/" >&2
+  exit 1
+fi
+bash -n "${scripts[@]}"
+shellcheck -S info "${scripts[@]}"
+echo "shellcheck OK (${#scripts[@]} scripts)"

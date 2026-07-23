@@ -1,0 +1,7 @@
+# Domains managed by scripts/cert-renewer (one per line; # comments OK).
+# Copy to conf/certbot-domains (gitignored) and replace with your real names.
+app.example.com
+api.example.com
+downloads.example.com
+login.example.com
+status.example.com

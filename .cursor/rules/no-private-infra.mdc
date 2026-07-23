@@ -1,0 +1,25 @@
+---
+description: Do not commit real hostnames, emails, or other private infra details
+alwaysApply: true
+---
+
+# No private infrastructure in the repo
+
+Committed examples, docs, defaults, and comments must not expose real private
+infrastructure.
+
+## Do
+
+- Use RFC 2606 / documentation names: `example.com`, `app.example.com`, `admin@example.com`
+- Prefer placeholders: `<server_name>`, `$HOME/...`, env overrides (`HOME_NGINX_CONF`, …)
+- Keep live values in gitignored `conf/` (or host-local paths) only
+
+## Do not
+
+- Commit real personal/org domains (e.g. `*.hcma.info`, `*.house.*`)
+- Commit real emails, machine hostnames, LAN IPs, or operator home directory paths
+  as illustrative defaults in tracked files
+- Paste inventory from a live host into examples “for convenience”
+
+Repo / GitHub org URLs that identify this project (e.g. links to this repository)
+are fine; **service hostnames and operator identity are not**.

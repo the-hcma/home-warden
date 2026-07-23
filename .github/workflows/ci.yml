@@ -96,6 +96,8 @@ jobs:
     needs: guard
     if: needs.guard.outputs.skip != 'true'
     runs-on: ubuntu-latest
+    # Measured ~15s on ubuntu-latest (nginx -t + shellcheck step ~11s); 3× ≈ 45s → 1m cap.
+    timeout-minutes: 1
     steps:
       - uses: actions/checkout@v7.0.0
 
@@ -112,11 +114,19 @@ jobs:
           test -f .cursor/rules/stacking-tool.mdc
           test "$(tr -d '[:space:]' < .github/stacking-tool)" = 'gh-stack'
 
-      - name: nginx -t
+      - name: nginx -t + shellcheck
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        # Step itself was ~11s in CI; 3× → 33s hard cap (fails instead of hanging).
+        timeout-minutes: 1
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq nginx
+          set -euo pipefail
+          sudo timeout 20 apt-get update -qq
+          sudo timeout 30 apt-get install -y -qq \
+            -o DPkg::Lock::Timeout=30 \
+            nginx shellcheck
           nginx -t -c "$PWD/nginx/nginx.conf"
+          ./scripts/ci-shellcheck
 
   secret-scan:
     name: Secret Scan
