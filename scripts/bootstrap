@@ -11,21 +11,23 @@
 
 set -euo pipefail
 
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly script_dir
+repo_dir="$(cd "${script_dir}/.." && pwd)"
+readonly repo_dir
 
 OWNER="${OWNER:-$(id -un)}"
 SCRATCH_DIR="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 HOME_NGINX_CONF="${HOME_NGINX_CONF:-}"
 
-FIX=0
-JSON=0
-PASS=0
-WARN=0
-FAIL=0
+do_fix=0
+json_out=0
+pass_count=0
+warn_count=0
+fail_count=0
 
 # Collect JSON rows: status|code|message
-declare -a RESULTS=()
+declare -a results=()
 
 usage() {
   cat <<'EOF'
@@ -40,8 +42,8 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --fix) FIX=1 ;;
-    --json) JSON=1 ;;
+    --fix) do_fix=1 ;;
+    --json) json_out=1 ;;
     -h | --help)
       usage
       exit 0
@@ -59,13 +61,13 @@ record() {
   local -r status="$1"
   local -r code="$2"
   local -r message="$3"
-  RESULTS+=("${status}|${code}|${message}")
+  results+=("${status}|${code}|${message}")
   case "${status}" in
-    pass) PASS=$((PASS + 1)) ;;
-    warn) WARN=$((WARN + 1)) ;;
-    fail) FAIL=$((FAIL + 1)) ;;
+    pass) pass_count=$((pass_count + 1)) ;;
+    warn) warn_count=$((warn_count + 1)) ;;
+    fail) fail_count=$((fail_count + 1)) ;;
   esac
-  if ((JSON == 0)); then
+  if ((json_out == 0)); then
     local tag
     case "${status}" in
       pass) tag='OK  ' ;;
@@ -194,7 +196,7 @@ check_modules_enabled() {
   if [[ -e "${SCRATCH_DIR}/modules/ngx_stream_module.so" || -L "${SCRATCH_DIR}/modules" ]]; then
     record pass scratch_modules "scratch modules path OK (${SCRATCH_DIR}/modules)"
   else
-    if ((FIX)); then
+    if ((do_fix)); then
       ensure_scratch_layout
       if [[ -e "${SCRATCH_DIR}/modules/ngx_stream_module.so" || -L "${SCRATCH_DIR}/modules" ]]; then
         record pass scratch_modules "created modules symlink under ${SCRATCH_DIR}"
@@ -241,7 +243,7 @@ check_home_conf() {
 check_scratch() {
   if [[ -d "${SCRATCH_DIR}" ]]; then
     record pass scratch_dir "${SCRATCH_DIR} exists"
-  elif ((FIX)); then
+  elif ((do_fix)); then
     ensure_scratch_layout
     record pass scratch_dir "created ${SCRATCH_DIR}"
   else
@@ -252,7 +254,7 @@ check_scratch() {
   for sub in logs certs/live client_body_temp proxy_temp; do
     if [[ -d "${SCRATCH_DIR}/${sub}" ]]; then
       record pass "scratch_${sub}" "${sub}/ OK"
-    elif ((FIX)); then
+    elif ((do_fix)); then
       ensure_scratch_layout
       record pass "scratch_${sub}" "created ${sub}/"
     else
@@ -267,7 +269,7 @@ check_dhparam() {
     record pass dhparam "${path}"
     return
   fi
-  if ((FIX)); then
+  if ((do_fix)); then
     if ! command -v openssl >/dev/null 2>&1; then
       record fail dhparam "cannot generate — openssl missing"
       return
@@ -297,7 +299,7 @@ check_certs() {
     d="${SCRATCH_DIR}/certs/live/${name}"
     if [[ -f "${d}/fullchain.pem" && -f "${d}/privkey.pem" ]]; then
       record pass "cert_${name}" "${d}/{fullchain,privkey}.pem"
-    elif ((FIX)); then
+    elif ((do_fix)); then
       if ! command -v openssl >/dev/null 2>&1; then
         record fail "cert_${name}" "missing certs and openssl unavailable"
         missing=1
@@ -337,15 +339,15 @@ check_downloads_root() {
 check_unit_templates() {
   local f
   for f in home-warden.socket home-warden.service; do
-    if [[ -f "${REPO_DIR}/etc/systemd/${f}" ]]; then
-      record pass "template_${f}" "${REPO_DIR}/etc/systemd/${f}"
+    if [[ -f "${repo_dir}/etc/systemd/${f}" ]]; then
+      record pass "template_${f}" "${repo_dir}/etc/systemd/${f}"
     else
-      record fail "template_${f}" "missing ${REPO_DIR}/etc/systemd/${f}"
+      record fail "template_${f}" "missing ${repo_dir}/etc/systemd/${f}"
     fi
   done
-  if [[ -x "${REPO_DIR}/scripts/setup-service" ]]; then
+  if [[ -x "${repo_dir}/scripts/setup-service" ]]; then
     record pass setup_service "scripts/setup-service executable"
-  elif [[ -f "${REPO_DIR}/scripts/setup-service" ]]; then
+  elif [[ -f "${repo_dir}/scripts/setup-service" ]]; then
     record warn setup_service "scripts/setup-service not executable"
   else
     record fail setup_service "scripts/setup-service missing"
@@ -398,10 +400,10 @@ check_home_warden_units() {
 print_json() {
   local row status code message first=1
   printf '{"pass":%d,"warn":%d,"fail":%d,"scratch_dir":%s,"home_nginx_conf":%s,"checks":[' \
-    "${PASS}" "${WARN}" "${FAIL}" \
+    "${pass_count}" "${warn_count}" "${fail_count}" \
     "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${SCRATCH_DIR}")" \
     "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${HOME_NGINX_CONF:-}")"
-  for row in "${RESULTS[@]}"; do
+  for row in "${results[@]}"; do
     status="${row%%|*}"
     rest="${row#*|}"
     code="${rest%%|*}"
@@ -417,16 +419,16 @@ print_json() {
 
 print_summary() {
   echo
-  echo "Summary: ${PASS} pass, ${WARN} warn, ${FAIL} fail"
+  echo "Summary: ${pass_count} pass, ${warn_count} warn, ${fail_count} fail"
   echo "  scratch:  ${SCRATCH_DIR}"
   echo "  nginx.conf: ${HOME_NGINX_CONF:-<unset>}"
   echo "  owner:    ${OWNER}"
-  if ((FAIL > 0)); then
+  if ((fail_count > 0)); then
     echo
     echo "Next: re-run with --fix for safe remediations, then:"
     echo "  ./scripts/setup-service"
     echo "See docs/host-prerequisites.md"
-  elif ((WARN > 0)); then
+  elif ((warn_count > 0)); then
     echo
     echo "Required checks passed with warnings. Review WARN lines before cutover."
   else
@@ -436,9 +438,9 @@ print_summary() {
 }
 
 main() {
-  if ((JSON == 0)); then
-    echo "home-warden bootstrap (check$([[ ${FIX} -eq 1 ]] && echo '+fix'))"
-    echo "repo: ${REPO_DIR}"
+  if ((json_out == 0)); then
+    echo "home-warden bootstrap (check$([[ ${do_fix} -eq 1 ]] && echo '+fix'))"
+    echo "repo: ${repo_dir}"
     echo
   fi
 
@@ -457,13 +459,13 @@ main() {
   check_ports
   check_home_warden_units
 
-  if ((JSON)); then
+  if ((json_out)); then
     print_json
   else
     print_summary
   fi
 
-  if ((FAIL > 0)); then
+  if ((fail_count > 0)); then
     exit 1
   fi
   exit 0
