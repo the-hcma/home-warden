@@ -327,9 +327,15 @@ check_certs() {
         continue
       fi
       mkdir -p "${d}"
-      openssl req -x509 -nodes -newkey rsa:2048 -days 30 \
+      local cert_err
+      if ! cert_err="$(openssl req -x509 -nodes -newkey rsa:2048 -days 30 \
         -keyout "${d}/privkey.pem" -out "${d}/fullchain.pem" \
-        -subj "/CN=${name}" >/dev/null 2>&1
+        -subj "/CN=${name}" 2>&1)"; then
+        record fail "cert_${name}" "openssl req failed: ${cert_err}"
+        rm -rf "${d}"
+        missing=1
+        continue
+      fi
       record warn "cert_${name}" "staged self-signed ${d} (replace before cutover)"
     else
       record fail "cert_${name}" "missing ${d}/{fullchain,privkey}.pem (re-run with --fix for staging)"
