@@ -1,0 +1,14 @@
+[Unit]
+Description=home-warden nginx sockets (80/443)
+Documentation=https://github.com/the-hcma/home-warden/blob/main/PLAN.md
+
+[Socket]
+# IPv4-only for Milestone 1 so NGINX=3:4; matches two listen fds.
+# Dual-stack (four fds) can be validated as a follow-up.
+ListenStream=0.0.0.0:80
+ListenStream=0.0.0.0:443
+FreeBind=true
+Accept=no
+
+[Install]
+WantedBy=sockets.target

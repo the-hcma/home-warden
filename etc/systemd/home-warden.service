@@ -1,0 +1,23 @@
+[Unit]
+Description=home-warden nginx (unprivileged)
+Documentation=https://github.com/the-hcma/home-warden/blob/main/PLAN.md
+Requires=home-warden.socket
+After=network.target home-warden.socket
+
+[Service]
+Type=simple
+User=@@OWNER@@
+Group=@@OWNER@@
+# systemd hands ListenStream fds starting at 3 (see PLAN.md / systemd.io).
+# Order must match first listen sockets in config: http :80 then http :443 ssl.
+Environment=NGINX=3:4;
+# -p sets prefix for relative pid/temp/log paths in the home nginx.conf.
+ExecStart=/usr/sbin/nginx -p @@SCRATCH_DIR@@/ -c @@HOME_NGINX_CONF@@ -g 'daemon off;'
+ExecReload=/usr/sbin/nginx -p @@SCRATCH_DIR@@/ -c @@HOME_NGINX_CONF@@ -s reload
+Restart=on-failure
+RestartSec=5
+# Bind privileged ports only via inherited fds from home-warden.socket.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

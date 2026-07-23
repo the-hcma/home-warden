@@ -7,7 +7,8 @@ Unprivileged **nginx** front door for home services: systemd binds ports **80/44
 hands the sockets to nginx via `NGINX=` fd inheritance, and a certbot timer renews
 TLS. Target: **Ubuntu 26**, nginx **1.28.3**.
 
-> Status: planning / bootstrap. See [PLAN.md](./PLAN.md).
+> Status: Milestone 1 in progress — system socket activation + setup-service.
+> See [PLAN.md](./PLAN.md) and [issue #2](https://github.com/the-hcma/home-warden/issues/2).
 
 ## Why
 
@@ -21,13 +22,24 @@ home-warden owns that role without keeping a root nginx process.
 | --- | --- |
 | [PLAN.md](./PLAN.md) | Architecture, unit sketches, phases, risks |
 | [AGENTS.md](./AGENTS.md) | Contributor / agent ground rules |
+| [docs/host-prerequisites.md](./docs/host-prerequisites.md) | Ubuntu 26 host install / proof steps |
+
+## Install (service host)
+
+```bash
+# Config source of truth: thehcma/home → nginx/server/nginx.conf
+# Optional: HOME_NGINX_CONF=/path/to/nginx/server/nginx.conf
+./scripts/setup-service
+# setup-service runs sudo nginx -t, installs units, and starts the service.
+systemctl status home-warden.socket home-warden.service
+```
 
 ## Quick status
 
 ```bash
-# After install (phase 2+):
 systemctl status home-warden.socket home-warden.service
-systemctl list-timers home-warden-certbot.timer
+# Certbot timer arrives in a later milestone:
+# systemctl list-timers home-warden-certbot.timer
 ```
 
 ## Development
