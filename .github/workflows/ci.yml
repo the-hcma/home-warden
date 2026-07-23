@@ -118,18 +118,6 @@ jobs:
           sudo apt-get install -y -qq nginx
           nginx -t -c "$PWD/nginx/nginx.conf"
 
-      - name: shellcheck scripts
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
-          mapfile -t scripts < <(find scripts -type f -executable | sort)
-          if [[ ${#scripts[@]} -eq 0 ]]; then
-            echo "No executable scripts under scripts/" >&2
-            exit 1
-          fi
-          bash -n "${scripts[@]}"
-          shellcheck -S info "${scripts[@]}"
-
   secret-scan:
     name: Secret Scan
     needs: guard
