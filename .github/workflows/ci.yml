@@ -96,6 +96,7 @@ jobs:
     needs: guard
     if: needs.guard.outputs.skip != 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.0
 
@@ -112,16 +113,17 @@ jobs:
           test -f .cursor/rules/stacking-tool.mdc
           test "$(tr -d '[:space:]' < .github/stacking-tool)" = 'gh-stack'
 
-      - name: nginx -t
+      - name: nginx -t + shellcheck
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq nginx
+          set -euo pipefail
+          # Bound apt so a stuck mirror/lock fails the job instead of running forever.
+          sudo timeout 120 apt-get update -qq
+          sudo timeout 180 apt-get install -y -qq \
+            -o DPkg::Lock::Timeout=60 \
+            nginx shellcheck
           nginx -t -c "$PWD/nginx/nginx.conf"
-
-      - name: shellcheck scripts
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
           ./scripts/ci-shellcheck
 
   secret-scan:
