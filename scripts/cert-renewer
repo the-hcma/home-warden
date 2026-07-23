@@ -82,6 +82,7 @@ for domain in "${domains[@]}"; do
     echo "cert-renewer: obtain new certificate for ${domain}"
     "${certbot_bin}" certonly \
       -d "${domain}" \
+      --cert-name "${domain}" \
       --server https://acme-v02.api.letsencrypt.org/directory \
       --dns-cloudflare \
       --dns-cloudflare-credentials "${cloudflare_credentials}" \
@@ -101,7 +102,13 @@ find "${certbot_config_dir}/live" -type f -name 'privkey.pem' -exec chmod 640 {}
 if [[ "${home_warden_reload}" == "1" ]]; then
   if systemctl is-active --quiet home-warden.service 2>/dev/null; then
     echo "cert-renewer: reloading home-warden.service"
-    sudo systemctl reload home-warden.service
+    if ! sudo systemctl reload home-warden.service; then
+      echo "cert-renewer: reload failed — trying restart" >&2
+      if ! sudo systemctl restart home-warden.service; then
+        echo "cert-renewer: ERROR: could not reload/restart home-warden.service" >&2
+        exit 1
+      fi
+    fi
   else
     echo "cert-renewer: home-warden.service not active — skip reload"
   fi
