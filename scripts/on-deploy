@@ -2,7 +2,7 @@
 # scripts/on-deploy — deploy hook called by scripts/setup-service.
 #
 # home-warden has no build step. This hook:
-#   1. Ensures scratch layout + modules symlink + empty log files (for tail --retry)
+#   1. Ensures scratch layout + durable conf/certs dirs + modules symlink + empty log files
 #   2. Optionally validates nginx config (sudo nginx -t when passwordless sudo works)
 #   3. Records the deployed git SHA under ~/scratch/home-warden/on-deploy-sha
 #
@@ -22,6 +22,7 @@ readonly repo_dir
 
 owner="${OWNER:-$(id -un)}"
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
+conf_dir="${CONF_DIR:-${HOME}/conf/home-warden}"
 home_nginx_conf="${HOME_NGINX_CONF:-}"
 readonly sha_file="${scratch_dir}/on-deploy-sha"
 readonly service_log="${scratch_dir}/home-warden.log"
@@ -48,12 +49,14 @@ resolve_home_nginx_conf() {
 prepare_scratch() {
   mkdir -p \
     "${scratch_dir}/logs" \
-    "${scratch_dir}/certs/live" \
+    "${scratch_dir}/logs/certbot" \
+    "${scratch_dir}/certbot-work" \
     "${scratch_dir}/client_body_temp" \
     "${scratch_dir}/proxy_temp" \
     "${scratch_dir}/fastcgi_temp" \
     "${scratch_dir}/uwsgi_temp" \
-    "${scratch_dir}/scgi_temp"
+    "${scratch_dir}/scgi_temp" \
+    "${conf_dir}/certs/live"
   if [[ -d /usr/lib/nginx/modules ]]; then
     ln -sfn /usr/lib/nginx/modules "${scratch_dir}/modules"
   fi

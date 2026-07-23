@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# In a linked git worktree, symlink gitignored conf/ runtime files from the
+# primary clone so secrets (Cloudflare token, domains) are edited once.
+#
+# Files (under conf/):
+#   cloudflare.ini
+#   certbot-domains
+#
+# Usage:
+#   ./scripts/link-runtime-conf
+#   ./scripts/link-runtime-conf --dry-run
+#   ./scripts/link-runtime-conf -q
+#
+# No-op when already in the primary worktree, or when git is unavailable.
+# Safe to call from cert-renewer / tests before reading conf/.
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly script_dir
+repo_dir="$(cd "${script_dir}/.." && pwd)"
+readonly repo_dir
+
+dry_run=0
+quiet=0
+
+usage() {
+  cat <<'EOF'
+Usage: link-runtime-conf [--dry-run] [-q|--quiet] [-h|--help]
+
+Symlink conf/cloudflare.ini and conf/certbot-domains from the primary git
+worktree when this checkout is a linked worktree.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) dry_run=1 ;;
+    -q | --quiet) quiet=1 ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+log() {
+  if ((quiet == 0)); then
+    printf '%s\n' "$*"
+  fi
+}
+
+if ! command -v git >/dev/null 2>&1; then
+  log "link-runtime-conf: git not found — skip"
+  exit 0
+fi
+if ! git -C "${repo_dir}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  log "link-runtime-conf: not a git worktree — skip"
+  exit 0
+fi
+
+primary_dir="$(
+  git -C "${repo_dir}" worktree list --porcelain \
+    | awk '/^worktree / { sub(/^worktree /, ""); print; exit }'
+)"
+if [[ -z "${primary_dir}" ]]; then
+  log "link-runtime-conf: could not resolve primary worktree — skip"
+  exit 0
+fi
+
+# Resolve for reliable compare (worktree paths can differ by trailing slash / symlinks).
+repo_resolved="$(readlink -f "${repo_dir}" 2>/dev/null || printf '%s' "${repo_dir}")"
+primary_resolved="$(readlink -f "${primary_dir}" 2>/dev/null || printf '%s' "${primary_dir}")"
+if [[ "${repo_resolved}" == "${primary_resolved}" ]]; then
+  log "link-runtime-conf: already primary worktree (${repo_resolved}) — nothing to link"
+  exit 0
+fi
+
+conf_names=(cloudflare.ini certbot-domains)
+linked=0
+skipped=0
+
+for name in "${conf_names[@]}"; do
+  src="${primary_dir}/conf/${name}"
+  dst="${repo_dir}/conf/${name}"
+
+  if [[ ! -e "${src}" && ! -L "${src}" ]]; then
+    log "link-runtime-conf: skip ${name} (missing in primary: ${src})"
+    skipped=$((skipped + 1))
+    continue
+  fi
+
+  if [[ -L "${dst}" ]]; then
+    current="$(readlink "${dst}")"
+    # Absolute target preferred for clarity across shells.
+    want="${src}"
+    if [[ "${current}" == "${want}" ]] || [[ "$(readlink -f "${dst}" 2>/dev/null || true)" == "$(readlink -f "${src}" 2>/dev/null || true)" ]]; then
+      log "link-runtime-conf: ok ${name} → ${src}"
+      continue
+    fi
+    log "link-runtime-conf: retarget ${name} (${current} → ${src})"
+  elif [[ -e "${dst}" ]]; then
+    log "link-runtime-conf: replace regular file ${name} with symlink → ${src}"
+  else
+    log "link-runtime-conf: link ${name} → ${src}"
+  fi
+
+  if ((dry_run)); then
+    linked=$((linked + 1))
+    continue
+  fi
+
+  mkdir -p "$(dirname "${dst}")"
+  # Remove existing file/symlink so ln -sfn is unambiguous on all platforms.
+  rm -f "${dst}"
+  ln -sfn "${src}" "${dst}"
+  linked=$((linked + 1))
+done
+
+if ((dry_run)); then
+  log "link-runtime-conf: dry-run complete (would link ${linked}, skipped ${skipped})"
+else
+  log "link-runtime-conf: done (linked/updated ${linked}, skipped ${skipped})"
+fi

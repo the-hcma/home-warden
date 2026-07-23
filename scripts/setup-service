@@ -2,7 +2,7 @@
 # Install home-warden system socket + service (privileged ports via systemd).
 # Expands etc/systemd templates into /etc/systemd/system/ with sudo.
 #
-# Placeholders: @@OWNER@@ @@SCRATCH_DIR@@ @@HOME_NGINX_CONF@@
+# Placeholders: @@OWNER@@ @@SCRATCH_DIR@@ @@CONF_DIR@@ @@HOME_NGINX_CONF@@
 # Injects ConditionHost=|<machine-id> and ConditionHost=|<hostname> (OR).
 #
 # Flow (non-dry-run):
@@ -20,6 +20,7 @@
 #   HOME_NGINX_CONF  Absolute path to thehcma/home nginx.conf
 #   OWNER            Service user (default: current user)
 #   SCRATCH_DIR      Runtime prefix for nginx -p (default: ~/scratch/home-warden)
+#   CONF_DIR         Durable SSL material (default: ~/conf/home-warden)
 
 set -euo pipefail
 
@@ -36,6 +37,7 @@ readonly host_fqdn_file="${host_config_dir}/user-services-host-fqdn"
 
 OWNER="${OWNER:-$(id -un)}"
 SCRATCH_DIR="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
+CONF_DIR="${CONF_DIR:-${HOME}/conf/home-warden}"
 HOME_NGINX_CONF="${HOME_NGINX_CONF:-}"
 DEPLOYED_COMMIT="${DEPLOYED_COMMIT:-}"
 readonly default_home_nginx_conf="${HOME}/home/nginx/server/nginx.conf"
@@ -197,12 +199,14 @@ check_prerequisites() {
 prepare_scratch() {
   run mkdir -p \
     "${SCRATCH_DIR}/logs" \
-    "${SCRATCH_DIR}/certs/live" \
+    "${SCRATCH_DIR}/logs/certbot" \
+    "${SCRATCH_DIR}/certbot-work" \
     "${SCRATCH_DIR}/client_body_temp" \
     "${SCRATCH_DIR}/proxy_temp" \
     "${SCRATCH_DIR}/fastcgi_temp" \
     "${SCRATCH_DIR}/uwsgi_temp" \
-    "${SCRATCH_DIR}/scgi_temp"
+    "${SCRATCH_DIR}/scgi_temp" \
+    "${CONF_DIR}/certs/live"
   if [[ -d /usr/lib/nginx/modules ]]; then
     run ln -sfn /usr/lib/nginx/modules "${SCRATCH_DIR}/modules"
   fi
@@ -254,6 +258,7 @@ expand_unit() {
     sed \
       -e "s|@@OWNER@@|${OWNER}|g" \
       -e "s|@@SCRATCH_DIR@@|${SCRATCH_DIR}|g" \
+      -e "s|@@CONF_DIR@@|${CONF_DIR}|g" \
       -e "s|@@HOME_NGINX_CONF@@|${HOME_NGINX_CONF}|g" \
       -e "s|@@HOME_NGINX_CONF_DIR@@|${home_nginx_conf_dir}|g" \
       -e "s|@@REPO_DIR@@|${repo_dir}|g" \
@@ -329,6 +334,8 @@ print_status() {
   echo "  repo:            ${repo_dir}"
   echo "  owner:           ${OWNER}"
   echo "  scratch:         ${SCRATCH_DIR}"
+  echo "  conf:            ${CONF_DIR}"
+  echo "  certs:           ${CONF_DIR}/certs/live"
   echo "  home nginx.conf: ${HOME_NGINX_CONF:-<unset>}"
   echo "  deployed commit: ${DEPLOYED_COMMIT:-$(git -C "${repo_dir}" rev-parse --short HEAD 2>/dev/null || echo '<unset>')}"
   echo "  service log:     ${SCRATCH_DIR}/home-warden.log"
