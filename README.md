@@ -29,8 +29,9 @@ home-warden owns that role without keeping a root nginx process.
 ```bash
 # Config source of truth: thehcma/home → nginx/server/nginx.conf
 # Optional: HOME_NGINX_CONF=/path/to/nginx/server/nginx.conf
-./scripts/setup-service
-# setup-service runs sudo nginx -t, installs units, and starts the service.
+./scripts/bootstrap           # verify prerequisites
+./scripts/bootstrap --fix     # optional: scratch, dhparam, staging certs
+./scripts/setup-service       # nginx -t, install units, start service
 systemctl status home-warden.socket home-warden.service
 ```
 
