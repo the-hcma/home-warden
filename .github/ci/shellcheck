@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Consumer wrapper for repository-helpers scripts/dev/pre-pr-checks.
+# Delegates to the same checker GitHub Actions Validate runs.
+set -euo pipefail
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+exec "${repo_dir}/scripts/ci-shellcheck"

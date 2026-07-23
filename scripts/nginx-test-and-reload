@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Fail-closed: nginx -t then systemctl reload home-warden.service.
+# Used by home-warden-reload.service (systemd path unit).
+#
+# Env:
+#   HOME_NGINX_CONF  nginx -c path (required unless default resolve works)
+#   SCRATCH_DIR      default: ~/scratch/home-warden
+#   OWNER            unused; reload uses systemctl
+#
+# Exit:
+#   0 — test OK and reload/restart succeeded (or service inactive: skip reload)
+#   1 — nginx -t failed, or reload+restart both failed
+#   2 — usage / missing conf
+#
+# Logging: write to stdout/stderr only. When run from home-warden-reload.service,
+# systemd appends those streams to ~/scratch/home-warden/nginx-test-and-reload.log.
+
+set -euo pipefail
+
+scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
+home_nginx_conf="${HOME_NGINX_CONF:-}"
+
+log() {
+  local msg=$1
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  mkdir -p "${scratch_dir}"
+  printf '%s %s\n' "${ts}" "${msg}"
+}
+
+if [[ -z "${home_nginx_conf}" ]]; then
+  if [[ -f "${HOME}/home/nginx/server/nginx.conf" ]]; then
+    home_nginx_conf="${HOME}/home/nginx/server/nginx.conf"
+  elif [[ -f /home/house_meister/home/nginx/server/nginx.conf ]]; then
+    home_nginx_conf=/home/house_meister/home/nginx/server/nginx.conf
+  else
+    log "ERROR: set HOME_NGINX_CONF"
+    exit 2
+  fi
+fi
+
+if [[ ! -f "${home_nginx_conf}" ]]; then
+  log "ERROR: conf not found: ${home_nginx_conf}"
+  exit 2
+fi
+
+log "nginx -t -c ${home_nginx_conf} -p ${scratch_dir}/"
+if ! nginx -p "${scratch_dir}/" -t -c "${home_nginx_conf}"; then
+  log "FAIL: nginx -t failed — refusing reload"
+  exit 1
+fi
+log "nginx -t OK"
+
+if systemctl is-active --quiet home-warden.service 2>/dev/null; then
+  log "reloading home-warden.service"
+  if systemctl reload home-warden.service; then
+    log "reload OK"
+  else
+    log "reload failed — trying restart"
+    if systemctl restart home-warden.service; then
+      log "restart OK"
+    else
+      log "FAIL: reload and restart both failed"
+      exit 1
+    fi
+  fi
+else
+  log "home-warden.service not active — skip reload"
+fi
+
+exit 0
