@@ -118,6 +118,12 @@ jobs:
           sudo apt-get install -y -qq nginx
           nginx -t -c "$PWD/nginx/nginx.conf"
 
+      - name: shellcheck scripts
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          ./scripts/ci-shellcheck
+
   secret-scan:
     name: Secret Scan
     needs: guard
