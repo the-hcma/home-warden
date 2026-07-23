@@ -309,7 +309,7 @@ check_certs() {
     record warn certs "skipped — no home nginx.conf"
     return
   fi
-  local name d missing=0
+  local name d
   local -a names=()
   mapfile -t names < <(extract_server_names "${HOME_NGINX_CONF}")
   if ((${#names[@]} == 0)); then
@@ -323,7 +323,6 @@ check_certs() {
     elif ((do_fix)); then
       if ! command -v openssl >/dev/null 2>&1; then
         record fail "cert_${name}" "missing certs and openssl unavailable"
-        missing=1
         continue
       fi
       mkdir -p "${d}"
@@ -333,18 +332,13 @@ check_certs() {
         -subj "/CN=${name}" 2>&1)"; then
         record fail "cert_${name}" "openssl req failed: ${cert_err}"
         rm -rf "${d}"
-        missing=1
         continue
       fi
       record warn "cert_${name}" "staged self-signed ${d} (replace before cutover)"
     else
       record fail "cert_${name}" "missing ${d}/{fullchain,privkey}.pem (re-run with --fix for staging)"
-      missing=1
     fi
   done
-  if ((missing == 0)); then
-    :
-  fi
 }
 
 check_downloads_root() {
@@ -422,6 +416,15 @@ check_home_warden_units() {
     record pass home_warden_socket "home-warden.socket enabled=${en:-n/a} active=${ac:-n/a}"
   else
     record warn home_warden_socket "not installed/enabled yet — run ./scripts/setup-service (sudo)"
+  fi
+  en="$(systemctl is-enabled home-warden.service 2>/dev/null || true)"
+  ac="$(systemctl is-active home-warden.service 2>/dev/null || true)"
+  if [[ "${en}" == enabled || "${ac}" == active ]]; then
+    record pass home_warden_service "home-warden.service enabled=${en:-n/a} active=${ac:-n/a}"
+  elif systemctl cat home-warden.service >/dev/null 2>&1; then
+    record warn home_warden_service "unit present but enabled=${en:-n/a} active=${ac:-n/a}"
+  else
+    record warn home_warden_service "not installed yet — run ./scripts/setup-service (sudo)"
   fi
 }
 
