@@ -388,9 +388,9 @@ main() {
 
   if systemctl is-active --quiet home-warden.service 2>/dev/null; then
     if ((on_deploy_rc == 0)); then
-      echo "Reloading home-warden.service (on-deploy changed)..."
-      run sudo systemctl reload home-warden.service \
-        || run sudo systemctl restart home-warden.service
+      # restart (not reload): unit Environment=DEPLOYED_COMMIT=… only refreshes on a new process
+      echo "Restarting home-warden.service (on-deploy changed)..."
+      run sudo systemctl restart home-warden.service
     fi
   else
     echo "Starting home-warden.service..."
