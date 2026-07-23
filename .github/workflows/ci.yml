@@ -96,7 +96,8 @@ jobs:
     needs: guard
     if: needs.guard.outputs.skip != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Measured ~15s on ubuntu-latest (nginx -t + shellcheck step ~11s); 3× ≈ 45s → 1m cap.
+    timeout-minutes: 1
     steps:
       - uses: actions/checkout@v7.0.0
 
@@ -116,12 +117,13 @@ jobs:
       - name: nginx -t + shellcheck
         env:
           DEBIAN_FRONTEND: noninteractive
+        # Step itself was ~11s in CI; 3× → 33s hard cap (fails instead of hanging).
+        timeout-minutes: 1
         run: |
           set -euo pipefail
-          # Bound apt so a stuck mirror/lock fails the job instead of running forever.
-          sudo timeout 120 apt-get update -qq
-          sudo timeout 180 apt-get install -y -qq \
-            -o DPkg::Lock::Timeout=60 \
+          sudo timeout 20 apt-get update -qq
+          sudo timeout 30 apt-get install -y -qq \
+            -o DPkg::Lock::Timeout=30 \
             nginx shellcheck
           nginx -t -c "$PWD/nginx/nginx.conf"
           ./scripts/ci-shellcheck
