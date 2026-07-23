@@ -1,0 +1,32 @@
+# Oneshot: renew/obtain Let's Encrypt certs for home-warden (DNS-01 Cloudflare).
+# Template: etc/systemd/home-warden-certbot.service — expanded by scripts/setup-service.
+#
+# No [Install] — activated only by home-warden-certbot.timer (or manual
+# `systemctl start home-warden-certbot.service`).
+#
+# Optional env: ~/.config/home-warden-certbot.env (see etc/home-warden-certbot.env.example).
+# Domains/credentials: conf/certbot-domains + conf/cloudflare.ini (gitignored).
+
+[Unit]
+Description=home-warden certbot renewer (oneshot)
+Documentation=https://github.com/the-hcma/home-warden/blob/main/PLAN.md
+After=network-online.target home-warden.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@@OWNER@@
+Group=@@OWNER@@
+WorkingDirectory=@@REPO_DIR@@
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HOME=%h
+Environment=SCRATCH_DIR=@@SCRATCH_DIR@@
+Environment=HOME_WARDEN_RELOAD=0
+EnvironmentFile=-%h/.config/home-warden-certbot.env
+# Script does the renew; reload runs privileged so the timer needs no passwordless sudo.
+ExecStart=@@REPO_DIR@@/scripts/cert-renewer
+ExecStartPost=+-/usr/bin/systemctl try-reload-or-restart home-warden.service
+TimeoutStartSec=1h
+TimeoutStopSec=2min
+StandardOutput=append:@@SCRATCH_DIR@@/cert-renewer.log
+StandardError=append:@@SCRATCH_DIR@@/cert-renewer.log

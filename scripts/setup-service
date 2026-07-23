@@ -161,6 +161,10 @@ check_prerequisites() {
     echo "ERROR: missing unit templates under ${unit_template_dir}" >&2
     missing=1
   fi
+  if [[ ! -f "${unit_template_dir}/home-warden-certbot.service" || ! -f "${unit_template_dir}/home-warden-certbot.timer" ]]; then
+    echo "ERROR: missing certbot unit templates under ${unit_template_dir}" >&2
+    missing=1
+  fi
   if [[ ! -f "${HOME_NGINX_CONF}" ]]; then
     echo "ERROR: HOME_NGINX_CONF not found: ${HOME_NGINX_CONF}" >&2
     missing=1
@@ -189,6 +193,7 @@ prepare_scratch() {
     local log
     for log in \
       "${SCRATCH_DIR}/home-warden.log" \
+      "${SCRATCH_DIR}/cert-renewer.log" \
       "${SCRATCH_DIR}/logs/error.log" \
       "${SCRATCH_DIR}/logs/access.log"; do
       if ! touch "${log}"; then
@@ -316,7 +321,10 @@ print_status() {
     local en
     local ac
     local pair
-    for pair in "socket:home-warden.socket" "service:home-warden.service"; do
+    for pair in \
+      "socket:home-warden.socket" \
+      "service:home-warden.service" \
+      "certbot_timer:home-warden-certbot.timer"; do
       label="${pair%%:*}"
       unit="${pair##*:}"
       en="$(systemctl is-enabled "${unit}" 2>/dev/null || true)"
@@ -380,11 +388,14 @@ main() {
   DEPLOYED_COMMIT="$(git -C "${repo_dir}" rev-parse HEAD 2>/dev/null || true)"
   expand_unit "${unit_template_dir}/home-warden.socket" "${system_unit_dir}/home-warden.socket"
   expand_unit "${unit_template_dir}/home-warden.service" "${system_unit_dir}/home-warden.service"
+  expand_unit "${unit_template_dir}/home-warden-certbot.service" "${system_unit_dir}/home-warden-certbot.service"
+  expand_unit "${unit_template_dir}/home-warden-certbot.timer" "${system_unit_dir}/home-warden-certbot.timer"
 
   mask_distro_nginx
 
   run sudo systemctl daemon-reload
   run sudo systemctl enable --now home-warden.socket
+  run sudo systemctl enable --now home-warden-certbot.timer
 
   if systemctl is-active --quiet home-warden.service 2>/dev/null; then
     if ((on_deploy_rc == 0)); then
@@ -406,6 +417,9 @@ main() {
   echo "  tail --follow=name --retry ${SCRATCH_DIR}/home-warden.log"
   echo "  tail --follow=name --retry ${SCRATCH_DIR}/logs/error.log"
   echo "  tail --follow=name --retry ${SCRATCH_DIR}/logs/access.log"
+  echo "  tail --follow=name --retry ${SCRATCH_DIR}/cert-renewer.log"
+  echo "Certbot timer: systemctl list-timers home-warden-certbot.timer"
+  echo "Manual renew:  sudo systemctl start home-warden-certbot.service"
   print_status
 }
 
