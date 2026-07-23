@@ -5,8 +5,8 @@ Target: **Ubuntu 26**, **nginx 1.28.3**, systemd **259+** (machine-id `Condition
 ## One-shot install
 
 `scripts/setup-service` owns the full bring-up: sudo prompt, package/conf checks,
-scratch layout, **`sudo nginx -t`**, unit install, mask distro nginx, enable socket,
-and start the service (refuses to start if validation fails).
+scratch layout, **`sudo nginx -t`**, optional `scripts/on-deploy`, unit install, mask
+distro nginx, enable socket, and start the service (refuses to start if validation fails).
 
 ```bash
 # Optional: set conf path if not at ~/home/nginx/server/nginx.conf
@@ -19,6 +19,14 @@ and start the service (refuses to start if validation fails).
 ```bash
 ./scripts/bootstrap           # report only
 ./scripts/bootstrap --fix     # create scratch, dhparam, staging certs, modules symlink
+```
+
+## Logs
+
+```bash
+tail --follow=name --retry ~/scratch/home-warden/home-warden.log
+tail --follow=name --retry ~/scratch/home-warden/logs/error.log
+tail --follow=name --retry ~/scratch/home-warden/logs/access.log
 ```
 
 ## Clones
@@ -40,7 +48,7 @@ sudo apt-get install -y nginx libnginx-mod-stream
 ## Scratch runtime (`nginx -p`)
 
 Default: `~/scratch/home-warden/` (pid, logs, temp dirs, modules symlink). Created by
-`setup-service`.
+`setup-service` / `on-deploy`.
 
 ## Certificates
 
