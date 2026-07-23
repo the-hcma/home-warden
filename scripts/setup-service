@@ -185,9 +185,16 @@ prepare_scratch() {
   if ((dry_run)); then
     echo "DRY-RUN: would touch ${SCRATCH_DIR}/home-warden.log and logs/{error,access}.log"
   else
-    : >>"${SCRATCH_DIR}/home-warden.log"
-    : >>"${SCRATCH_DIR}/logs/error.log"
-    : >>"${SCRATCH_DIR}/logs/access.log"
+    local log
+    for log in \
+      "${SCRATCH_DIR}/home-warden.log" \
+      "${SCRATCH_DIR}/logs/error.log" \
+      "${SCRATCH_DIR}/logs/access.log"; do
+      if ! touch "${log}"; then
+        echo "ERROR: cannot create log file ${log} (is SCRATCH_DIR writable?)" >&2
+        exit 1
+      fi
+    done
   fi
 }
 
@@ -230,8 +237,9 @@ expand_unit() {
       /^\[Unit\]$/ && !done {
         print
         print "# Service host guard (OR): machine-id or hostname"
-        print "ConditionHost=|" mid
-        print "ConditionHost=|" host
+        # Adjacent string+var concatenates (no OFS space); | prefixes OR-group.
+        printf "ConditionHost=|%s\n", mid
+        printf "ConditionHost=|%s\n", host
         done = 1
         next
       }
