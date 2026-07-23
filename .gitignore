@@ -17,3 +17,8 @@ scratch/
 # Editor / OS
 .DS_Store
 *.swp
+
+# Local conf (examples stay tracked as conf/*.example)
+conf/*
+!conf/*.example
+!conf/README.md

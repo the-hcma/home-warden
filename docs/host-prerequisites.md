@@ -10,7 +10,7 @@ distro nginx, enable socket, and start the service (refuses to start if validati
 
 ```bash
 # Optional: set conf path if not at ~/home/nginx/server/nginx.conf
-# export HOME_NGINX_CONF=/home/house_meister/home/nginx/server/nginx.conf
+# export HOME_NGINX_CONF=/path/to/nginx/server/nginx.conf
 ./scripts/setup-service
 ```
 
@@ -29,21 +29,22 @@ tail --follow=name --retry ~/scratch/home-warden/logs/error.log
 tail --follow=name --retry ~/scratch/home-warden/logs/access.log
 ```
 
-## Clones
+## Layout on the host
 
-| Path | Repo |
+| Path | Role |
 | --- | --- |
-| `~/work/ai/home-warden` | `the-hcma/home-warden` (this project) |
-| `~/home` or `/home/house_meister/home` | `thehcma/home` — config at `nginx/server/nginx.conf` |
+| Clone of this repository | Units, scripts, local `conf/` |
+| Nginx config path | Pointed at by `HOME_NGINX_CONF` (default `~/home/nginx/server/nginx.conf`) |
 
 ## Packages (pre-install)
 
 ```bash
 sudo apt-get install -y nginx libnginx-mod-stream
 # Optional: openssl for generating dhparam / staging certs
+# Optional: certbot + certbot-dns-cloudflare for TLS renewal
 ```
 
-`setup-service` verifies these packages are present and aborts with an install hint if not.
+`setup-service` verifies nginx packages are present and aborts with an install hint if not.
 
 ## Scratch runtime (`nginx -p`)
 
@@ -58,15 +59,17 @@ Live certs for nginx live under:
 ~/scratch/home-warden/certs/live/<server_name>/{fullchain.pem,privkey.pem}
 ```
 
-Renew / obtain (DNS-01 Cloudflare) — scripts in **this** repo (not `thehcma/home`):
+Local (gitignored) configuration — copy from examples under `conf/`:
+
+| Example | Runtime file |
+| --- | --- |
+| `conf/certbot-domains.example` | `conf/certbot-domains` |
+| `conf/cloudflare.ini.example` | `conf/cloudflare.ini` |
 
 ```bash
-# credentials: ~/cloudflare.conf (or CLOUDFLARE_CREDENTIALS=…)
 ./scripts/cert-renewer
-./scripts/cert-checker -v
+./scripts/cert-checker --verbose
 ```
-
-Domain list: [`etc/certbot-domains`](../etc/certbot-domains).
 
 ```bash
 openssl dhparam -out ~/scratch/home-warden/dhparam.pem 2048
