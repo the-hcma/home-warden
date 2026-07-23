@@ -102,10 +102,26 @@ version_ge() {
 
 extract_server_names() {
   local -r conf="$1"
-  awk '/^[[:space:]]*server_name / && !/^[[:space:]]*#/ { print $2 }' "${conf}" \
-    | tr -d ';' \
-    | grep -v '^_$' \
-    | sort -u
+  awk '
+    /^[[:space:]]*server_name / && !/^[[:space:]]*#/ {
+      for (i = 2; i <= NF; i++) {
+        name = $i
+        gsub(/;/, "", name)
+        if (name != "" && name != "_") print name
+      }
+    }
+  ' "${conf}" | sort -u
+}
+
+json_escape() {
+  # Pure Bash JSON string encoding (Milestone 1: no Python on ops paths).
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '"%s"' "${s}"
 }
 
 ensure_scratch_layout() {
@@ -276,7 +292,12 @@ check_dhparam() {
     fi
     ensure_scratch_layout
     echo "Generating ${path} (may take a minute)..." >&2
-    openssl dhparam -out "${path}" 2048 >/dev/null 2>&1
+    local dh_err
+    if ! dh_err="$(openssl dhparam -out "${path}" 2048 2>&1)"; then
+      record fail dhparam "openssl dhparam failed: ${dh_err}"
+      rm -f "${path}"
+      return
+    fi
     record pass dhparam "generated ${path}"
   else
     record fail dhparam "missing ${path} (re-run with --fix)"
@@ -371,12 +392,13 @@ check_distro_nginx() {
 
 check_ports() {
   if command -v ss >/dev/null 2>&1; then
-    if ss -tln | grep -qE ':80\s'; then
+    # Match local address ending in :80 / :443 (ss column 4), not ":80" mid-token.
+    if ss -H -tln 2>/dev/null | awk '$4 ~ /(^|:)80$/ { found=1 } END { exit !found }'; then
       record warn port_80 "something listening on :80 — confirm it will be home-warden.socket"
     else
       record pass port_80 "nothing listening on :80"
     fi
-    if ss -tln | grep -qE ':443\s'; then
+    if ss -H -tln 2>/dev/null | awk '$4 ~ /(^|:)443$/ { found=1 } END { exit !found }'; then
       record warn port_443 "something listening on :443"
     else
       record pass port_443 "nothing listening on :443"
@@ -398,11 +420,11 @@ check_home_warden_units() {
 }
 
 print_json() {
-  local row status code message first=1
+  local row status code message first=1 rest
   printf '{"pass":%d,"warn":%d,"fail":%d,"scratch_dir":%s,"home_nginx_conf":%s,"checks":[' \
     "${pass_count}" "${warn_count}" "${fail_count}" \
-    "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${SCRATCH_DIR}")" \
-    "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${HOME_NGINX_CONF:-}")"
+    "$(json_escape "${SCRATCH_DIR}")" \
+    "$(json_escape "${HOME_NGINX_CONF:-}")"
   for row in "${results[@]}"; do
     status="${row%%|*}"
     rest="${row#*|}"
@@ -410,9 +432,9 @@ print_json() {
     message="${rest#*|}"
     if ((first)); then first=0; else printf ','; fi
     printf '{"status":%s,"code":%s,"message":%s}' \
-      "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${status}")" \
-      "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${code}")" \
-      "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${message}")"
+      "$(json_escape "${status}")" \
+      "$(json_escape "${code}")" \
+      "$(json_escape "${message}")"
   done
   printf ']}\n'
 }
