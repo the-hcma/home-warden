@@ -28,23 +28,34 @@ home_warden_reload="${HOME_WARDEN_RELOAD:-1}"
 certbot_domains_file="${CERTBOT_DOMAINS_FILE:-${repo_dir}/conf/certbot-domains}"
 certbot_bin="${CERTBOT:-/usr/bin/certbot}"
 
+trim_ws() {
+  local s=$1
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "${s}"
+}
+
+# Fills nameref array; returns 2 on missing file / no domains (exit propagates).
 load_domains() {
-  local line
-  local -a domains=()
+  local -n out_domains=$1
+  local line trimmed
+  out_domains=()
   if [[ ! -f "${certbot_domains_file}" ]]; then
     echo "cert-renewer: missing domains file: ${certbot_domains_file}" >&2
     echo "  copy conf/certbot-domains.example → conf/certbot-domains" >&2
     return 2
   fi
   while IFS= read -r line || [[ -n "${line}" ]]; do
-    [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
-    domains+=("${line}")
+    [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+    trimmed="$(trim_ws "${line}")"
+    [[ -z "${trimmed}" ]] && continue
+    out_domains+=("${trimmed}")
   done <"${certbot_domains_file}"
-  if ((${#domains[@]} == 0)); then
+  if ((${#out_domains[@]} == 0)); then
     echo "cert-renewer: no domains listed in ${certbot_domains_file}" >&2
     return 2
   fi
-  printf '%s\n' "${domains[@]}"
+  return 0
 }
 
 if [[ ! -x "${certbot_bin}" ]]; then
@@ -59,7 +70,8 @@ fi
 
 mkdir -p "${certbot_config_dir}" "${scratch_dir}/logs/certbot"
 
-mapfile -t domains < <(load_domains)
+domains=()
+load_domains domains
 echo "cert-renewer: config-dir=${certbot_config_dir} domains=${#domains[@]}"
 
 for domain in "${domains[@]}"; do
