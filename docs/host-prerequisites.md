@@ -6,7 +6,8 @@ Target: **Ubuntu 26**, **nginx 1.28.3**, systemd **259+** (machine-id `Condition
 
 `scripts/setup-service` owns the full bring-up: sudo prompt, package/conf checks,
 scratch layout, **`sudo nginx -t`**, optional `scripts/on-deploy`, unit install, mask
-distro nginx, enable socket, and start the service (refuses to start if validation fails).
+distro nginx, enable socket + certbot timer, and start the service (refuses to start if
+validation fails).
 
 ```bash
 # Optional: set conf path if not at ~/home/nginx/server/nginx.conf
@@ -27,6 +28,7 @@ distro nginx, enable socket, and start the service (refuses to start if validati
 tail --follow=name --retry ~/scratch/home-warden/home-warden.log
 tail --follow=name --retry ~/scratch/home-warden/logs/error.log
 tail --follow=name --retry ~/scratch/home-warden/logs/access.log
+tail --follow=name --retry ~/scratch/home-warden/cert-renewer.log
 ```
 
 ## Layout on the host
@@ -41,7 +43,8 @@ tail --follow=name --retry ~/scratch/home-warden/logs/access.log
 ```bash
 sudo apt-get install -y nginx libnginx-mod-stream
 # Optional: openssl for generating dhparam / staging certs
-# Optional: certbot + certbot-dns-cloudflare for TLS renewal
+# For TLS renew:
+sudo apt-get install -y certbot python3-certbot-dns-cloudflare
 ```
 
 `setup-service` verifies nginx packages are present and aborts with an install hint if not.
@@ -66,9 +69,19 @@ Local (gitignored) configuration — copy from examples under `conf/`:
 | `conf/certbot-domains.example` | `conf/certbot-domains` |
 | `conf/cloudflare.ini.example` | `conf/cloudflare.ini` |
 
+Optional env overrides: copy [`etc/home-warden-certbot.env.example`](../etc/home-warden-certbot.env.example)
+to `~/.config/home-warden-certbot.env` (`chmod 600`) and set `CERTBOT_EMAIL` to a real
+Let's Encrypt contact.
+
 ```bash
-./scripts/cert-renewer
+# Manual / first issuance (after conf/ is filled):
+CERTBOT_EMAIL=you@example.com ./scripts/cert-renewer --dry-run
+CERTBOT_EMAIL=you@example.com ./scripts/cert-renewer
 ./scripts/cert-checker --verbose
+
+# Timer (enabled by setup-service):
+systemctl list-timers home-warden-certbot.timer
+sudo systemctl start home-warden-certbot.service   # oneshot trial
 ```
 
 ```bash
@@ -80,4 +93,5 @@ openssl dhparam -out ~/scratch/home-warden/dhparam.pem 2048
 - Units are **system** (not user linger): systemd binds 80/443 and passes fds via `Environment=NGINX=3:4;`.
 - `ConditionHost` pins the units to the designated host (machine-id **or** hostname).
 - IPv4-only listens in Milestone 1; dual-stack fd mapping is a follow-up.
-- Config watch / certbot timer systemd units are a follow-up milestone.
+- Certbot runs as the service owner; reload of `home-warden.service` is done via a privileged `ExecStartPost` on the oneshot unit (no passwordless sudo required for the timer).
+- Config-watch path unit (edit → `nginx -t` → reload) is a follow-up on this milestone stack.

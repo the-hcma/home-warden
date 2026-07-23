@@ -1,0 +1,14 @@
+# Daily timer for home-warden-certbot.service.
+# Template: etc/systemd/home-warden-certbot.timer — expanded by scripts/setup-service.
+
+[Unit]
+Description=home-warden certbot renewer — daily schedule
+Documentation=https://github.com/the-hcma/home-warden/blob/main/PLAN.md
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+Persistent=true
+Unit=home-warden-certbot.service
+
+[Install]
+WantedBy=timers.target
