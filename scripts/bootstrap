@@ -359,7 +359,13 @@ check_downloads_root() {
 
 check_unit_templates() {
   local f
-  for f in home-warden.socket home-warden.service home-warden-certbot.service home-warden-certbot.timer; do
+  for f in \
+    home-warden.socket \
+    home-warden.service \
+    home-warden-certbot.service \
+    home-warden-certbot.timer \
+    home-warden-reload.service \
+    home-warden-reload.path; do
     if [[ -f "${repo_dir}/etc/systemd/${f}" ]]; then
       record pass "template_${f}" "${repo_dir}/etc/systemd/${f}"
     else

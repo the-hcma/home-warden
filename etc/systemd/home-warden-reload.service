@@ -1,0 +1,21 @@
+# Oneshot: nginx -t then reload home-warden after config path changes.
+# Template: etc/systemd/home-warden-reload.service — expanded by scripts/setup-service.
+# No [Install] — activated only by home-warden-reload.path.
+
+[Unit]
+Description=home-warden nginx -t and reload (oneshot)
+Documentation=https://github.com/the-hcma/home-warden/blob/main/PLAN.md
+After=home-warden.service
+Requires=home-warden.socket
+
+[Service]
+Type=oneshot
+# Needs root for nginx -t against privileged paths / systemctl reload.
+Environment=HOME_NGINX_CONF=@@HOME_NGINX_CONF@@
+Environment=SCRATCH_DIR=@@SCRATCH_DIR@@
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+WorkingDirectory=@@REPO_DIR@@
+ExecStart=@@REPO_DIR@@/scripts/nginx-test-and-reload
+TimeoutStartSec=2min
+StandardOutput=append:@@SCRATCH_DIR@@/nginx-test-and-reload.log
+StandardError=append:@@SCRATCH_DIR@@/nginx-test-and-reload.log

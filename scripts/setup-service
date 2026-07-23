@@ -47,7 +47,8 @@ usage() {
   cat <<'EOF'
 Usage: setup-service [--status] [--dry-run] [-h|--help]
 
-Install/enable home-warden.socket + home-warden.service into /etc/systemd/system.
+Install/enable home-warden.socket + home-warden.service into /etc/systemd/system,
+plus certbot timer and conf-watch path unit.
 Prompts for sudo, validates nginx -t, then starts the service when validation passes.
 
   --status   Show resolved paths and unit state; do not install
@@ -175,6 +176,14 @@ check_prerequisites() {
     echo "ERROR: missing certbot unit templates under ${unit_template_dir}" >&2
     missing=1
   fi
+  if [[ ! -f "${unit_template_dir}/home-warden-reload.service" || ! -f "${unit_template_dir}/home-warden-reload.path" ]]; then
+    echo "ERROR: missing reload path unit templates under ${unit_template_dir}" >&2
+    missing=1
+  fi
+  if [[ ! -x "${repo_dir}/scripts/nginx-test-and-reload" ]]; then
+    echo "ERROR: scripts/nginx-test-and-reload missing or not executable" >&2
+    missing=1
+  fi
   if [[ ! -f "${HOME_NGINX_CONF}" ]]; then
     echo "ERROR: HOME_NGINX_CONF not found: ${HOME_NGINX_CONF}" >&2
     missing=1
@@ -204,6 +213,7 @@ prepare_scratch() {
     for log in \
       "${SCRATCH_DIR}/home-warden.log" \
       "${SCRATCH_DIR}/cert-renewer.log" \
+      "${SCRATCH_DIR}/nginx-test-and-reload.log" \
       "${SCRATCH_DIR}/logs/error.log" \
       "${SCRATCH_DIR}/logs/access.log"; do
       if ! touch "${log}"; then
@@ -234,7 +244,9 @@ expand_unit() {
   local host_name
   local machine_id
   local tmp
+  local home_nginx_conf_dir
 
+  home_nginx_conf_dir="$(dirname "${HOME_NGINX_CONF}")"
   host_name="$(config_file_first_line "${host_name_file}")"
   machine_id="$(config_file_first_line "${host_machine_id_file}")"
 
@@ -243,6 +255,7 @@ expand_unit() {
       -e "s|@@OWNER@@|${OWNER}|g" \
       -e "s|@@SCRATCH_DIR@@|${SCRATCH_DIR}|g" \
       -e "s|@@HOME_NGINX_CONF@@|${HOME_NGINX_CONF}|g" \
+      -e "s|@@HOME_NGINX_CONF_DIR@@|${home_nginx_conf_dir}|g" \
       -e "s|@@REPO_DIR@@|${repo_dir}|g" \
       -e "s|@@DEPLOYED_COMMIT@@|${DEPLOYED_COMMIT}|g" \
       "${src}"
@@ -334,7 +347,8 @@ print_status() {
     for pair in \
       "socket:home-warden.socket" \
       "service:home-warden.service" \
-      "certbot_timer:home-warden-certbot.timer"; do
+      "certbot_timer:home-warden-certbot.timer" \
+      "reload_path:home-warden-reload.path"; do
       label="${pair%%:*}"
       unit="${pair##*:}"
       en="$(systemctl is-enabled "${unit}" 2>/dev/null || true)"
@@ -400,12 +414,15 @@ main() {
   expand_unit "${unit_template_dir}/home-warden.service" "${system_unit_dir}/home-warden.service"
   expand_unit "${unit_template_dir}/home-warden-certbot.service" "${system_unit_dir}/home-warden-certbot.service"
   expand_unit "${unit_template_dir}/home-warden-certbot.timer" "${system_unit_dir}/home-warden-certbot.timer"
+  expand_unit "${unit_template_dir}/home-warden-reload.service" "${system_unit_dir}/home-warden-reload.service"
+  expand_unit "${unit_template_dir}/home-warden-reload.path" "${system_unit_dir}/home-warden-reload.path"
 
   mask_distro_nginx
 
   run sudo systemctl daemon-reload
   run sudo systemctl enable --now home-warden.socket
   run sudo systemctl enable --now home-warden-certbot.timer
+  run sudo systemctl enable --now home-warden-reload.path
 
   if systemctl is-active --quiet home-warden.service 2>/dev/null; then
     if ((on_deploy_rc == 0)); then
@@ -428,8 +445,10 @@ main() {
   echo "  tail --follow=name --retry ${SCRATCH_DIR}/logs/error.log"
   echo "  tail --follow=name --retry ${SCRATCH_DIR}/logs/access.log"
   echo "  tail --follow=name --retry ${SCRATCH_DIR}/cert-renewer.log"
+  echo "  tail --follow=name --retry ${SCRATCH_DIR}/nginx-test-and-reload.log"
   echo "Certbot timer: systemctl list-timers home-warden-certbot.timer"
   echo "Manual renew:  sudo systemctl start home-warden-certbot.service"
+  echo "Conf watch:    systemctl status home-warden-reload.path"
   print_status
 }
 
