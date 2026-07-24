@@ -1,0 +1,28 @@
+# Oneshot: probe home-warden nginx; email on fail/recovery.
+# Template: etc/systemd/home-warden-healthcheck.service — expanded by scripts/setup-service.
+#
+# No [Install] — activated only by home-warden-healthcheck.timer (or manual
+# `systemctl start home-warden-healthcheck.service`).
+#
+# Optional env: ~/.config/home-warden-healthcheck.env
+# (see etc/home-warden-healthcheck.env.example). Set HEALTHCHECK_EMAIL_TO there.
+
+[Unit]
+Description=home-warden nginx healthcheck (oneshot)
+Documentation=https://github.com/the-hcma/home-warden/blob/main/docs/host-prerequisites.md
+After=network-online.target home-warden.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@@OWNER@@
+Group=@@OWNER@@
+WorkingDirectory=@@REPO_DIR@@
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HOME=%h
+Environment=SCRATCH_DIR=@@SCRATCH_DIR@@
+EnvironmentFile=-%h/.config/home-warden-healthcheck.env
+ExecStart=@@REPO_DIR@@/scripts/healthcheck
+TimeoutStartSec=2min
+StandardOutput=append:@@SCRATCH_DIR@@/healthcheck.log
+StandardError=append:@@SCRATCH_DIR@@/healthcheck.log

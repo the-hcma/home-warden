@@ -50,7 +50,7 @@ usage() {
 Usage: setup-service [--status] [--dry-run] [-h|--help]
 
 Install/enable home-warden.socket + home-warden.service into /etc/systemd/system,
-plus certbot timer and conf-watch path unit.
+plus certbot timer, conf-watch path unit, and healthcheck timer.
 Prompts for sudo, validates nginx -t, then starts the service when validation passes.
 
   --status   Show resolved paths and unit state; do not install
@@ -182,8 +182,20 @@ check_prerequisites() {
     echo "ERROR: missing reload path unit templates under ${unit_template_dir}" >&2
     missing=1
   fi
+  if [[ ! -f "${unit_template_dir}/home-warden-healthcheck.service" || ! -f "${unit_template_dir}/home-warden-healthcheck.timer" ]]; then
+    echo "ERROR: missing healthcheck unit templates under ${unit_template_dir}" >&2
+    missing=1
+  fi
   if [[ ! -x "${repo_dir}/scripts/nginx-test-and-reload" ]]; then
     echo "ERROR: scripts/nginx-test-and-reload missing or not executable" >&2
+    missing=1
+  fi
+  if [[ ! -x "${repo_dir}/scripts/healthcheck" ]]; then
+    echo "ERROR: scripts/healthcheck missing or not executable" >&2
+    missing=1
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "ERROR: curl not on PATH — sudo apt-get install -y curl" >&2
     missing=1
   fi
   if [[ ! -f "${HOME_NGINX_CONF}" ]]; then
@@ -193,7 +205,7 @@ check_prerequisites() {
   if ((missing)); then
     exit 1
   fi
-  echo "Prerequisites OK (nginx + certbot + conf + unit templates)"
+  echo "Prerequisites OK (nginx + certbot + curl + conf + unit templates)"
 }
 
 prepare_scratch() {
@@ -211,13 +223,14 @@ prepare_scratch() {
     run ln -sfn /usr/lib/nginx/modules "${SCRATCH_DIR}/modules"
   fi
   if ((dry_run)); then
-    echo "DRY-RUN: would touch ${SCRATCH_DIR}/{home-warden,cert-renewer,nginx-test-and-reload}.log and logs/{error,access}.log"
+    echo "DRY-RUN: would touch ${SCRATCH_DIR}/{home-warden,cert-renewer,nginx-test-and-reload,healthcheck}.log and logs/{error,access}.log"
   else
     local log
     for log in \
       "${SCRATCH_DIR}/home-warden.log" \
       "${SCRATCH_DIR}/cert-renewer.log" \
       "${SCRATCH_DIR}/nginx-test-and-reload.log" \
+      "${SCRATCH_DIR}/healthcheck.log" \
       "${SCRATCH_DIR}/logs/error.log" \
       "${SCRATCH_DIR}/logs/access.log"; do
       if ! touch "${log}"; then
@@ -355,7 +368,8 @@ print_status() {
       "socket:home-warden.socket" \
       "service:home-warden.service" \
       "certbot_timer:home-warden-certbot.timer" \
-      "reload_path:home-warden-reload.path"; do
+      "reload_path:home-warden-reload.path" \
+      "healthcheck_timer:home-warden-healthcheck.timer"; do
       label="${pair%%:*}"
       unit="${pair##*:}"
       en="$(systemctl is-enabled "${unit}" 2>/dev/null || true)"
@@ -423,6 +437,8 @@ main() {
   expand_unit "${unit_template_dir}/home-warden-certbot.timer" "${system_unit_dir}/home-warden-certbot.timer"
   expand_unit "${unit_template_dir}/home-warden-reload.service" "${system_unit_dir}/home-warden-reload.service"
   expand_unit "${unit_template_dir}/home-warden-reload.path" "${system_unit_dir}/home-warden-reload.path"
+  expand_unit "${unit_template_dir}/home-warden-healthcheck.service" "${system_unit_dir}/home-warden-healthcheck.service"
+  expand_unit "${unit_template_dir}/home-warden-healthcheck.timer" "${system_unit_dir}/home-warden-healthcheck.timer"
 
   mask_distro_nginx
 
@@ -430,6 +446,7 @@ main() {
   run sudo systemctl enable --now home-warden.socket
   run sudo systemctl enable --now home-warden-certbot.timer
   run sudo systemctl enable --now home-warden-reload.path
+  run sudo systemctl enable --now home-warden-healthcheck.timer
 
   if systemctl is-active --quiet home-warden.service 2>/dev/null; then
     if ((on_deploy_rc == 0)); then
@@ -453,9 +470,12 @@ main() {
   echo "  tail --follow=name --retry ${SCRATCH_DIR}/logs/access.log"
   echo "  tail --follow=name --retry ${SCRATCH_DIR}/cert-renewer.log"
   echo "  tail --follow=name --retry ${SCRATCH_DIR}/nginx-test-and-reload.log"
-  echo "Certbot timer: systemctl list-timers home-warden-certbot.timer"
-  echo "Manual renew:  sudo systemctl start home-warden-certbot.service"
-  echo "Conf watch:    systemctl status home-warden-reload.path"
+  echo "  tail --follow=name --retry ${SCRATCH_DIR}/healthcheck.log"
+  echo "Certbot timer:     systemctl list-timers home-warden-certbot.timer"
+  echo "Manual renew:      sudo systemctl start home-warden-certbot.service"
+  echo "Conf watch:        systemctl status home-warden-reload.path"
+  echo "Healthcheck timer: systemctl list-timers home-warden-healthcheck.timer"
+  echo "Healthcheck mail:  ~/.config/home-warden-healthcheck.env (see etc/home-warden-healthcheck.env.example)"
   print_status
 }
 
