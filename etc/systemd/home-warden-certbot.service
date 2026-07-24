@@ -21,6 +21,8 @@ WorkingDirectory=@@REPO_DIR@@
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=HOME=%h
 Environment=SCRATCH_DIR=@@SCRATCH_DIR@@
+Environment=CONF_DIR=@@CONF_DIR@@
+Environment=CERTBOT_CONFIG_DIR=@@CONF_DIR@@/certs
 Environment=HOME_WARDEN_RELOAD=0
 EnvironmentFile=-%h/.config/home-warden-certbot.env
 # Script does the renew; reload runs privileged so the timer needs no passwordless sudo.

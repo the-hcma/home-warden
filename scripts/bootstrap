@@ -7,7 +7,7 @@
 #   ./scripts/bootstrap --json    # machine-readable summary on stdout
 #
 # Env overrides (same as setup-service):
-#   HOME_NGINX_CONF  OWNER  SCRATCH_DIR
+#   HOME_NGINX_CONF  OWNER  SCRATCH_DIR  CONF_DIR
 
 set -euo pipefail
 
@@ -18,6 +18,7 @@ readonly repo_dir
 
 OWNER="${OWNER:-$(id -un)}"
 SCRATCH_DIR="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
+CONF_DIR="${CONF_DIR:-${HOME}/conf/home-warden}"
 HOME_NGINX_CONF="${HOME_NGINX_CONF:-}"
 
 do_fix=0
@@ -127,12 +128,14 @@ json_escape() {
 ensure_scratch_layout() {
   mkdir -p \
     "${SCRATCH_DIR}/logs" \
-    "${SCRATCH_DIR}/certs/live" \
+    "${SCRATCH_DIR}/logs/certbot" \
+    "${SCRATCH_DIR}/certbot-work" \
     "${SCRATCH_DIR}/client_body_temp" \
     "${SCRATCH_DIR}/proxy_temp" \
     "${SCRATCH_DIR}/fastcgi_temp" \
     "${SCRATCH_DIR}/uwsgi_temp" \
-    "${SCRATCH_DIR}/scgi_temp"
+    "${SCRATCH_DIR}/scgi_temp" \
+    "${CONF_DIR}/certs/live"
   if [[ -d /usr/lib/nginx/modules ]]; then
     ln -sfn /usr/lib/nginx/modules "${SCRATCH_DIR}/modules"
   fi
@@ -267,7 +270,7 @@ check_scratch() {
     return
   fi
   local sub
-  for sub in logs certs/live client_body_temp proxy_temp; do
+  for sub in logs client_body_temp proxy_temp; do
     if [[ -d "${SCRATCH_DIR}/${sub}" ]]; then
       record pass "scratch_${sub}" "${sub}/ OK"
     elif ((do_fix)); then
@@ -277,10 +280,18 @@ check_scratch() {
       record fail "scratch_${sub}" "missing ${SCRATCH_DIR}/${sub} (re-run with --fix)"
     fi
   done
+  if [[ -d "${CONF_DIR}/certs/live" ]]; then
+    record pass conf_certs_live "${CONF_DIR}/certs/live OK"
+  elif ((do_fix)); then
+    ensure_scratch_layout
+    record pass conf_certs_live "created ${CONF_DIR}/certs/live"
+  else
+    record fail conf_certs_live "missing ${CONF_DIR}/certs/live (re-run with --fix)"
+  fi
 }
 
 check_dhparam() {
-  local path="${SCRATCH_DIR}/dhparam.pem"
+  local path="${CONF_DIR}/dhparam.pem"
   if [[ -f "${path}" && -s "${path}" ]]; then
     record pass dhparam "${path}"
     return
@@ -317,7 +328,7 @@ check_certs() {
     return
   fi
   for name in "${names[@]}"; do
-    d="${SCRATCH_DIR}/certs/live/${name}"
+    d="${CONF_DIR}/certs/live/${name}"
     if [[ -f "${d}/fullchain.pem" && -f "${d}/privkey.pem" ]]; then
       record pass "cert_${name}" "${d}/{fullchain,privkey}.pem"
     elif ((do_fix)); then
@@ -443,9 +454,10 @@ check_home_warden_units() {
 
 print_json() {
   local row status code message first=1 rest
-  printf '{"pass":%d,"warn":%d,"fail":%d,"scratch_dir":%s,"home_nginx_conf":%s,"checks":[' \
+  printf '{"pass":%d,"warn":%d,"fail":%d,"scratch_dir":%s,"conf_dir":%s,"home_nginx_conf":%s,"checks":[' \
     "${pass_count}" "${warn_count}" "${fail_count}" \
     "$(json_escape "${SCRATCH_DIR}")" \
+    "$(json_escape "${CONF_DIR}")" \
     "$(json_escape "${HOME_NGINX_CONF:-}")"
   for row in "${results[@]}"; do
     status="${row%%|*}"
@@ -465,6 +477,7 @@ print_summary() {
   echo
   echo "Summary: ${pass_count} pass, ${warn_count} warn, ${fail_count} fail"
   echo "  scratch:  ${SCRATCH_DIR}"
+  echo "  conf:     ${CONF_DIR}"
   echo "  nginx.conf: ${HOME_NGINX_CONF:-<unset>}"
   echo "  owner:    ${OWNER}"
   if ((fail_count > 0)); then

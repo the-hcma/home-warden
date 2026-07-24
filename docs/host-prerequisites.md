@@ -53,22 +53,32 @@ sudo apt-get install -y certbot python3-certbot-dns-cloudflare
 ## Scratch runtime (`nginx -p`)
 
 Default: `~/scratch/home-warden/` (pid, logs, temp dirs, modules symlink). Created by
-`setup-service` / `on-deploy`.
+`setup-service` / `on-deploy`. Safe to wipe — durable TLS material lives under `CONF_DIR`.
 
 ## Certificates
 
-Live certs for nginx live under:
+Durable certbot state and nginx TLS files live under `~/conf/home-warden/` (override with
+`CONF_DIR` / `CERTBOT_CONFIG_DIR`):
 
 ```text
-~/scratch/home-warden/certs/live/<server_name>/{fullchain.pem,privkey.pem}
+~/conf/home-warden/certs/live/<server_name>/{fullchain.pem,privkey.pem}
+~/conf/home-warden/dhparam.pem
 ```
 
-Local (gitignored) configuration — copy from examples under `conf/`:
+Local (gitignored) configuration — copy from examples under `conf/` **in the
+primary clone** (first path from `git worktree list`):
 
 | Example | Runtime file |
 | --- | --- |
 | `conf/certbot-domains.example` | `conf/certbot-domains` |
 | `conf/cloudflare.ini.example` | `conf/cloudflare.ini` |
+
+In a linked worktree, symlink those files from primary (also auto-run by
+`cert-renewer`):
+
+```bash
+./scripts/link-runtime-conf
+```
 
 Optional env overrides: copy [`etc/home-warden-certbot.env.example`](../etc/home-warden-certbot.env.example)
 to `~/.config/home-warden-certbot.env` (`chmod 600`) and set `CERTBOT_EMAIL` to a real
@@ -86,7 +96,7 @@ sudo systemctl start home-warden-certbot.service   # oneshot trial
 ```
 
 ```bash
-openssl dhparam -out ~/scratch/home-warden/dhparam.pem 2048
+openssl dhparam -out ~/conf/home-warden/dhparam.pem 2048
 ```
 
 ## Operating units (status, start, stop)

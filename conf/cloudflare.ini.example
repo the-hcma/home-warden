@@ -1,5 +1,10 @@
-# Copy to conf/cloudflare.ini (gitignored) and fill in a Cloudflare API token
-# with Zone:DNS:Edit for the domains you renew.
+# Copy to conf/cloudflare.ini (gitignored). Prefer one of:
+#
+# A) Global API Key (email + key):
+dns_cloudflare_email = you@example.com
+dns_cloudflare_api_key = REPLACE_WITH_CLOUDFLARE_GLOBAL_API_KEY
+#
+# B) API Token (Zone:DNS:Edit) — usually ~40 chars; do not mix with A:
+# dns_cloudflare_api_token = REPLACE_WITH_CLOUDFLARE_API_TOKEN
 #
 # https://certbot-dns-cloudflare.readthedocs.io/
-dns_cloudflare_api_token = REPLACE_WITH_CLOUDFLARE_API_TOKEN

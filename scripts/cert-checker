@@ -2,7 +2,8 @@
 # Report SSL certificates nearing expiration under the home-warden cert tree.
 #
 # Env:
-#   CERTS_LIVE_DIR   default: ~/scratch/home-warden/certs/live
+#   CONF_DIR         default: ~/conf/home-warden
+#   CERTS_LIVE_DIR   default: $CONF_DIR/certs/live
 #   ALERT_DAYS       default: 10
 #
 # Usage:
@@ -11,7 +12,8 @@
 
 set -euo pipefail
 
-certs_live_dir="${CERTS_LIVE_DIR:-${HOME}/scratch/home-warden/certs/live}"
+conf_dir="${CONF_DIR:-${HOME}/conf/home-warden}"
+certs_live_dir="${CERTS_LIVE_DIR:-${conf_dir}/certs/live}"
 alert_days="${ALERT_DAYS:-10}"
 verbose=0
 

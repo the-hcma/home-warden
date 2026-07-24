@@ -6,12 +6,14 @@
 #   conf/cloudflare.ini    — dns_cloudflare_api_token=…
 #
 # Env overrides:
-#   SCRATCH_DIR
-#   CERTBOT_CONFIG_DIR     default: $scratch_dir/certs
+#   SCRATCH_DIR            default: ~/scratch/home-warden (logs / nginx -p runtime)
+#   CONF_DIR               default: ~/conf/home-warden (durable SSL material)
+#   CERTBOT_CONFIG_DIR     default: $CONF_DIR/certs
 #   CLOUDFLARE_CREDENTIALS default: $repo_dir/conf/cloudflare.ini
 #   CERTBOT_EMAIL          default: admin@example.com (set a real address for LE)
 #   HOME_WARDEN_RELOAD     default: 1 (set 0 when systemd ExecStartPost reloads)
 #   CERTBOT_DOMAINS_FILE   default: $repo_dir/conf/certbot-domains
+#   DNS_CLOUDFLARE_PROPAGATION_SECONDS  default: 60 (plugin default 10 is often too short)
 #
 # Usage:
 #   ./scripts/cert-renewer
@@ -26,12 +28,14 @@ repo_dir="$(cd "${script_dir}/.." && pwd)"
 readonly repo_dir
 
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
-certbot_config_dir="${CERTBOT_CONFIG_DIR:-${scratch_dir}/certs}"
+conf_dir="${CONF_DIR:-${HOME}/conf/home-warden}"
+certbot_config_dir="${CERTBOT_CONFIG_DIR:-${conf_dir}/certs}"
 cloudflare_credentials="${CLOUDFLARE_CREDENTIALS:-${repo_dir}/conf/cloudflare.ini}"
 certbot_email="${CERTBOT_EMAIL:-admin@example.com}"
 home_warden_reload="${HOME_WARDEN_RELOAD:-1}"
 certbot_domains_file="${CERTBOT_DOMAINS_FILE:-${repo_dir}/conf/certbot-domains}"
 certbot_bin="${CERTBOT:-/usr/bin/certbot}"
+dns_propagation_seconds="${DNS_CLOUDFLARE_PROPAGATION_SECONDS:-60}"
 dry_run=0
 
 usage() {
@@ -40,6 +44,9 @@ Usage: cert-renewer [--dry-run] [-h|--help]
 
 Obtain or renew certificates listed in CERTBOT_DOMAINS_FILE (DNS-01 Cloudflare).
   --dry-run   Pass --dry-run to certbot (no lasting cert changes)
+
+In a linked git worktree, runs scripts/link-runtime-conf first so conf/
+secrets resolve from the primary clone.
 EOF
 }
 
@@ -58,6 +65,11 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+# Prefer primary-clone secrets when testing from a worktree.
+if [[ -x "${script_dir}/link-runtime-conf" ]]; then
+  "${script_dir}/link-runtime-conf" -q || true
+fi
 
 trim_ws() {
   local s=$1
@@ -103,28 +115,36 @@ if [[ "${certbot_email}" == "admin@example.com" && "${dry_run}" -eq 0 ]]; then
   echo "cert-renewer: WARNING: CERTBOT_EMAIL is still admin@example.com — set a real contact for production issuance" >&2
 fi
 
-mkdir -p "${certbot_config_dir}" "${scratch_dir}/logs/certbot"
+mkdir -p "${certbot_config_dir}" "${scratch_dir}/logs/certbot" "${scratch_dir}/certbot-work"
 : >>"${scratch_dir}/cert-renewer.log" 2>/dev/null || true
 
 domains=()
 load_domains domains
-echo "cert-renewer: config-dir=${certbot_config_dir} domains=${#domains[@]} dry_run=${dry_run}"
+echo "cert-renewer: config-dir=${certbot_config_dir} domains=${#domains[@]} dry_run=${dry_run} dns_propagation=${dns_propagation_seconds}s"
 
 dry_run_args=()
 if ((dry_run)); then
   dry_run_args+=(--dry-run)
 fi
 
+cf_args=(
+  --dns-cloudflare
+  --dns-cloudflare-credentials "${cloudflare_credentials}"
+  --dns-cloudflare-propagation-seconds "${dns_propagation_seconds}"
+  --preferred-challenges dns-01
+)
+
 for domain in "${domains[@]}"; do
   live_cert="${certbot_config_dir}/live/${domain}/fullchain.pem"
-  if [[ -f "${live_cert}" ]]; then
+  renewal_conf="${certbot_config_dir}/renewal/${domain}.conf"
+  # Staging/bootstrap may place self-signed files under live/ without a
+  # certbot renewal profile — only renew when certbot knows the lineage.
+  if [[ -s "${renewal_conf}" && -f "${live_cert}" ]]; then
     echo "cert-renewer: renew existing ${domain}"
     "${certbot_bin}" renew \
       --server https://acme-v02.api.letsencrypt.org/directory \
-      --dns-cloudflare \
-      --dns-cloudflare-credentials "${cloudflare_credentials}" \
-      --preferred-challenges dns-01 \
-      --work-dir "${certbot_config_dir}" \
+      "${cf_args[@]}" \
+      --work-dir "${scratch_dir}/certbot-work" \
       --logs-dir "${scratch_dir}/logs/certbot" \
       --config-dir "${certbot_config_dir}" \
       -m "${certbot_email}" \
@@ -133,15 +153,29 @@ for domain in "${domains[@]}"; do
       --non-interactive \
       "${dry_run_args[@]}"
   else
-    echo "cert-renewer: obtain new certificate for ${domain}"
+    if [[ -e "${certbot_config_dir}/live/${domain}" ]] || [[ -e "${certbot_config_dir}/archive/${domain}" ]] || [[ -f "${renewal_conf}" ]]; then
+      echo "cert-renewer: clearing incomplete/staging lineage for ${domain} before certonly"
+      # Unique backup dir so we can mv without rm-first (avoids data-loss if mv fails).
+      staging_backup="${scratch_dir}/certs-staging-backup/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+      mkdir -p "${staging_backup}/live" "${staging_backup}/archive" "${staging_backup}/renewal"
+      if [[ -e "${certbot_config_dir}/live/${domain}" ]]; then
+        mv "${certbot_config_dir}/live/${domain}" "${staging_backup}/live/"
+      fi
+      if [[ -e "${certbot_config_dir}/archive/${domain}" ]]; then
+        mv "${certbot_config_dir}/archive/${domain}" "${staging_backup}/archive/"
+      fi
+      if [[ -f "${renewal_conf}" ]]; then
+        mv "${renewal_conf}" "${staging_backup}/renewal/${domain}.conf.incomplete.$$"
+      fi
+    else
+      echo "cert-renewer: obtain new certificate for ${domain}"
+    fi
     "${certbot_bin}" certonly \
       -d "${domain}" \
       --cert-name "${domain}" \
       --server https://acme-v02.api.letsencrypt.org/directory \
-      --dns-cloudflare \
-      --dns-cloudflare-credentials "${cloudflare_credentials}" \
-      --preferred-challenges dns-01 \
-      --work-dir "${certbot_config_dir}" \
+      "${cf_args[@]}" \
+      --work-dir "${scratch_dir}/certbot-work" \
       --logs-dir "${scratch_dir}/logs/certbot" \
       --config-dir "${certbot_config_dir}" \
       -m "${certbot_email}" \

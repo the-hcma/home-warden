@@ -101,8 +101,9 @@ home-warden/
     └── on-deploy           # optional: validate config, signal restart
 ```
 
-Live certs and private keys stay **outside** git (`~/scratch/home-warden/certs/`
-or Let’s Encrypt live paths readable by the service user).
+Live certs and private keys stay **outside** git (`~/conf/home-warden/certs/`
+or Let’s Encrypt live paths readable by the service user). Scratch
+(`~/scratch/home-warden/`) is ephemeral runtime only.
 
 ---
 
