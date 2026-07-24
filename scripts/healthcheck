@@ -13,7 +13,7 @@
 #   SCRATCH_DIR              default: ~/scratch/home-warden
 #
 # Exit: always 0 when run from the timer (email is the alarm). Use --check-only
-# to exit 1 on unhealthy for manual / CI probing.
+# to exit 1 on unhealthy for manual / CI probing (no mail, no state writes).
 #
 # Usage:
 #   ./scripts/healthcheck
@@ -42,7 +42,7 @@ usage() {
 Usage: healthcheck [--verbose] [--check-only] [-h|--help]
 
 Probe home-warden.service + local HTTPS; email on fail/recovery (see env).
-  --check-only   Exit 1 when unhealthy (no email side effects beyond logging)
+  --check-only   Exit 1 when unhealthy (no email, no state writes)
 EOF
 }
 
@@ -66,6 +66,10 @@ done
 if [[ -z "${email_from}" ]]; then
   host_f="$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo localhost)"
   email_from="home-warden@${host_f}"
+fi
+
+if [[ ! "${resend_sec}" =~ ^[0-9]+$ ]]; then
+  resend_sec=1800
 fi
 
 mkdir -p "${scratch_dir}"
@@ -141,30 +145,49 @@ probe() {
   return 0
 }
 
+# Parse KEY=VALUE lines; never source the state file.
 read_state() {
-  # namerefs: prev_status last_alert
   local -n _ps=$1
   local -n _la=$2
+  local line key val
   _ps="unknown"
   _la=0
-  if [[ -f "${state_file}" ]]; then
-    # shellcheck disable=SC1090
-    source "${state_file}" || true
-    _ps="${status:-unknown}"
-    _la="${last_alert_epoch:-0}"
-  fi
+  [[ -f "${state_file}" ]] || return 0
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${line}" ]] && continue
+    [[ "${line}" == *=* ]] || continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    case "${key}" in
+      status)
+        case "${val}" in
+          ok | fail | unknown) _ps="${val}" ;;
+        esac
+        ;;
+      last_alert_epoch)
+        if [[ "${val}" =~ ^[0-9]+$ ]]; then
+          _la="${val}"
+        fi
+        ;;
+    esac
+  done <"${state_file}"
 }
 
 write_state() {
   local st=$1
   local la=$2
   local detail=$3
+  local tmp
   umask 077
-  cat >"${state_file}" <<EOF
-status=${st}
-last_alert_epoch=${la}
-last_detail=$(printf '%q' "${detail}")
-EOF
+  tmp="$(mktemp "${scratch_dir}/healthcheck.state.XXXXXX")"
+  # detail is log-only context; keep state machine fields strict/simple
+  {
+    printf 'status=%s\n' "${st}"
+    printf 'last_alert_epoch=%s\n' "${la}"
+    printf '# last_detail=%s\n' "${detail}"
+  } >"${tmp}"
+  mv -f "${tmp}" "${state_file}"
 }
 
 send_mail() {
@@ -201,12 +224,18 @@ probe healthy detail
 prev_status="unknown"
 last_alert=0
 read_state prev_status last_alert
+if [[ ! "${last_alert}" =~ ^[0-9]+$ ]]; then
+  last_alert=0
+fi
 
 host_short="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo host)"
 subject_prefix="[home-warden ${host_short}]"
 
 if ((healthy)); then
   log_out "OK ${detail}"
+  if ((check_only)); then
+    exit 0
+  fi
   if [[ "${prev_status}" == "fail" ]]; then
     send_mail "${subject_prefix} RECOVERED" \
       "home-warden healthcheck recovered at $(date -u +%Y-%m-%dT%H:%M:%SZ).
@@ -217,13 +246,14 @@ ${detail}
   else
     write_state "ok" "${last_alert}" "${detail}"
   fi
-  if ((check_only)); then
-    exit 0
-  fi
   exit 0
 fi
 
 log_out "FAIL ${detail}"
+if ((check_only)); then
+  exit 1
+fi
+
 should_alert=0
 if [[ "${prev_status}" != "fail" ]]; then
   should_alert=1
@@ -244,9 +274,5 @@ Resend interval: ${resend_sec}s
   write_state "fail" "${now_epoch}" "${detail}"
 else
   write_state "fail" "${last_alert}" "${detail}"
-fi
-
-if ((check_only)); then
-  exit 1
 fi
 exit 0
