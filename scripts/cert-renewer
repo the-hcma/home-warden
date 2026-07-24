@@ -155,14 +155,13 @@ for domain in "${domains[@]}"; do
   else
     if [[ -e "${certbot_config_dir}/live/${domain}" ]] || [[ -e "${certbot_config_dir}/archive/${domain}" ]] || [[ -f "${renewal_conf}" ]]; then
       echo "cert-renewer: clearing incomplete/staging lineage for ${domain} before certonly"
-      staging_backup="${scratch_dir}/certs-staging-backup"
+      # Unique backup dir so we can mv without rm-first (avoids data-loss if mv fails).
+      staging_backup="${scratch_dir}/certs-staging-backup/$(date -u +%Y%m%dT%H%M%SZ)-$$"
       mkdir -p "${staging_backup}/live" "${staging_backup}/archive" "${staging_backup}/renewal"
       if [[ -e "${certbot_config_dir}/live/${domain}" ]]; then
-        rm -rf "${staging_backup}/live/${domain}"
         mv "${certbot_config_dir}/live/${domain}" "${staging_backup}/live/"
       fi
       if [[ -e "${certbot_config_dir}/archive/${domain}" ]]; then
-        rm -rf "${staging_backup}/archive/${domain}"
         mv "${certbot_config_dir}/archive/${domain}" "${staging_backup}/archive/"
       fi
       if [[ -f "${renewal_conf}" ]]; then
