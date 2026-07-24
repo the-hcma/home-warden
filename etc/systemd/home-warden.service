@@ -12,7 +12,9 @@ Environment=NGINX=3:4;
 Environment=DEPLOYED_COMMIT=@@DEPLOYED_COMMIT@@
 # -p sets prefix for relative pid/temp/log paths in the home nginx.conf.
 ExecStart=/usr/sbin/nginx -p @@SCRATCH_DIR@@/ -c @@HOME_NGINX_CONF@@ -g 'daemon off;'
-ExecReload=/usr/sbin/nginx -p @@SCRATCH_DIR@@/ -c @@HOME_NGINX_CONF@@ -s reload
+# Do not run `nginx -s reload` here: that helper inherits Environment=NGINX=3:4;
+# without socket fds and logs getsockname() EBADF. Signal the master instead.
+ExecReload=/bin/kill -s HUP $MAINPID
 Restart=on-failure
 RestartSec=5
 # Bind privileged ports only via inherited fds from home-warden.socket.
