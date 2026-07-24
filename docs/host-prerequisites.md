@@ -6,8 +6,8 @@ Target: **Ubuntu 26**, **nginx 1.28.3**, systemd **259+** (machine-id `Condition
 
 `scripts/setup-service` owns the full bring-up: sudo prompt, package/conf checks,
 scratch layout, **`sudo nginx -t`**, optional `scripts/on-deploy`, unit install, mask
-distro nginx, enable socket + certbot timer, and start the service (refuses to start if
-validation fails).
+distro nginx, enable socket + certbot/healthcheck timers + conf watch, and start the
+service (refuses to start if validation fails).
 
 ```bash
 # Optional: set conf path if not at ~/home/nginx/server/nginx.conf
@@ -30,6 +30,7 @@ tail --follow=name --retry ~/scratch/home-warden/logs/error.log
 tail --follow=name --retry ~/scratch/home-warden/logs/access.log
 tail --follow=name --retry ~/scratch/home-warden/cert-renewer.log
 tail --follow=name --retry ~/scratch/home-warden/nginx-test-and-reload.log
+tail --follow=name --retry ~/scratch/home-warden/healthcheck.log
 ```
 
 ## Layout on the host
@@ -95,6 +96,35 @@ systemctl list-timers home-warden-certbot.timer
 sudo systemctl start home-warden-certbot.service   # oneshot trial
 ```
 
+## Healthcheck email alarms
+
+Minute timer probes `home-warden.service` and a local HTTPS request (`curl` to
+`127.0.0.1:443` with `HEALTHCHECK_HOST` as SNI/Host). Emails on first failure,
+re-alerts at most every `HEALTHCHECK_RESEND_SEC` (default 1800) while still down,
+and sends a recovery message when healthy again.
+
+Copy [`etc/home-warden-healthcheck.env.example`](../etc/home-warden-healthcheck.env.example)
+to `~/.config/home-warden-healthcheck.env` (`chmod 600`). Set a real
+`HEALTHCHECK_EMAIL_TO` and `HEALTHCHECK_HOST` **only in that local file** (never in
+the repo). Without `HEALTHCHECK_EMAIL_TO`, the probe still runs and logs; mail is
+skipped.
+
+```bash
+# Manual probe:
+./scripts/healthcheck --verbose
+./scripts/healthcheck --check-only   # exit 1 when unhealthy
+
+# Timer (enabled by setup-service):
+systemctl list-timers home-warden-healthcheck.timer
+sudo systemctl start home-warden-healthcheck.service
+```
+
+Requires local MTA (`sendmail` or `mail`). Install if needed:
+
+```bash
+# e.g. postfix or mailutils — host-specific; not installed by setup-service
+```
+
 ```bash
 openssl dhparam -out ~/conf/home-warden/dhparam.pem 2048
 ```
@@ -107,7 +137,8 @@ start/stop/reload where noted). Quick status:
 ```bash
 ./scripts/setup-service --status
 systemctl status home-warden.socket home-warden.service \
-  home-warden-certbot.timer home-warden-reload.path --no-pager
+  home-warden-certbot.timer home-warden-reload.path \
+  home-warden-healthcheck.timer --no-pager
 ```
 
 | Unit | Role | Typical ops |
@@ -118,6 +149,8 @@ systemctl status home-warden.socket home-warden.service \
 | `home-warden-certbot.service` | Oneshot renewer (no `[Install]`) | Activated by the timer or manual `start` |
 | `home-warden-reload.path` | Watches nginx conf file + directory | Enabled by setup-service; `systemctl status home-warden-reload.path` |
 | `home-warden-reload.service` | Oneshot: `nginx -t` then reload (no `[Install]`) | Activated only by the path unit |
+| `home-warden-healthcheck.timer` | Every minute → healthcheck | `systemctl list-timers home-warden-healthcheck.timer`; `sudo systemctl start home-warden-healthcheck.service` |
+| `home-warden-healthcheck.service` | Oneshot probe + optional email (no `[Install]`) | Activated by the timer or manual `start` |
 
 Logs (also listed above):
 
@@ -126,6 +159,7 @@ Logs (also listed above):
 | `home-warden.service` | `~/scratch/home-warden/home-warden.log` (+ nginx `logs/`) |
 | cert renewer | `~/scratch/home-warden/cert-renewer.log` |
 | config reload oneshot | `~/scratch/home-warden/nginx-test-and-reload.log` |
+| healthcheck | `~/scratch/home-warden/healthcheck.log` |
 
 ## Config watch → nginx -t → reload
 

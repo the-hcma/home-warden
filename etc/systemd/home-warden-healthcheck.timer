@@ -1,0 +1,15 @@
+# Minute timer for home-warden-healthcheck.service.
+# Template: etc/systemd/home-warden-healthcheck.timer — expanded by scripts/setup-service.
+
+[Unit]
+Description=home-warden nginx healthcheck — every minute
+Documentation=https://github.com/the-hcma/home-warden/blob/main/docs/host-prerequisites.md
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+AccuracySec=15s
+Persistent=true
+Unit=home-warden-healthcheck.service
+
+[Install]
+WantedBy=timers.target

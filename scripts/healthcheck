@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+# Probe home-warden nginx health; email on failure / recovery / periodic re-alert.
+#
+# Env (override via ~/.config/home-warden-healthcheck.env):
+#   HEALTHCHECK_EMAIL_TO     required for mail (no default — set locally)
+#   HEALTHCHECK_EMAIL_FROM   default: home-warden@$(hostname -f)
+#   HEALTHCHECK_HOST         default: app.example.com (SNI / Host for local probe)
+#   HEALTHCHECK_URL_PATH     default: /
+#   HEALTHCHECK_TIMEOUT_SEC  default: 5
+#   HEALTHCHECK_OK_STATUSES  default: 200,204,301,302,303,307,308
+#   HEALTHCHECK_RESEND_SEC   default: 1800 (re-alert while still failing)
+#   HEALTHCHECK_SERVICE      default: home-warden.service
+#   SCRATCH_DIR              default: ~/scratch/home-warden
+#
+# Exit: always 0 when run from the timer (email is the alarm). Use --check-only
+# to exit 1 on unhealthy for manual / CI probing.
+#
+# Usage:
+#   ./scripts/healthcheck
+#   ./scripts/healthcheck --verbose
+#   ./scripts/healthcheck --check-only
+
+set -euo pipefail
+
+scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
+email_to="${HEALTHCHECK_EMAIL_TO:-}"
+email_from="${HEALTHCHECK_EMAIL_FROM:-}"
+probe_host="${HEALTHCHECK_HOST:-app.example.com}"
+url_path="${HEALTHCHECK_URL_PATH:-/}"
+timeout_sec="${HEALTHCHECK_TIMEOUT_SEC:-5}"
+ok_statuses="${HEALTHCHECK_OK_STATUSES:-200,204,301,302,303,307,308}"
+resend_sec="${HEALTHCHECK_RESEND_SEC:-1800}"
+service_name="${HEALTHCHECK_SERVICE:-home-warden.service}"
+state_file="${scratch_dir}/healthcheck.state"
+log_file="${scratch_dir}/healthcheck.log"
+
+verbose=0
+check_only=0
+
+usage() {
+  cat <<'EOF'
+Usage: healthcheck [--verbose] [--check-only] [-h|--help]
+
+Probe home-warden.service + local HTTPS; email on fail/recovery (see env).
+  --check-only   Exit 1 when unhealthy (no email side effects beyond logging)
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --verbose | -v) verbose=1 ;;
+    --check-only) check_only=1 ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+if [[ -z "${email_from}" ]]; then
+  host_f="$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo localhost)"
+  email_from="home-warden@${host_f}"
+fi
+
+mkdir -p "${scratch_dir}"
+: >>"${log_file}" 2>/dev/null || true
+
+log() {
+  local msg=$1
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '%s %s\n' "${ts}" "${msg}" | tee -a "${log_file}" >/dev/null
+  if ((verbose)); then
+    printf '%s %s\n' "${ts}" "${msg}"
+  fi
+}
+
+# When run under systemd StandardOutput=append, avoid tee duplication.
+log_out() {
+  local msg=$1
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if [[ -n "${INVOCATION_ID:-}" ]]; then
+    printf '%s %s\n' "${ts}" "${msg}"
+  else
+    printf '%s %s\n' "${ts}" "${msg}" | tee -a "${log_file}"
+  fi
+}
+
+status_ok() {
+  local code=$1
+  local s
+  IFS=',' read -r -a arr <<<"${ok_statuses}"
+  for s in "${arr[@]}"; do
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    [[ "${code}" == "${s}" ]] && return 0
+  done
+  return 1
+}
+
+probe() {
+  # Sets nameref: ok (0/1), detail (string)
+  local -n _ok=$1
+  local -n _detail=$2
+  _ok=1
+  _detail=""
+
+  if ! systemctl is-active --quiet "${service_name}" 2>/dev/null; then
+    _ok=0
+    _detail="${service_name} is not active ($(systemctl is-active "${service_name}" 2>/dev/null || echo unknown))"
+    return 0
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    _ok=0
+    _detail="curl not found on PATH"
+    return 0
+  fi
+
+  local url="https://${probe_host}${url_path}"
+  local code err
+  err="$(mktemp)"
+  code="$(
+    curl -sS --max-time "${timeout_sec}" \
+      --resolve "${probe_host}:443:127.0.0.1" \
+      -o /dev/null -w '%{http_code}' \
+      "${url}" 2>"${err}" || true
+  )"
+  if [[ -z "${code}" || "${code}" == "000" ]]; then
+    _ok=0
+    _detail="HTTPS probe failed for ${url} via 127.0.0.1: $(tr '\n' ' ' <"${err}" | sed 's/[[:space:]]\+/ /g')"
+    rm -f "${err}"
+    return 0
+  fi
+  rm -f "${err}"
+  if ! status_ok "${code}"; then
+    _ok=0
+    _detail="HTTPS ${url} returned HTTP ${code} (ok statuses: ${ok_statuses})"
+    return 0
+  fi
+  _detail="ok service=${service_name} https=${url} status=${code}"
+  return 0
+}
+
+read_state() {
+  # namerefs: prev_status last_alert
+  local -n _ps=$1
+  local -n _la=$2
+  _ps="unknown"
+  _la=0
+  if [[ -f "${state_file}" ]]; then
+    # shellcheck disable=SC1090
+    source "${state_file}" || true
+    _ps="${status:-unknown}"
+    _la="${last_alert_epoch:-0}"
+  fi
+}
+
+write_state() {
+  local st=$1
+  local la=$2
+  local detail=$3
+  umask 077
+  cat >"${state_file}" <<EOF
+status=${st}
+last_alert_epoch=${la}
+last_detail=$(printf '%q' "${detail}")
+EOF
+}
+
+send_mail() {
+  local subject=$1
+  local body=$2
+  if [[ -z "${email_to}" ]]; then
+    log_out "WARN: HEALTHCHECK_EMAIL_TO unset — skip mail: ${subject}"
+    return 0
+  fi
+  if command -v sendmail >/dev/null 2>&1; then
+    sendmail -t <<EOF
+From: ${email_from}
+To: ${email_to}
+Subject: ${subject}
+Content-Type: text/plain; charset=UTF-8
+
+${body}
+EOF
+    return 0
+  fi
+  if command -v mail >/dev/null 2>&1; then
+    printf '%s\n' "${body}" | mail -s "${subject}" -r "${email_from}" "${email_to}"
+    return 0
+  fi
+  log_out "ERROR: neither sendmail nor mail found — cannot send: ${subject}"
+  return 1
+}
+
+now_epoch="$(date +%s)"
+healthy=1
+detail=""
+probe healthy detail
+
+prev_status="unknown"
+last_alert=0
+read_state prev_status last_alert
+
+host_short="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo host)"
+subject_prefix="[home-warden ${host_short}]"
+
+if ((healthy)); then
+  log_out "OK ${detail}"
+  if [[ "${prev_status}" == "fail" ]]; then
+    send_mail "${subject_prefix} RECOVERED" \
+      "home-warden healthcheck recovered at $(date -u +%Y-%m-%dT%H:%M:%SZ).
+
+${detail}
+"
+    write_state "ok" "${now_epoch}" "${detail}"
+  else
+    write_state "ok" "${last_alert}" "${detail}"
+  fi
+  if ((check_only)); then
+    exit 0
+  fi
+  exit 0
+fi
+
+log_out "FAIL ${detail}"
+should_alert=0
+if [[ "${prev_status}" != "fail" ]]; then
+  should_alert=1
+elif ((now_epoch - last_alert >= resend_sec)); then
+  should_alert=1
+fi
+
+if ((should_alert)); then
+  send_mail "${subject_prefix} UNHEALTHY" \
+    "home-warden healthcheck FAILED at $(date -u +%Y-%m-%dT%H:%M:%SZ).
+
+${detail}
+
+Host: ${host_short}
+Service: ${service_name}
+Resend interval: ${resend_sec}s
+"
+  write_state "fail" "${now_epoch}" "${detail}"
+else
+  write_state "fail" "${last_alert}" "${detail}"
+fi
+
+if ((check_only)); then
+  exit 1
+fi
+exit 0

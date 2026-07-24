@@ -376,7 +376,9 @@ check_unit_templates() {
     home-warden-certbot.service \
     home-warden-certbot.timer \
     home-warden-reload.service \
-    home-warden-reload.path; do
+    home-warden-reload.path \
+    home-warden-healthcheck.service \
+    home-warden-healthcheck.timer; do
     if [[ -f "${repo_dir}/etc/systemd/${f}" ]]; then
       record pass "template_${f}" "${repo_dir}/etc/systemd/${f}"
     else
