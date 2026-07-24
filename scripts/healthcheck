@@ -71,16 +71,6 @@ fi
 mkdir -p "${scratch_dir}"
 : >>"${log_file}" 2>/dev/null || true
 
-log() {
-  local msg=$1
-  local ts
-  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf '%s %s\n' "${ts}" "${msg}" | tee -a "${log_file}" >/dev/null
-  if ((verbose)); then
-    printf '%s %s\n' "${ts}" "${msg}"
-  fi
-}
-
 # When run under systemd StandardOutput=append, avoid tee duplication.
 log_out() {
   local msg=$1
@@ -88,8 +78,10 @@ log_out() {
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   if [[ -n "${INVOCATION_ID:-}" ]]; then
     printf '%s %s\n' "${ts}" "${msg}"
-  else
+  elif ((verbose)); then
     printf '%s %s\n' "${ts}" "${msg}" | tee -a "${log_file}"
+  else
+    printf '%s %s\n' "${ts}" "${msg}" >>"${log_file}"
   fi
 }
 
