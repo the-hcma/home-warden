@@ -43,14 +43,14 @@ Only after §1 quality gates pass. **Read** `.github/stacking-tool` (`graphite` 
 and follow `.cursor/rules/stacking-tool.mdc` — do not mix backends on the same stack.
 
 ```bash
-# When marker is graphite:
-gt create <stack>/<topic> -m 'feat: …'   # or gt modify -m '…'
-gt submit --publish --no-interactive
+# When marker is graphite (apply-fix comments the inactive backend):
+# gt create <stack>/<topic> -m 'feat: …'   # or gt modify -m '…'
+# gt submit --publish --no-interactive
 
 # When marker is gh-stack:
-# gh stack init <stack>/<topic>   # or gh stack add for a higher layer
-# git add -A && git commit -m 'feat: …'
-# gh stack submit --auto --open --remote origin
+gh stack init <stack>/<topic>   # or gh stack add for a higher layer
+git add -A && git commit -m 'feat: …'
+gh stack submit --auto --open --remote origin
 ```
 
 Wait for CI:
@@ -58,6 +58,9 @@ Wait for CI:
 ```bash
 "${rh}/scripts/dev/post-pr-submission-checks" --pr <n>
 ```
+
+If stderr shows `NOTE: GITHUB_RATE_LIMIT_*`, the helpers are waiting on GitHub API
+quota reset — let them finish (do not treat as a hard local failure mid-wait).
 
 Patch title/body if stale: `gh pr edit <n> --title … --body …`
 
