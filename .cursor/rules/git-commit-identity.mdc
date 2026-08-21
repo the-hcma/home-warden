@@ -37,23 +37,65 @@ signing is set up for the committer:
 2. `git config --get user.signingkey` should be set (GPG key id, or SSH public key
    path when `gpg.format` is `ssh`).
 3. If `gpg.format` is `ssh`, confirm the signing key path exists; otherwise confirm
-   `gpg` can list the secret key for `user.signingkey`.
+   `gpg --list-secret-keys --keyid-format=long <signingkey>` succeeds (secret present
+   on **this** host).
+4. On Darwin (GPG): `pinentry-program` in `~/.gnupg/gpg-agent.conf` should point at an
+   existing binary (prefer `pinentry-mac` from Homebrew).
+5. Optional one-shot probe: `echo test | gpg --clearsign -u <KEYID>`. If it hangs or
+   fails in the agent TTY, tell the operator to unlock via GUI pinentry or finish the
+   commit in Terminal.app — agent terminals often cannot drive curses pinentry.
+6. GitHub: the matching public key should be uploaded so commits show Verified.
+   Optional: `gh api user/gpg_keys` (needs `admin:gpg_key` scope); otherwise guide
+   manual paste of `gpg --armor --export <KEYID>`.
 
 If signing is missing or incomplete, **alert the committer** and surface setup
-instructions before committing (unless they explicitly opt out for a one-off):
+instructions before committing (unless they explicitly opt out for a one-off).
 
-**GPG key**
+### Per-machine / personal vs work keys
+
+- Prefer a **separate signing key per machine** (or at least personal vs work). Do
+  **not** export a personal laptop’s secret key onto a corporate device.
+- Match `user.name` / `user.email` to the GitHub identity; upload **that** public
+  key to GitHub → Settings → SSH and GPG keys.
+- When a work machine is retired, revoke/rotate that machine’s key on GitHub and
+  remove the local secret.
+
+### Passphrase
+
+- **Recommend using a passphrase** on the signing key (protects the secret at rest;
+  `gpg-agent` can cache it with `default-cache-ttl` / `max-cache-ttl`).
+- Do **not** suggest empty-passphrase keys “for agent convenience.”
+- Agent / non-TTY sessions usually cannot drive curses pinentry — use GUI
+  `pinentry-mac` (macOS) or commit from Terminal.app after unlocking once.
+
+### GPG key (macOS / Homebrew)
 
 ```bash
+brew install gnupg pinentry-mac
+# If brew cannot link into /opt/homebrew/bin (ownership / permissions), fix Homebrew
+# ownership for that prefix or use the full $(brew --prefix)/bin path below.
+
+mkdir -p ~/.gnupg
+chmod 700 ~/.gnupg
+echo "pinentry-program $(brew --prefix)/bin/pinentry-mac" >> ~/.gnupg/gpg-agent.conf
+# optional passphrase cache (seconds), so you are not prompted every commit:
+# echo "default-cache-ttl 28800" >> ~/.gnupg/gpg-agent.conf
+# echo "max-cache-ttl 86400" >> ~/.gnupg/gpg-agent.conf
+gpgconf --kill gpg-agent
+
 gpg --full-generate-key
+# Choose RSA (or default), key size ≥ 3072, set an expiration, and use a passphrase.
 gpg --list-secret-keys --keyid-format=long
 git config --global user.signingkey <KEYID>
 git config --global commit.gpgsign true
 gpg --armor --export <KEYID>
 # Upload the armored public key: GitHub → Settings → SSH and GPG keys → New GPG key
+
+# Sanity check (GUI pinentry should appear if the agent needs the passphrase):
+echo test | gpg --clearsign -u <KEYID>
 ```
 
-**SSH signing (alternative)**
+### SSH signing (alternative)
 
 ```bash
 git config --global gpg.format ssh
