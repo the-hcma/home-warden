@@ -49,6 +49,12 @@ repository root using [repository-helpers](https://github.com/the-hcma/repositor
 - No Node.js helpers and no Python scripting for install/ops paths unless CI and
   AGENTS are updated deliberately (Milestone 1 stays pure Bash).
 - External tools as needed: `nginx`, `systemctl`, `git`, `gh`, `openssl`, `certbot`.
+- **Remote timeouts and bounded retries:** `.cursor/rules/remote-timeouts-retries.mdc`
+  (`alwaysApply`, org rule — template sync
+  [repository-helpers#570](https://github.com/the-hcma/repository-helpers/issues/570)).
+  Every `curl` uses `--max-time` / `--connect-timeout` (`scripts/healthcheck`
+  already does); ACME / `certbot` calls run bounded; any retry is capped, backed
+  off, transient-only, and never blindly re-issues a certificate.
 
 ---
 

@@ -1,0 +1,68 @@
+---
+description: All remote/network I/O must use explicit timeouts and bounded retries
+alwaysApply: true
+---
+
+# Remote timeouts and retries
+
+Any code here that talks to a network peer — `curl` health probes
+(`scripts/healthcheck`), the ACME / Let's Encrypt calls in `scripts/cert-renewer`,
+prerequisite downloads in `scripts/setup-service`, `gh` API calls, any future
+webhook — must not hang indefinitely and must not retry without a bound. Org
+template sync: repository-helpers#570.
+
+## Timeouts (required)
+
+- Every `curl` sets an **explicit timeout**: `--max-time <sec>` (whole request)
+  and `--connect-timeout <sec>`. `scripts/healthcheck` already threads a
+  `timeout_sec` into `curl --max-time` — keep that; never add a bare
+  `curl <url>` or `curl` without `--max-time`.
+- `certbot` / ACME calls run under a bounded wrapper (`timeout <sec> certbot …`
+  or certbot's own `--http-01-*` timeouts); a stalled ACME challenge must not
+  block the renew timer forever.
+- Prefer the runner helpers' `--timeout` / `run_command … --timeout` pattern for
+  any new external command that can block on the network.
+
+## Retries (required when retrying)
+
+- Retry only **transient** failures: `curl` exit `28` (timeout) / `7` (connect
+  failed) / `56` (recv error), and HTTP `408`, `429`, `502`, `503`, `504`.
+  A `4xx` other than `408` / `429` (and a `certbot` "too many certificates" rate
+  limit) is **permanent** — surface it, do not retry.
+- Cap attempts (small fixed `N`, 2–5) **or** a total retry budget. Never write an
+  **unbounded** `while true` loop around a network call.
+- Back off between attempts (`sleep` with exponential growth). Honor
+  `Retry-After` when the peer sends it, clamped to a ceiling that fits the timer.
+- Do **not** retry a non-idempotent write — a certificate issuance / ACME order,
+  a state-changing `gh` API call — unless it is safe to re-send. Renewal against
+  Let's Encrypt rate limits is not: fail fast and let the next scheduled run
+  retry. Idempotent probes (`GET /health`) are safe to retry within budget.
+- On exhaustion, emit one clear `ERROR: …` line and exit non-zero — never spin
+  silently (matches the healthcheck's `_detail=` / exit-code contract).
+
+## Anti-patterns
+
+```bash
+# bad — no timeout
+curl -sS "https://${host}/health"
+code=$(curl -o /dev/null -w '%{http_code}' "$url")
+
+# bad — unbounded retry
+while true; do
+  curl -fsS "$url" && break
+  sleep 5            # no cap, no backoff growth, no give-up
+done
+```
+
+```bash
+# good — explicit timeout + bounded, backed-off retry
+attempts=0 max_attempts=4 backoff=2
+until code=$(curl -sS --connect-timeout 5 --max-time "${timeout_sec}" \
+      -o /dev/null -w '%{http_code}' "$url"); do
+  rc=$?
+  case "$rc" in 7|28|56) : ;; *) echo "ERROR: curl failed rc=$rc (permanent)"; exit 1 ;; esac
+  attempts=$((attempts + 1))
+  if (( attempts >= max_attempts )); then echo "ERROR: probe retries exhausted"; exit 1; fi
+  sleep "$backoff"; backoff=$((backoff * 2))
+done
+```
