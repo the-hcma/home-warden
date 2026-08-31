@@ -52,9 +52,11 @@ repository root using [repository-helpers](https://github.com/the-hcma/repositor
 - **Remote timeouts and bounded retries:** `.cursor/rules/remote-timeouts-retries.mdc`
   (`alwaysApply`, org rule — template sync
   [repository-helpers#570](https://github.com/the-hcma/repository-helpers/issues/570)).
-  Every `curl` uses `--max-time` / `--connect-timeout` (`scripts/healthcheck`
-  already does); ACME / `certbot` calls run bounded; any retry is capped, backed
-  off, transient-only, and never blindly re-issues a certificate.
+  Every `curl` **must** set `--max-time` *and* `--connect-timeout`
+  (`scripts/healthcheck` sets `--max-time` only today — add `--connect-timeout`);
+  `certbot` calls **must** run under a bounded wrapper (`scripts/cert-renewer`
+  still needs one); any retry is capped/budgeted, backed off with jitter,
+  transient-only, and never blindly re-issues a certificate.
 
 ---
 

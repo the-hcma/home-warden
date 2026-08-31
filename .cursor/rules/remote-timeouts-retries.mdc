@@ -55,14 +55,21 @@ done
 ```
 
 ```bash
-# good — explicit timeout + bounded, backed-off retry
+# good — explicit timeout, status classification, bounded backed-off retry
 attempts=0 max_attempts=4 backoff=2
-until code=$(curl -sS --connect-timeout 5 --max-time "${timeout_sec}" \
-      -o /dev/null -w '%{http_code}' "$url"); do
-  rc=$?
-  case "$rc" in 7|28|56) : ;; *) echo "ERROR: curl failed rc=$rc (permanent)"; exit 1 ;; esac
+transient=' 408 429 502 503 504 '
+while :; do
+  # curl exits 0 on ANY HTTP response, so inspect the status, not just $?
+  if code=$(curl -sS --connect-timeout 5 --max-time "${timeout_sec}" \
+        -o /dev/null -w '%{http_code}' "$url"); then
+    [[ "$code" == 2* ]] && break                               # healthy
+    [[ "$transient" != *" $code "* ]] && { echo "ERROR: HTTP $code (permanent)"; exit 1; }
+  else
+    rc=$?
+    case "$rc" in 7|28|56) : ;; *) echo "ERROR: curl rc=$rc (permanent)"; exit 1 ;; esac
+  fi
   attempts=$((attempts + 1))
-  if (( attempts >= max_attempts )); then echo "ERROR: probe retries exhausted"; exit 1; fi
-  sleep "$backoff"; backoff=$((backoff * 2))
+  (( attempts >= max_attempts )) && { echo "ERROR: probe retries exhausted"; exit 1; }
+  sleep $(( backoff + RANDOM % backoff )); backoff=$(( backoff * 2 ))   # jitter
 done
 ```
