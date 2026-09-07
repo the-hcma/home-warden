@@ -5,71 +5,69 @@ alwaysApply: true
 
 # Remote timeouts and retries
 
-Any code here that talks to a network peer — `curl` health probes
-(`scripts/healthcheck`), the ACME / Let's Encrypt calls in `scripts/cert-renewer`,
-prerequisite downloads in `scripts/setup-service`, `gh` API calls, any future
-webhook — must not hang indefinitely and must not retry without a bound. Org
-template sync: repository-helpers#570.
+Any code that talks to a network peer (HTTP APIs, OAuth token endpoints, webhooks,
+package indexes, `gh`/`curl` helpers, cloud SDKs, etc.) must not hang indefinitely
+and must not retry without a bound. See repository-helpers#570.
 
 ## Timeouts (required)
 
-- Every `curl` sets an **explicit timeout**: `--max-time <sec>` (whole request)
-  and `--connect-timeout <sec>`. `scripts/healthcheck` already threads a
-  `timeout_sec` into `curl --max-time` — keep that; never add a bare
-  `curl <url>` or `curl` without `--max-time`.
-- `certbot` / ACME calls run under a bounded wrapper (`timeout <sec> certbot …`
-  or certbot's own `--http-01-*` timeouts); a stalled ACME challenge must not
-  block the renew timer forever.
-- Prefer the runner helpers' `--timeout` / `run_command … --timeout` pattern for
-  any new external command that can block on the network.
+- Set an **explicit timeout** on every remote call (connect + read, or a single
+  overall deadline the library supports).
+- Prefer the product's shared HTTP client / config timeout knob when one exists.
+  Defaults must be finite and documented. Never leave library defaults that mean
+  "wait forever."
+- Agent / shell wrappers that hit the network should use the helpers'
+  `--timeout` / `run_command … --timeout` patterns when available.
+- For GitHub API work, honor rate-limit / secondary-limit waits
+  (`GITHUB_API_RATE_LIMIT` / documented cooldown helpers) rather than spinning —
+  route ad-hoc `gh` calls through `scripts/gh-api` (see Product-specific below).
 
 ## Retries (required when retrying)
 
-- Retry only **transient** failures: `curl` exit `28` (timeout) / `7` (connect
-  failed) / `56` (recv error), and HTTP `408`, `429`, `502`, `503`, `504`.
-  A `4xx` other than `408` / `429` (and a `certbot` "too many certificates" rate
-  limit) is **permanent** — surface it, do not retry.
-- Cap attempts (small fixed `N`, 2–5) **or** a total retry budget. Never write an
-  **unbounded** `while true` loop around a network call.
-- Back off between attempts (`sleep` with exponential growth). Honor
-  `Retry-After` when the peer sends it, clamped to a ceiling that fits the timer.
-- Do **not** retry a non-idempotent write — a certificate issuance / ACME order,
-  a state-changing `gh` API call — unless it is safe to re-send. Renewal against
-  Let's Encrypt rate limits is not: fail fast and let the next scheduled run
-  retry. Idempotent probes (`GET /health`) are safe to retry within budget.
-- On exhaustion, emit one clear `ERROR: …` line and exit non-zero — never spin
-  silently (matches the healthcheck's `_detail=` / exit-code contract).
+- Retries are for **transient** failures only (timeouts, 429, 502/503/504, reset).
+- Cap attempts (small fixed `N`, typically 2–5) **or** a total retry budget.
+- Back off between attempts (exponential with jitter when practical). Honor
+  `Retry-After` when the peer sends it.
+- Do **not** retry non-idempotent writes unless the API contract is safe
+  (dedupe keys / explicit idempotency). Prefer fail fast on 4xx except 408/429.
+- Log or surface a clear timeout/retry exhaustion error — never spin silently.
+
+## Product-specific
+
+Wire timeouts through the repo's shared HTTP client / config knob. Do not add
+one-off unbounded clients beside that shared path.
+
+### GitHub API from agent flows
+
+Never run a bare `gh api`, or a paginated / looped `gh` read or write, directly
+in an agent flow (triage, review, posting a reply, resolving a comment).
+Route every such call through `scripts/gh-api` (resolved from
+`${REPOSITORY_HELPERS_DIR:-$HOME/work/ai/repository-helpers}`) so primary **and**
+secondary rate-limit backoff (`Retry-After` / `X-RateLimit-Reset`,
+`NOTE: GITHUB_RATE_LIMIT_*`, exit `125` on quota-intact fail-fast) is automatic —
+the same logic `wait-for-agent-review` and `github-repo-lint` already use
+internally. Interactive `gh` (`auth`, prompts, `--web`) is exempt;
+`scripts/gh-api -- …` opts a non-listed subcommand in. See repository-helpers#608.
 
 ## Anti-patterns
 
-```bash
+```python
 # bad — no timeout
-curl -sS "https://${host}/health"
-code=$(curl -o /dev/null -w '%{http_code}' "$url")
+requests.get(url)
+httpx.get(url)
+client.execute()  # SDK call with no timeout / retry policy
 
 # bad — unbounded retry
-while true; do
-  curl -fsS "$url" && break
-  sleep 5            # no cap, no backoff growth, no give-up
-done
+while True:
+    try:
+        return call()
+    except TimeoutError:
+        continue
 ```
 
-```bash
-# good — explicit timeout, status classification, bounded backed-off retry
-attempts=0 max_attempts=4 backoff=2
-transient=' 408 429 502 503 504 '
-while :; do
-  # curl exits 0 on ANY HTTP response, so inspect the status, not just $?
-  if code=$(curl -sS --connect-timeout 5 --max-time "${timeout_sec}" \
-        -o /dev/null -w '%{http_code}' "$url"); then
-    [[ "$code" == 2* ]] && break                               # healthy
-    [[ "$transient" != *" $code "* ]] && { echo "ERROR: HTTP $code (permanent)"; exit 1; }
-  else
-    rc=$?
-    case "$rc" in 7|28|56) : ;; *) echo "ERROR: curl rc=$rc (permanent)"; exit 1 ;; esac
-  fi
-  attempts=$((attempts + 1))
-  (( attempts >= max_attempts )) && { echo "ERROR: probe retries exhausted"; exit 1; }
-  sleep $(( backoff + RANDOM % backoff )); backoff=$(( backoff * 2 ))   # jitter
-done
+```python
+# good — timeout from config + bounded retries
+http.timeout = httpx.Timeout(timeout_s, connect=min(30.0, timeout_s))
+# or: run_command "label" --timeout 20 -- curl …
+request_with_retries(call, max_attempts=3, retry_after_header=True)
 ```
