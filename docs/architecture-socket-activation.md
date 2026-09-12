@@ -133,11 +133,17 @@ have to rediscover them.
    `exec` time does not revoke the already-open 80/443 fds handed to the
    process — a compromised master or worker can still `accept()` on those
    ports as the service user for as long as the process lives.
-6. **Limited systemd sandboxing today.** Beyond `NoNewPrivileges=true`, the
-   service does not yet set `ProtectSystem=`, `ProtectHome=`, `PrivateTmp=`,
-   `RestrictAddressFamilies=`, `SystemCallFilter=`, or a narrower capability
-   bounding set. There's real room to harden here without giving up socket
-   activation — this is the most actionable open item on this list.
+6. **Systemd sandboxing.** ✅ `home-warden.service` now sets
+   `ProtectSystem=strict` + `ProtectHome=true` (with the three paths it
+   actually needs reopened via `ReadOnlyPaths=`/`ReadWritePaths=`),
+   `PrivateTmp=true`, `RestrictAddressFamilies=`, and an empty
+   `CapabilityBoundingSet=`, on top of `NoNewPrivileges=true`
+   ([#42](https://github.com/the-hcma/home-warden/issues/42)).
+   `SystemCallFilter=` is deliberately deferred to a follow-up: it's the one
+   directive most likely to manifest as a mysterious runtime failure rather
+   than a clean refusal to start, so it needs its own isolated rollout and
+   live validation rather than landing bundled with the lower-risk
+   directives above.
 7. **`FreeBind=true`.** Allows the socket to bind before the address is
    fully configured/local — broader than the default bind behavior, needed
    for reliable boot-time binding, not narrowed further today.

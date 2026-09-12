@@ -19,6 +19,22 @@ Restart=on-failure
 RestartSec=5
 # Bind privileged ports only via inherited fds from home-warden.socket.
 NoNewPrivileges=true
+# --- Sandboxing (home-warden#42) ---
+# Whole filesystem read-only except the paths reopened below.
+ProtectSystem=strict
+# Hide other users'/root's home dirs entirely; reopen only our three paths.
+ProtectHome=true
+ReadOnlyPaths=@@HOME_NGINX_CONF_DIR@@ @@CONF_DIR@@
+ReadWritePaths=@@SCRATCH_DIR@@
+# nginx's own temp dirs live under SCRATCH_DIR (-p), never the shared /tmp.
+PrivateTmp=true
+# The inherited 80/443 fds are already open before exec and unaffected by
+# this; it only blocks the worker opening *new* sockets in other families
+# (netlink, packet, …) it has no legitimate use for.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Fds are inherited pre-opened from the socket; the worker needs no
+# capabilities of its own.
+CapabilityBoundingSet=
 # Systemd / process logs (nginx access/error also under @@SCRATCH_DIR@@/logs/).
 # Follow with: tail --follow=name --retry @@SCRATCH_DIR@@/home-warden.log
 StandardOutput=append:@@SCRATCH_DIR@@/home-warden.log
