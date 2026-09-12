@@ -226,6 +226,10 @@ check_packages() {
 maybe_install_missing_packages() {
   ((do_fix_packages)) || return 0
   ((json_out)) && return 0
+  if ! command -v dpkg-query >/dev/null 2>&1 || ! command -v apt-get >/dev/null 2>&1; then
+    echo "--fix-packages needs apt/dpkg (Debian/Ubuntu) — skipping on this host." >&2
+    return 0
+  fi
 
   local pkg
   local -a missing=()
