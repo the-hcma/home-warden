@@ -147,10 +147,13 @@ have to rediscover them.
 7. **`FreeBind=true`.** Allows the socket to bind before the address is
    fully configured/local — broader than the default bind behavior, needed
    for reliable boot-time binding, not narrowed further today.
-8. **Logging / disk-fill surface.** `StandardOutput=`/`StandardError=append:`
-   into scratch logs, plus nginx's own access/error logs, are all on the
-   request path — no rotation or size cap configured by home-warden itself;
-   disk fill or log injection from network-controlled input is possible.
+8. **Logging / disk-fill surface.** ✅ `setup-service` now installs
+   `/etc/logrotate.d/home-warden` (`etc/logrotate/home-warden`): daily,
+   capped at 100M, 14 rotations kept, `copytruncate`
+   ([#44](https://github.com/the-hcma/home-warden/issues/44)). `copytruncate`
+   trades a small window of possible lost writes (between the copy and the
+   truncate) for not needing a signal-and-reopen path through a privileged
+   `postrotate` hook — an acceptable trade for these logs.
 9. **`:80` is a real listener.** Cleartext HTTP is bound and expected to
    redirect to HTTPS; ensure the home conf never serves anything sensitive
    over that cleartext listener before the redirect, and that HSTS is only

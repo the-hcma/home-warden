@@ -68,6 +68,13 @@ tail --follow=name --retry ~/scratch/home-warden/nginx-test-and-reload.log
 tail --follow=name --retry ~/scratch/home-warden/healthcheck.log
 ```
 
+`setup-service` installs `/etc/logrotate.d/home-warden` (from
+`etc/logrotate/home-warden`): daily, capped at 100M, 14 rotations kept,
+`copytruncate` (no reopen signal needed — see
+[docs/architecture-socket-activation.md](./architecture-socket-activation.md)
+for why). Runs via the distro's standard `logrotate.timer`/cron, no
+home-warden-specific timer needed.
+
 ## Layout on the host
 
 | Path | Role |
@@ -79,7 +86,7 @@ tail --follow=name --retry ~/scratch/home-warden/healthcheck.log
 
 ```bash
 sudo apt-get install -y nginx nginx-common libnginx-mod-stream openssl \
-  certbot python3-certbot-dns-cloudflare
+  certbot python3-certbot-dns-cloudflare logrotate
 ```
 
 The package list lives in one place, `scripts/bootstrap`'s `apt_packages` array — this
@@ -93,6 +100,7 @@ table mirrors it:
 | `openssl` | dhparam / staging certs (`bootstrap --fix`) |
 | `certbot` | `scripts/cert-renewer` |
 | `python3-certbot-dns-cloudflare` | DNS-01 plugin used by the renewer |
+| `logrotate` | rotates `SCRATCH_DIR`'s logs (`etc/logrotate/home-warden`) |
 
 `./scripts/bootstrap --fix-packages` checks and, after a `[y/N]` confirm, installs any
 that are missing. `setup-service` also verifies nginx/certbot packages are present and
