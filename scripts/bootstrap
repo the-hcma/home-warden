@@ -2,9 +2,10 @@
 # Check (and optionally remediate) host prerequisites for home-warden Milestone 1.
 #
 # Usage:
-#   ./scripts/bootstrap           # check only; exit 1 if anything required is missing
-#   ./scripts/bootstrap --fix     # create scratch, modules symlink, dhparam, staging certs
-#   ./scripts/bootstrap --json    # machine-readable summary on stdout
+#   ./scripts/bootstrap                # check only; exit 1 if anything required is missing
+#   ./scripts/bootstrap --fix          # create scratch, modules symlink, dhparam, staging certs
+#   ./scripts/bootstrap --fix-packages # confirm, then sudo apt-get install -y missing packages
+#   ./scripts/bootstrap --json         # machine-readable summary on stdout (never runs apt)
 #
 # Env overrides (same as setup-service):
 #   HOME_NGINX_CONF  OWNER  SCRATCH_DIR  CONF_DIR
@@ -16,12 +17,24 @@ readonly script_dir
 repo_dir="$(cd "${script_dir}/.." && pwd)"
 readonly repo_dir
 
+# Single source of truth for apt packages required to run home-warden and its
+# cert-renewal path; mirrored in docs/host-prerequisites.md.
+readonly -a apt_packages=(
+  nginx
+  nginx-common
+  libnginx-mod-stream
+  openssl
+  certbot
+  python3-certbot-dns-cloudflare
+)
+
 OWNER="${OWNER:-$(id -un)}"
 SCRATCH_DIR="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 CONF_DIR="${CONF_DIR:-${HOME}/conf/home-warden}"
 HOME_NGINX_CONF="${HOME_NGINX_CONF:-}"
 
 do_fix=0
+do_fix_packages=0
 json_out=0
 pass_count=0
 warn_count=0
@@ -32,18 +45,20 @@ declare -a results=()
 
 usage() {
   cat <<'EOF'
-Usage: bootstrap [--fix] [--json] [-h|--help]
+Usage: bootstrap [--fix] [--fix-packages] [--json] [-h|--help]
 
 Check host prerequisites for home-warden (Ubuntu 26 / nginx 1.28 / systemd socket activation).
 
-  --fix   Remediate safe items (scratch dirs, modules symlink, dhparam, self-signed staging certs)
-  --json   Print a JSON summary instead of human text
+  --fix           Remediate safe items (scratch dirs, modules symlink, dhparam, staging certs)
+  --fix-packages  Prompt [y/N], then sudo apt-get install -y any missing packages
+  --json          Print a JSON summary instead of human text (never installs packages)
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --fix) do_fix=1 ;;
+    --fix-packages) do_fix_packages=1 ;;
     --json) json_out=1 ;;
     -h | --help)
       usage
@@ -190,20 +205,55 @@ check_nginx_binary() {
   fi
 }
 
+package_installed() {
+  local -r pkg="$1"
+  dpkg-query -W -f='${Status}' "${pkg}" 2>/dev/null | grep -q 'install ok installed'
+}
+
 check_packages() {
   local pkg
-  for pkg in nginx nginx-common libnginx-mod-stream; do
-    if dpkg-query -W -f='${Status}' "${pkg}" 2>/dev/null | grep -q 'install ok installed'; then
+  for pkg in "${apt_packages[@]}"; do
+    if package_installed "${pkg}"; then
       record pass "pkg_${pkg}" "${pkg} installed ($(dpkg-query -W -f='${Version}' "${pkg}"))"
     else
-      record fail "pkg_${pkg}" "${pkg} missing — sudo apt-get install -y nginx libnginx-mod-stream"
+      record fail "pkg_${pkg}" "${pkg} missing — sudo apt-get install -y ${pkg}"
     fi
   done
-  if command -v openssl >/dev/null 2>&1; then
-    record pass pkg_openssl "openssl available"
-  else
-    record warn pkg_openssl "openssl missing — needed to generate dhparam / staging certs"
+}
+
+# Prompts (unless --json) then sudo apt-get install -y any missing apt_packages.
+# --json must never shell out to apt, even if --fix-packages was also passed.
+maybe_install_missing_packages() {
+  ((do_fix_packages)) || return 0
+  ((json_out)) && return 0
+  if ! command -v dpkg-query >/dev/null 2>&1 || ! command -v apt-get >/dev/null 2>&1; then
+    echo "--fix-packages needs apt/dpkg (Debian/Ubuntu) — skipping on this host." >&2
+    return 0
   fi
+
+  local pkg
+  local -a missing=()
+  for pkg in "${apt_packages[@]}"; do
+    package_installed "${pkg}" || missing+=("${pkg}")
+  done
+  ((${#missing[@]} > 0)) || return 0
+
+  echo "Missing packages: ${missing[*]}"
+  if [[ ! -t 0 ]]; then
+    echo "ERROR: --fix-packages needs an interactive terminal to confirm apt-get install" >&2
+    exit 1
+  fi
+  local reply=""
+  read -r -p "Install via sudo apt-get install -y ${missing[*]}? [y/N] " reply
+  case "${reply}" in
+    y | Y | yes | YES) ;;
+    *)
+      echo "Skipped package install — re-run checks after installing manually."
+      return 0
+      ;;
+  esac
+  sudo apt-get update
+  sudo apt-get install -y "${missing[@]}"
 }
 
 check_modules_enabled() {
@@ -484,7 +534,8 @@ print_summary() {
   echo "  owner:    ${OWNER}"
   if ((fail_count > 0)); then
     echo
-    echo "Next: re-run with --fix for safe remediations, then:"
+    echo "Next: re-run with --fix-packages for missing apt packages, --fix for other safe"
+    echo "remediations, then:"
     echo "  ./scripts/setup-service"
     echo "See docs/host-prerequisites.md"
   elif ((warn_count > 0)); then
@@ -498,10 +549,12 @@ print_summary() {
 
 main() {
   if ((json_out == 0)); then
-    echo "home-warden bootstrap (check$([[ ${do_fix} -eq 1 ]] && echo '+fix'))"
+    echo "home-warden bootstrap (check$([[ ${do_fix} -eq 1 ]] && echo '+fix')$([[ ${do_fix_packages} -eq 1 ]] && echo '+fix-packages'))"
     echo "repo: ${repo_dir}"
     echo
   fi
+
+  maybe_install_missing_packages
 
   check_os
   check_systemd

@@ -48,8 +48,9 @@ in tracked files.
 ## Optional preflight
 
 ```bash
-./scripts/bootstrap           # report only
-./scripts/bootstrap --fix     # create scratch, dhparam, staging certs, modules symlink
+./scripts/bootstrap                # report only
+./scripts/bootstrap --fix          # create scratch, dhparam, staging certs, modules symlink
+./scripts/bootstrap --fix-packages # confirm [y/N], then sudo apt-get install -y missing packages
 ```
 
 ## Logs
@@ -73,13 +74,25 @@ tail --follow=name --retry ~/scratch/home-warden/healthcheck.log
 ## Packages (pre-install)
 
 ```bash
-sudo apt-get install -y nginx libnginx-mod-stream
-# Optional: openssl for generating dhparam / staging certs
-# For TLS renew:
-sudo apt-get install -y certbot python3-certbot-dns-cloudflare
+sudo apt-get install -y nginx nginx-common libnginx-mod-stream openssl \
+  certbot python3-certbot-dns-cloudflare
 ```
 
-`setup-service` verifies nginx packages are present and aborts with an install hint if not.
+The package list lives in one place, `scripts/bootstrap`'s `apt_packages` array — this
+table mirrors it:
+
+| Package | Why |
+| --- | --- |
+| `nginx` | binary + unit we mask in favor of home-warden |
+| `nginx-common` | shared bits / modules layout |
+| `libnginx-mod-stream` | `stream { }` (e.g. MQTT) |
+| `openssl` | dhparam / staging certs (`bootstrap --fix`) |
+| `certbot` | `scripts/cert-renewer` |
+| `python3-certbot-dns-cloudflare` | DNS-01 plugin used by the renewer |
+
+`./scripts/bootstrap --fix-packages` checks and, after a `[y/N]` confirm, installs any
+that are missing. `setup-service` also verifies nginx/certbot packages are present and
+aborts with an install hint if not — `--fix-packages` is the faster path to close that gap.
 
 ## Scratch runtime (`nginx -p`)
 
