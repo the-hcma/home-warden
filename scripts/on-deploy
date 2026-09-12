@@ -30,6 +30,8 @@ source "${script_dir}/lib/host-guard"
 if ! hw_host_guard_enforce "on-deploy"; then
   exit 2
 fi
+# shellcheck source=scripts/lib/nginx-pid
+source "${script_dir}/lib/nginx-pid"
 
 owner="${OWNER:-$(id -un)}"
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
@@ -87,6 +89,7 @@ validate_nginx_conf() {
   fi
   if sudo -n true 2>/dev/null; then
     if sudo -n nginx -p "${scratch_dir}/" -t -c "${conf}"; then
+      hw_fix_nginx_pid_ownership "${scratch_dir}" "${owner}"
       echo "on-deploy: nginx -t OK (${conf})"
       return 0
     fi

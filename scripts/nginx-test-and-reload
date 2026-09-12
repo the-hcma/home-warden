@@ -5,7 +5,10 @@
 # Env:
 #   HOME_NGINX_CONF  nginx -c path (required unless default resolve works)
 #   SCRATCH_DIR      default: ~/scratch/home-warden
-#   OWNER            unused; reload uses systemctl
+#   OWNER            operator to hand SCRATCH_DIR/logs/nginx.pid back to after
+#                     nginx -t (this script runs as root, via
+#                     home-warden-reload.service); default: SCRATCH_DIR's
+#                     existing owner
 #
 # Exit:
 #   0 — test OK and reload/restart succeeded (or service inactive: skip reload)
@@ -28,9 +31,12 @@ source "${script_dir}/lib/host-guard"
 if ! hw_host_guard_enforce "nginx-test-and-reload"; then
   exit 1
 fi
+# shellcheck source=scripts/lib/nginx-pid
+source "${script_dir}/lib/nginx-pid"
 
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 home_nginx_conf="${HOME_NGINX_CONF:-}"
+owner="${OWNER:-$(stat -c '%U' "${scratch_dir}" 2>/dev/null || true)}"
 
 log() {
   local msg=$1
@@ -62,6 +68,9 @@ if ! nginx -p "${scratch_dir}/" -t -c "${home_nginx_conf}"; then
   exit 1
 fi
 log "nginx -t OK"
+if [[ -n "${owner}" ]]; then
+  hw_fix_nginx_pid_ownership "${scratch_dir}" "${owner}"
+fi
 
 if systemctl is-active --quiet home-warden.service 2>/dev/null; then
   log "reloading home-warden.service"

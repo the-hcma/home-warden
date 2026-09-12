@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# scripts/lib/nginx-pid — repair ownership of the live nginx pid file after a
+# root-run `nginx -t`.
+#
+# nginx opens the conf's `pid` path for writing even in test mode (`-t`), and
+# only *creation* sets the owner — a later root-run `-t` just truncates an
+# existing file and keeps root ownership. Several call sites run `nginx -t` as
+# root against the same ${scratch_dir}/logs/nginx.pid the live, unprivileged
+# home-warden.service writes on every start: scripts/setup-service's
+# validate_nginx_config, scripts/on-deploy's sudo -n nginx -t, and
+# home-warden-reload.service's whole-process-as-root nginx -t (via
+# scripts/nginx-test-and-reload). Left root-owned, the next home-warden.service
+# start hits "permission denied" on its own pid file and crash-loops
+# (Restart=on-failure). Call this right after every such nginx -t succeeds.
+
+# hw_fix_nginx_pid_ownership <scratch_dir> <owner>
+hw_fix_nginx_pid_ownership() {
+  local -r scratch_dir="$1"
+  local -r owner="$2"
+  local -r pid_file="${scratch_dir}/logs/nginx.pid"
+
+  [[ -f "${pid_file}" ]] || return 0
+  if [[ "$(id -u)" -eq 0 ]]; then
+    chown "${owner}:${owner}" "${pid_file}"
+  else
+    sudo chown "${owner}:${owner}" "${pid_file}"
+  fi
+}
