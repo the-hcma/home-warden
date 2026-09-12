@@ -1,0 +1,26 @@
+# home-warden log rotation (home-warden#44).
+# Template: etc/logrotate/home-warden — expanded by scripts/setup-service,
+# installed to /etc/logrotate.d/home-warden (root-owned; logrotate itself
+# runs as root via the distro's standard logrotate.timer/cron job).
+#
+# copytruncate everywhere: the plain `append:` sinks (home-warden.log,
+# cert-renewer.log, nginx-test-and-reload.log, healthcheck.log) have no
+# reopen mechanism at all, and nginx's own access/error logs would otherwise
+# need a SIGUSR1 signal-and-reopen step wired through a privileged
+# postrotate hook. copytruncate avoids that entirely at the cost of a small
+# window where writes between the copy and the truncate can be lost — an
+# acceptable trade for these logs. See
+# docs/architecture-socket-activation.md for why an external helper can't
+# just re-exec nginx to reopen logs under socket activation.
+
+@@SCRATCH_DIR@@/*.log @@SCRATCH_DIR@@/logs/*.log {
+  daily
+  maxsize 100M
+  rotate 14
+  compress
+  delaycompress
+  missingok
+  notifempty
+  copytruncate
+  su @@OWNER@@ @@OWNER@@
+}

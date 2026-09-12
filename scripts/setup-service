@@ -33,6 +33,8 @@ repo_dir="$(cd "${script_dir}/.." && pwd)"
 readonly repo_dir
 readonly unit_template_dir="${repo_dir}/etc/systemd"
 readonly system_unit_dir="/etc/systemd/system"
+readonly logrotate_template="${repo_dir}/etc/logrotate/home-warden"
+readonly logrotate_dest="/etc/logrotate.d/home-warden"
 
 # shellcheck source=scripts/lib/host-guard
 source "${script_dir}/lib/host-guard"
@@ -221,6 +223,14 @@ check_prerequisites() {
   fi
   if [[ ! -f "${unit_template_dir}/home-warden-healthcheck.service" || ! -f "${unit_template_dir}/home-warden-healthcheck.timer" ]]; then
     echo "ERROR: missing healthcheck unit templates under ${unit_template_dir}" >&2
+    missing=1
+  fi
+  if ! command -v logrotate >/dev/null 2>&1; then
+    echo "ERROR: logrotate not on PATH — sudo apt-get install -y logrotate" >&2
+    missing=1
+  fi
+  if [[ ! -f "${logrotate_template}" ]]; then
+    echo "ERROR: missing logrotate template ${logrotate_template}" >&2
     missing=1
   fi
   if [[ ! -x "${repo_dir}/scripts/nginx-test-and-reload" ]]; then
@@ -499,6 +509,7 @@ main() {
   expand_unit "${unit_template_dir}/home-warden-reload.path" "${system_unit_dir}/home-warden-reload.path"
   expand_unit "${unit_template_dir}/home-warden-healthcheck.service" "${system_unit_dir}/home-warden-healthcheck.service"
   expand_unit "${unit_template_dir}/home-warden-healthcheck.timer" "${system_unit_dir}/home-warden-healthcheck.timer"
+  expand_unit "${logrotate_template}" "${logrotate_dest}"
 
   mask_distro_nginx
 

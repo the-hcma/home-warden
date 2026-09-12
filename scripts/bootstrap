@@ -26,6 +26,7 @@ readonly -a apt_packages=(
   openssl
   certbot
   python3-certbot-dns-cloudflare
+  logrotate
 )
 
 OWNER="${OWNER:-$(id -un)}"
@@ -435,6 +436,11 @@ check_unit_templates() {
       record fail "template_${f}" "missing ${repo_dir}/etc/systemd/${f}"
     fi
   done
+  if [[ -f "${repo_dir}/etc/logrotate/home-warden" ]]; then
+    record pass template_logrotate "${repo_dir}/etc/logrotate/home-warden"
+  else
+    record fail template_logrotate "missing ${repo_dir}/etc/logrotate/home-warden"
+  fi
   if [[ -x "${repo_dir}/scripts/setup-service" ]]; then
     record pass setup_service "scripts/setup-service executable"
   elif [[ -f "${repo_dir}/scripts/setup-service" ]]; then
