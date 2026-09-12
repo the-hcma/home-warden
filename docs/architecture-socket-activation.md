@@ -5,7 +5,7 @@ are. `docs/host-prerequisites.md` covers *installing and operating* it; this
 doc covers *why it's built this way* and *what it does and doesn't protect
 against*. See also [PLAN.md](../PLAN.md) for the original design rationale.
 
-Status: live on the designated host (`tron`) — socket activation, DNS-01 cert
+Status: live on the designated host — socket activation, DNS-01 cert
 renewal, config-watch reload, and healthcheck alerting are all running.
 Originally proposed in [#9](https://github.com/the-hcma/home-warden/issues/9),
 following on from Milestone 1 ([#2](https://github.com/the-hcma/home-warden/issues/2)).

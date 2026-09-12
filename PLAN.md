@@ -195,7 +195,7 @@ WantedBy=multi-user.target
 | 0 | Repo bootstrap | This plan, org practices scaffolding, CI smoke; **gh-stack** + GitHub MQ | ✅ done |
 | 1 | Minimal nginx.conf | User-writable pid/temp/log paths; `nginx -t` in CI | ✅ done |
 | 2 | Systemd units + setup-service | Install to `/etc/systemd/system/`, host guards | ✅ done |
-| 3 | Socket-activation proof | Bind 80/443 on a lab host; confirm `NGINX=` fds | ✅ done — live on `tron` |
+| 3 | Socket-activation proof | Bind 80/443 on a lab host; confirm `NGINX=` fds | ✅ done — live on the designated host |
 | 4 | TLS + certbot timer | First cert, renew dry-run, reload hook | ✅ done — DNS-01/Cloudflare, daily timer |
 | 5 | Upstream catalog | conf.d entries for sibling services | Moved to `thehcma/home` (the actual served conf lives there, not in this repo) |
 | 6 | Docs | README install, ops runbook, failure modes | ✅ done — see docs/host-prerequisites.md and docs/architecture-socket-activation.md |
