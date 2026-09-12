@@ -9,7 +9,7 @@
 
 [Unit]
 Description=home-warden certbot renewer (oneshot)
-Documentation=https://github.com/the-hcma/home-warden/blob/main/PLAN.md
+Documentation=https://github.com/the-hcma/home-warden/blob/main/docs/host-prerequisites.md
 After=network-online.target home-warden.service
 Wants=network-online.target
 
