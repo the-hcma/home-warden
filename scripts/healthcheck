@@ -19,8 +19,17 @@
 #   ./scripts/healthcheck
 #   ./scripts/healthcheck --verbose
 #   ./scripts/healthcheck --check-only
+#
+# Refuses to probe/alert anywhere but the host pinned by
+# `scripts/setup-service --confirm-host` (see scripts/lib/host-guard).
 
 set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly script_dir
+
+# shellcheck source=scripts/lib/host-guard
+source "${script_dir}/lib/host-guard"
 
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 email_to="${HEALTHCHECK_EMAIL_TO:-}"
@@ -62,6 +71,13 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+if ! hw_host_guard_enforce "healthcheck"; then
+  if ((check_only)); then
+    exit 1
+  fi
+  exit 0
+fi
 
 if [[ -z "${email_from}" ]]; then
   host_f="$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo localhost)"

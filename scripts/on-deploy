@@ -12,6 +12,11 @@
 #   2+ — failure; setup-service aborts
 #
 # Worktree-aware: repo_dir is resolved from BASH_SOURCE[0].
+#
+# Refuses to run anywhere but the host pinned by
+# `scripts/setup-service --confirm-host` (see scripts/lib/host-guard) — this
+# hook is invoked automatically by generic dev-machine session-init tooling,
+# not just by scripts/setup-service on the real host.
 
 set -euo pipefail
 
@@ -19,6 +24,12 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly script_dir
 repo_dir="$(cd "${script_dir}/.." && pwd)"
 readonly repo_dir
+
+# shellcheck source=scripts/lib/host-guard
+source "${script_dir}/lib/host-guard"
+if ! hw_host_guard_enforce "on-deploy"; then
+  exit 2
+fi
 
 owner="${OWNER:-$(id -un)}"
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"

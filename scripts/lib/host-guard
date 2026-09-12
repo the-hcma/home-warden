@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# scripts/lib/host-guard — refuse to act anywhere but the one host this
+# home-warden checkout has been explicitly pinned to.
+#
+# Never hardcodes a real hostname (see .cursor/rules/no-private-infra.mdc): the
+# designated host is captured locally, under $HOME/.config on the host itself,
+# only when an operator deliberately confirms it via `scripts/setup-service
+# --confirm-host` (or `--repin-host` to move the pin later). Every other
+# home-warden script sources this file and calls hw_host_guard_enforce before
+# touching live state, so an accidental invocation elsewhere — a dev-machine
+# session-init hook, a stray cron entry, a copy-pasted command — refuses
+# instead of silently acting.
+#
+# Deliberately distinct file names from repository-helpers' generic
+# ~/.config/user-services-host* (a shared, self-adopting pin used for
+# unrelated per-machine dev-convenience deployments of sibling repos) — reusing
+# those would let an unrelated mechanism decide where home-warden is allowed
+# to run.
+#
+# Fail-closed: with no pin yet recorded, hw_host_guard_enforce refuses
+# everywhere, including the intended host, until setup-service's explicit
+# confirmation step creates the pin. Set HOME_WARDEN_SKIP_HOST_GUARD=1 to
+# bypass (manual testing only — never set this in a unit or timer).
+
+hw_host_guard_config_dir="${HOME}/.config"
+readonly hw_host_guard_config_dir
+readonly hw_pinned_host_file="${hw_host_guard_config_dir}/home-warden-host"
+# shellcheck disable=SC2034 # informational only here; written/read by consumers (setup-service)
+readonly hw_pinned_host_fqdn_file="${hw_host_guard_config_dir}/home-warden-host-fqdn"
+readonly hw_pinned_machine_id_file="${hw_host_guard_config_dir}/home-warden-machine-id"
+
+hw_current_hostname_short() {
+  hostname -s 2>/dev/null || hostname
+}
+
+hw_current_machine_id() {
+  tr -d '[:space:]' </etc/machine-id 2>/dev/null || true
+}
+
+hw_first_line() {
+  local -r path="$1"
+  local line=""
+  [[ -f "${path}" ]] || return 0
+  IFS= read -r line <"${path}" || true
+  printf '%s\n' "${line}"
+}
+
+# 0 (true) once any pin file exists.
+hw_is_pinned() {
+  [[ -f "${hw_pinned_host_file}" || -f "${hw_pinned_machine_id_file}" ]]
+}
+
+# 0 (true) when the current host matches the pinned hostname OR machine-id
+# (same OR semantics as the generated ConditionHost= pair).
+hw_matches_pinned_host() {
+  local pinned_host pinned_machine_id
+
+  pinned_host="$(hw_first_line "${hw_pinned_host_file}")"
+  pinned_machine_id="$(hw_first_line "${hw_pinned_machine_id_file}")"
+
+  [[ -n "${pinned_host}" && "${pinned_host}" == "$(hw_current_hostname_short)" ]] && return 0
+  [[ -n "${pinned_machine_id}" && "${pinned_machine_id}" == "$(hw_current_machine_id)" ]] && return 0
+  return 1
+}
+
+# Call near the top of any script that touches live service state (nginx
+# reload, certbot, mail alerts, deploy bookkeeping). Prints a clear refusal to
+# stderr and returns 1 on any mismatch or when nothing is pinned yet; the
+# caller decides the exit code. Set HOME_WARDEN_SKIP_HOST_GUARD=1 to bypass.
+hw_host_guard_enforce() {
+  local -r caller="${1:-home-warden}"
+
+  if [[ "${HOME_WARDEN_SKIP_HOST_GUARD:-0}" == "1" ]]; then
+    return 0
+  fi
+
+  if ! hw_is_pinned; then
+    echo "${caller}: refusing to run — home-warden has no designated host yet" >&2
+    echo "${caller}: run scripts/setup-service --confirm-host on the intended host first" >&2
+    return 1
+  fi
+
+  if ! hw_matches_pinned_host; then
+    echo "${caller}: refusing to run — this host ($(hw_current_hostname_short)) is not the designated home-warden host" >&2
+    echo "${caller}: designated host recorded in ${hw_pinned_host_file}" >&2
+    return 1
+  fi
+
+  return 0
+}

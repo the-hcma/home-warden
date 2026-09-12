@@ -2,18 +2,21 @@
 # Install home-warden system socket + service (privileged ports via systemd).
 # Expands etc/systemd templates into /etc/systemd/system/ with sudo.
 #
-# Placeholders: @@OWNER@@ @@SCRATCH_DIR@@ @@CONF_DIR@@ @@HOME_NGINX_CONF@@
+# Placeholders: @@OWNER@@ @@SCRATCH_DIR@@ @@CONF_DIR@@ @@HOME_NGINX_CONF@@ @@HOME_DIR@@
 # Injects ConditionHost=|<machine-id> and ConditionHost=|<hostname> (OR).
 #
 # Flow (non-dry-run):
-#   1. Prompt for sudo (credential cache)
-#   2. Verify packages / home nginx.conf / unit templates
-#   3. Prepare scratch runtime (logs, modules symlink)
-#   4. Validate nginx config (sudo nginx -t) — abort if invalid
-#   5. Run on-deploy (when present), install units, mask distro nginx, start service
+#   1. Confirm / verify the designated host (see scripts/lib/host-guard)
+#   2. Prompt for sudo (credential cache)
+#   3. Verify packages / home nginx.conf / unit templates
+#   4. Prepare scratch runtime (logs, modules symlink)
+#   5. Validate nginx config (sudo nginx -t) — abort if invalid
+#   6. Run on-deploy (when present), install units, mask distro nginx, start service
 #
 # Usage:
 #   ./scripts/setup-service [--status] [--dry-run]
+#   ./scripts/setup-service --confirm-host   # first-time pin, non-interactive
+#   ./scripts/setup-service --repin-host     # move the pin to this host
 #   HOME_NGINX_CONF=/path/to/home/nginx/server/nginx.conf ./scripts/setup-service
 #
 # Env overrides:
@@ -30,31 +33,37 @@ repo_dir="$(cd "${script_dir}/.." && pwd)"
 readonly repo_dir
 readonly unit_template_dir="${repo_dir}/etc/systemd"
 readonly system_unit_dir="/etc/systemd/system"
-readonly host_config_dir="${HOME}/.config"
-readonly host_name_file="${host_config_dir}/user-services-host"
-readonly host_machine_id_file="${host_config_dir}/user-services-machine-id"
-readonly host_fqdn_file="${host_config_dir}/user-services-host-fqdn"
 
-OWNER="${OWNER:-$(id -un)}"
-SCRATCH_DIR="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
-CONF_DIR="${CONF_DIR:-${HOME}/conf/home-warden}"
-HOME_NGINX_CONF="${HOME_NGINX_CONF:-}"
-DEPLOYED_COMMIT="${DEPLOYED_COMMIT:-}"
+# shellcheck source=scripts/lib/host-guard
+source "${script_dir}/lib/host-guard"
+
+owner="${OWNER:-$(id -un)}"
+scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
+conf_dir="${CONF_DIR:-${HOME}/conf/home-warden}"
+home_nginx_conf="${HOME_NGINX_CONF:-}"
+deployed_commit="${DEPLOYED_COMMIT:-}"
 readonly default_home_nginx_conf="${HOME}/home/nginx/server/nginx.conf"
 
+confirm_host=0
 dry_run=0
+repin_host=0
 status_only=0
 
 usage() {
   cat <<'EOF'
-Usage: setup-service [--status] [--dry-run] [-h|--help]
+Usage: setup-service [--status] [--dry-run] [--confirm-host] [--repin-host] [-h|--help]
 
 Install/enable home-warden.socket + home-warden.service into /etc/systemd/system,
 plus certbot timer, conf-watch path unit, and healthcheck timer.
 Prompts for sudo, validates nginx -t, then starts the service when validation passes.
 
-  --status   Show resolved paths and unit state; do not install
-  --dry-run  Print actions without writing units or calling systemctl
+  --status        Show resolved paths and unit state; do not install
+  --dry-run       Print actions without writing units or calling systemctl
+  --confirm-host  Pin home-warden to this host non-interactively on first run
+  --repin-host    Move an existing pin to this host (e.g. hardware replacement)
+
+home-warden only ever acts on its one designated host (scripts/lib/host-guard).
+On first run (interactive), you will be asked to confirm this host by name.
 EOF
 }
 
@@ -62,6 +71,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --status) status_only=1 ;;
     --dry-run) dry_run=1 ;;
+    --confirm-host) confirm_host=1 ;;
+    --repin-host) repin_host=1 ;;
     -h | --help)
       usage
       exit 0
@@ -75,30 +86,61 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-current_hostname_short() {
-  hostname -s 2>/dev/null || hostname
-}
-
-machine_id_local() {
-  tr -d '[:space:]' </etc/machine-id
-}
-
 ensure_host_config() {
-  mkdir -p "${host_config_dir}"
-  if [[ ! -f "${host_name_file}" ]]; then
-    current_hostname_short >"${host_name_file}"
+  mkdir -p "${hw_host_guard_config_dir}"
+
+  # A pin mismatch always refuses — dry-run must surface this real blocker too.
+  if hw_is_pinned && ! hw_matches_pinned_host && ((repin_host == 0)); then
+    echo "ERROR: home-warden is pinned to a different host (see ${hw_pinned_host_file})" >&2
+    echo "  this host: $(hw_current_hostname_short) (machine-id $(hw_current_machine_id))" >&2
+    echo "  re-run with --repin-host if you intend to move home-warden here" >&2
+    exit 1
   fi
-  if [[ ! -f "${host_machine_id_file}" ]]; then
-    machine_id_local >"${host_machine_id_file}"
+
+  if hw_is_pinned && hw_matches_pinned_host; then
+    if ((dry_run)); then
+      echo "DRY-RUN: host already pinned to $(hw_current_hostname_short)"
+      return 0
+    fi
+  elif ((confirm_host == 0)); then
+    if [[ -t 0 && -t 1 ]]; then
+      if ((dry_run)); then
+        echo "DRY-RUN: would prompt to confirm pinning to $(hw_current_hostname_short)"
+        return 0
+      fi
+      local reply=""
+      echo "home-warden has no designated host yet."
+      echo "  This will pin it to: $(hw_current_hostname_short) ($(hostname))"
+      read -r -p "Continue? [y/N] " reply
+      case "${reply}" in
+        y | Y | yes | YES) ;;
+        *)
+          echo "Aborted — nothing pinned." >&2
+          exit 1
+          ;;
+      esac
+    else
+      # No confirmation possible — refuse in dry-run too; it must reflect the real outcome.
+      echo "ERROR: home-warden has no designated host yet." >&2
+      echo "  Verify 'hostname -s' is correct for this host, then re-run with --confirm-host." >&2
+      exit 1
+    fi
+  else
+    if ((dry_run)); then
+      echo "DRY-RUN: would pin home-warden to this host ($(hw_current_hostname_short))"
+      return 0
+    fi
+    echo "Pinning home-warden to this host ($(hw_current_hostname_short))..."
   fi
-  if [[ ! -f "${host_fqdn_file}" ]]; then
-    hostname >"${host_fqdn_file}" || current_hostname_short >"${host_fqdn_file}"
-  fi
+
+  hw_current_hostname_short >"${hw_pinned_host_file}"
+  hw_current_machine_id >"${hw_pinned_machine_id_file}"
+  hostname >"${hw_pinned_host_fqdn_file}" || hw_current_hostname_short >"${hw_pinned_host_fqdn_file}"
 }
 
 resolve_home_nginx_conf() {
-  if [[ -n "${HOME_NGINX_CONF}" ]]; then
-    printf '%s\n' "${HOME_NGINX_CONF}"
+  if [[ -n "${home_nginx_conf}" ]]; then
+    printf '%s\n' "${home_nginx_conf}"
     return 0
   fi
   if [[ -f "${default_home_nginx_conf}" ]]; then
@@ -132,13 +174,6 @@ require_sudo() {
     echo "ERROR: sudo authentication failed" >&2
     exit 1
   fi
-}
-
-config_file_first_line() {
-  local -r path="$1"
-  local line=""
-  IFS= read -r line <"${path}" || true
-  printf '%s\n' "${line}"
 }
 
 package_installed() {
@@ -198,8 +233,8 @@ check_prerequisites() {
     echo "ERROR: curl not on PATH — sudo apt-get install -y curl" >&2
     missing=1
   fi
-  if [[ ! -f "${HOME_NGINX_CONF}" ]]; then
-    echo "ERROR: HOME_NGINX_CONF not found: ${HOME_NGINX_CONF}" >&2
+  if [[ ! -f "${home_nginx_conf}" ]]; then
+    echo "ERROR: HOME_NGINX_CONF not found: ${home_nginx_conf}" >&2
     missing=1
   fi
   if ((missing)); then
@@ -210,29 +245,29 @@ check_prerequisites() {
 
 prepare_scratch() {
   run mkdir -p \
-    "${SCRATCH_DIR}/logs" \
-    "${SCRATCH_DIR}/logs/certbot" \
-    "${SCRATCH_DIR}/certbot-work" \
-    "${SCRATCH_DIR}/client_body_temp" \
-    "${SCRATCH_DIR}/proxy_temp" \
-    "${SCRATCH_DIR}/fastcgi_temp" \
-    "${SCRATCH_DIR}/uwsgi_temp" \
-    "${SCRATCH_DIR}/scgi_temp" \
-    "${CONF_DIR}/certs/live"
+    "${scratch_dir}/logs" \
+    "${scratch_dir}/logs/certbot" \
+    "${scratch_dir}/certbot-work" \
+    "${scratch_dir}/client_body_temp" \
+    "${scratch_dir}/proxy_temp" \
+    "${scratch_dir}/fastcgi_temp" \
+    "${scratch_dir}/uwsgi_temp" \
+    "${scratch_dir}/scgi_temp" \
+    "${conf_dir}/certs/live"
   if [[ -d /usr/lib/nginx/modules ]]; then
-    run ln -sfn /usr/lib/nginx/modules "${SCRATCH_DIR}/modules"
+    run ln -sfn /usr/lib/nginx/modules "${scratch_dir}/modules"
   fi
   if ((dry_run)); then
-    echo "DRY-RUN: would touch ${SCRATCH_DIR}/{home-warden,cert-renewer,nginx-test-and-reload,healthcheck}.log and logs/{error,access}.log"
+    echo "DRY-RUN: would touch ${scratch_dir}/{home-warden,cert-renewer,nginx-test-and-reload,healthcheck}.log and logs/{error,access}.log"
   else
     local log
     for log in \
-      "${SCRATCH_DIR}/home-warden.log" \
-      "${SCRATCH_DIR}/cert-renewer.log" \
-      "${SCRATCH_DIR}/nginx-test-and-reload.log" \
-      "${SCRATCH_DIR}/healthcheck.log" \
-      "${SCRATCH_DIR}/logs/error.log" \
-      "${SCRATCH_DIR}/logs/access.log"; do
+      "${scratch_dir}/home-warden.log" \
+      "${scratch_dir}/cert-renewer.log" \
+      "${scratch_dir}/nginx-test-and-reload.log" \
+      "${scratch_dir}/healthcheck.log" \
+      "${scratch_dir}/logs/error.log" \
+      "${scratch_dir}/logs/access.log"; do
       if ! touch "${log}"; then
         echo "ERROR: cannot create log file ${log} (is SCRATCH_DIR writable?)" >&2
         exit 1
@@ -244,10 +279,10 @@ prepare_scratch() {
 validate_nginx_config() {
   echo "Validating nginx config (sudo nginx -t)..."
   if ((dry_run)); then
-    echo "DRY-RUN: sudo nginx -p ${SCRATCH_DIR}/ -t -c ${HOME_NGINX_CONF}"
+    echo "DRY-RUN: sudo nginx -p ${scratch_dir}/ -t -c ${home_nginx_conf}"
     return 0
   fi
-  if ! sudo nginx -p "${SCRATCH_DIR}/" -t -c "${HOME_NGINX_CONF}"; then
+  if ! sudo nginx -p "${scratch_dir}/" -t -c "${home_nginx_conf}"; then
     echo "ERROR: nginx -t failed — refusing to install/start home-warden" >&2
     exit 1
   fi
@@ -263,19 +298,20 @@ expand_unit() {
   local tmp
   local home_nginx_conf_dir
 
-  home_nginx_conf_dir="$(dirname "${HOME_NGINX_CONF}")"
-  host_name="$(config_file_first_line "${host_name_file}")"
-  machine_id="$(config_file_first_line "${host_machine_id_file}")"
+  home_nginx_conf_dir="$(dirname "${home_nginx_conf}")"
+  host_name="$(hw_first_line "${hw_pinned_host_file}")"
+  machine_id="$(hw_first_line "${hw_pinned_machine_id_file}")"
 
   generated="$(
     sed \
-      -e "s|@@OWNER@@|${OWNER}|g" \
-      -e "s|@@SCRATCH_DIR@@|${SCRATCH_DIR}|g" \
-      -e "s|@@CONF_DIR@@|${CONF_DIR}|g" \
-      -e "s|@@HOME_NGINX_CONF@@|${HOME_NGINX_CONF}|g" \
+      -e "s|@@OWNER@@|${owner}|g" \
+      -e "s|@@SCRATCH_DIR@@|${scratch_dir}|g" \
+      -e "s|@@CONF_DIR@@|${conf_dir}|g" \
+      -e "s|@@HOME_NGINX_CONF@@|${home_nginx_conf}|g" \
       -e "s|@@HOME_NGINX_CONF_DIR@@|${home_nginx_conf_dir}|g" \
       -e "s|@@REPO_DIR@@|${repo_dir}|g" \
-      -e "s|@@DEPLOYED_COMMIT@@|${DEPLOYED_COMMIT}|g" \
+      -e "s|@@HOME_DIR@@|${HOME}|g" \
+      -e "s|@@DEPLOYED_COMMIT@@|${deployed_commit}|g" \
       "${src}"
   )"
 
@@ -318,11 +354,11 @@ run_on_deploy() {
   fi
   echo "Running scripts/on-deploy..."
   if ((dry_run)); then
-    echo "DRY-RUN: OWNER=${OWNER} SCRATCH_DIR=${SCRATCH_DIR} CONF_DIR=${CONF_DIR} HOME_NGINX_CONF=${HOME_NGINX_CONF} ${hook}"
+    echo "DRY-RUN: OWNER=${owner} SCRATCH_DIR=${scratch_dir} CONF_DIR=${conf_dir} HOME_NGINX_CONF=${home_nginx_conf} ${hook}"
     return 0
   fi
   set +e
-  OWNER="${OWNER}" SCRATCH_DIR="${SCRATCH_DIR}" CONF_DIR="${CONF_DIR}" HOME_NGINX_CONF="${HOME_NGINX_CONF}" "${hook}"
+  OWNER="${owner}" SCRATCH_DIR="${scratch_dir}" CONF_DIR="${conf_dir}" HOME_NGINX_CONF="${home_nginx_conf}" "${hook}"
   rc=$?
   set -e
   case "${rc}" in
@@ -343,21 +379,34 @@ run_on_deploy() {
 
 
 print_status() {
+  local pinned_host pinned_machine_id
+  pinned_host="$(hw_first_line "${hw_pinned_host_file}")"
+  pinned_machine_id="$(hw_first_line "${hw_pinned_machine_id_file}")"
+
   echo "home-warden setup-service status"
   echo "  repo:            ${repo_dir}"
-  echo "  owner:           ${OWNER}"
-  echo "  scratch:         ${SCRATCH_DIR}"
-  echo "  conf:            ${CONF_DIR}"
-  echo "  certs:           ${CONF_DIR}/certs/live"
-  echo "  home nginx.conf: ${HOME_NGINX_CONF:-<unset>}"
-  echo "  deployed commit: ${DEPLOYED_COMMIT:-$(git -C "${repo_dir}" rev-parse --short HEAD 2>/dev/null || echo '<unset>')}"
-  echo "  service log:     ${SCRATCH_DIR}/home-warden.log"
-  echo "  nginx error log: ${SCRATCH_DIR}/logs/error.log"
-  echo "  nginx access log:${SCRATCH_DIR}/logs/access.log"
-  echo "  host name file:  $(config_file_first_line "${host_name_file}" 2>/dev/null || echo '<missing>')"
-  echo "  machine-id file: $(config_file_first_line "${host_machine_id_file}" 2>/dev/null || echo '<missing>')"
-  echo "  local hostname:  $(current_hostname_short)"
-  echo "  local machine-id:$(machine_id_local)"
+  echo "  owner:           ${owner}"
+  echo "  scratch:         ${scratch_dir}"
+  echo "  conf:            ${conf_dir}"
+  echo "  certs:           ${conf_dir}/certs/live"
+  echo "  home nginx.conf: ${home_nginx_conf:-<unset>}"
+  echo "  deployed commit: ${deployed_commit:-$(git -C "${repo_dir}" rev-parse --short HEAD 2>/dev/null || echo '<unset>')}"
+  echo "  service log:     ${scratch_dir}/home-warden.log"
+  echo "  nginx error log: ${scratch_dir}/logs/error.log"
+  echo "  nginx access log:${scratch_dir}/logs/access.log"
+  echo "  pinned host:     ${pinned_host:-<unset>} (${hw_pinned_host_file})"
+  echo "  pinned machine-id:${pinned_machine_id:-<unset>} (${hw_pinned_machine_id_file})"
+  if hw_is_pinned; then
+    if hw_matches_pinned_host; then
+      echo "  guard status:    this host matches the pinned host"
+    else
+      echo "  guard status:    MISMATCH — this host is not the pinned host"
+    fi
+  else
+    echo "  guard status:    UNPINNED — run --confirm-host to designate this host"
+  fi
+  echo "  local hostname:  $(hw_current_hostname_short)"
+  echo "  local machine-id:$(hw_current_machine_id)"
   if command -v systemctl >/dev/null 2>&1; then
     local label
     local unit
@@ -406,18 +455,20 @@ confirm_running() {
 main() {
   local resolved
 
+  if ((status_only)); then
+    resolved="$(resolve_home_nginx_conf || true)"
+    home_nginx_conf="${resolved}"
+    print_status
+    exit 0
+  fi
+
   ensure_host_config
 
   if ! resolved="$(resolve_home_nginx_conf)"; then
     echo "ERROR: set HOME_NGINX_CONF to thehcma/home nginx/server/nginx.conf" >&2
     exit 1
   fi
-  HOME_NGINX_CONF="${resolved}"
-
-  if ((status_only)); then
-    print_status
-    exit 0
-  fi
+  home_nginx_conf="${resolved}"
 
   require_sudo
   check_prerequisites
@@ -430,7 +481,7 @@ main() {
   on_deploy_rc=$?
   set -e
 
-  DEPLOYED_COMMIT="$(git -C "${repo_dir}" rev-parse HEAD 2>/dev/null || true)"
+  deployed_commit="$(git -C "${repo_dir}" rev-parse HEAD 2>/dev/null || true)"
   expand_unit "${unit_template_dir}/home-warden.socket" "${system_unit_dir}/home-warden.socket"
   expand_unit "${unit_template_dir}/home-warden.service" "${system_unit_dir}/home-warden.service"
   expand_unit "${unit_template_dir}/home-warden-certbot.service" "${system_unit_dir}/home-warden-certbot.service"
@@ -465,12 +516,12 @@ main() {
 
   echo
   echo "Follow logs:"
-  echo "  tail --follow=name --retry ${SCRATCH_DIR}/home-warden.log"
-  echo "  tail --follow=name --retry ${SCRATCH_DIR}/logs/error.log"
-  echo "  tail --follow=name --retry ${SCRATCH_DIR}/logs/access.log"
-  echo "  tail --follow=name --retry ${SCRATCH_DIR}/cert-renewer.log"
-  echo "  tail --follow=name --retry ${SCRATCH_DIR}/nginx-test-and-reload.log"
-  echo "  tail --follow=name --retry ${SCRATCH_DIR}/healthcheck.log"
+  echo "  tail --follow=name --retry ${scratch_dir}/home-warden.log"
+  echo "  tail --follow=name --retry ${scratch_dir}/logs/error.log"
+  echo "  tail --follow=name --retry ${scratch_dir}/logs/access.log"
+  echo "  tail --follow=name --retry ${scratch_dir}/cert-renewer.log"
+  echo "  tail --follow=name --retry ${scratch_dir}/nginx-test-and-reload.log"
+  echo "  tail --follow=name --retry ${scratch_dir}/healthcheck.log"
   echo "Certbot timer:     systemctl list-timers home-warden-certbot.timer"
   echo "Manual renew:      sudo systemctl start home-warden-certbot.service"
   echo "Conf watch:        systemctl status home-warden-reload.path"

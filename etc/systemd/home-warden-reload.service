@@ -10,7 +10,11 @@ Requires=home-warden.socket
 
 [Service]
 Type=oneshot
-# Needs root for nginx -t against privileged paths / systemctl reload.
+# Needs root for nginx -t against privileged paths / systemctl reload. No User=,
+# so %h isn't the operator's home — HOME must be set explicitly so
+# scripts/lib/host-guard (sourced by scripts/nginx-test-and-reload) can find the
+# pin under the operator's ~/.config, not /root/.config.
+Environment=HOME=@@HOME_DIR@@
 Environment=HOME_NGINX_CONF=@@HOME_NGINX_CONF@@
 Environment=SCRATCH_DIR=@@SCRATCH_DIR@@
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
