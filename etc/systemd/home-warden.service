@@ -1,6 +1,6 @@
 [Unit]
 Description=home-warden nginx (unprivileged)
-Documentation=https://github.com/the-hcma/home-warden/blob/main/PLAN.md
+Documentation=https://github.com/the-hcma/home-warden/blob/main/docs/architecture-socket-activation.md
 Requires=home-warden.socket
 After=network.target home-warden.socket
 

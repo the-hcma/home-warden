@@ -3,7 +3,7 @@
 
 [Unit]
 Description=home-warden certbot renewer — daily schedule
-Documentation=https://github.com/the-hcma/home-warden/blob/main/PLAN.md
+Documentation=https://github.com/the-hcma/home-warden/blob/main/docs/host-prerequisites.md
 
 [Timer]
 OnCalendar=*-*-* 04:30:00

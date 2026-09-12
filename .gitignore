@@ -1,7 +1,6 @@
 # Local secrets / live certs (never commit)
 *.pem
 *.key
-!nginx/snippets/.gitkeep
 certs/
 .env
 .env.*

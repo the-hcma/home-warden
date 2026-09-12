@@ -2,6 +2,10 @@
 
 Target: **Ubuntu 26**, **nginx 1.28.3**, systemd **259+** (machine-id `ConditionHost`).
 
+> This doc covers install and day-2 ops. For how socket activation actually
+> works and its security trade-offs, see
+> [architecture-socket-activation.md](./architecture-socket-activation.md).
+
 ## One-shot install
 
 `scripts/setup-service` owns the full bring-up: designated-host check, sudo prompt,
