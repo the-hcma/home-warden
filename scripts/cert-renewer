@@ -150,11 +150,15 @@ for domain in "${domains[@]}"; do
   # certbot renewal profile — only renew when certbot knows the lineage.
   if [[ -s "${renewal_conf}" && -f "${live_cert}" ]]; then
     echo "cert-renewer: renew existing ${domain}"
+    # certbot rotates letsencrypt.log itself (default cap: 1000 backups) —
+    # this directory isn't covered by etc/logrotate/home-warden, so cap it
+    # here instead of layering a second, conflicting rotation scheme on it.
     "${certbot_bin}" renew \
       --server https://acme-v02.api.letsencrypt.org/directory \
       "${cf_args[@]}" \
       --work-dir "${scratch_dir}/certbot-work" \
       --logs-dir "${scratch_dir}/logs/certbot" \
+      --max-log-backups 14 \
       --config-dir "${certbot_config_dir}" \
       -m "${certbot_email}" \
       --agree-tos \
@@ -186,6 +190,7 @@ for domain in "${domains[@]}"; do
       "${cf_args[@]}" \
       --work-dir "${scratch_dir}/certbot-work" \
       --logs-dir "${scratch_dir}/logs/certbot" \
+      --max-log-backups 14 \
       --config-dir "${certbot_config_dir}" \
       -m "${certbot_email}" \
       --agree-tos \
