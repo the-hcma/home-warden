@@ -4,16 +4,46 @@ Target: **Ubuntu 26**, **nginx 1.28.3**, systemd **259+** (machine-id `Condition
 
 ## One-shot install
 
-`scripts/setup-service` owns the full bring-up: sudo prompt, package/conf checks,
-scratch layout, **`sudo nginx -t`**, optional `scripts/on-deploy`, unit install, mask
-distro nginx, enable socket + certbot/healthcheck timers + conf watch, and start the
-service (refuses to start if validation fails).
+`scripts/setup-service` owns the full bring-up: designated-host check, sudo prompt,
+package/conf checks, scratch layout, **`sudo nginx -t`**, optional `scripts/on-deploy`,
+unit install, mask distro nginx, enable socket + certbot/healthcheck timers + conf
+watch, and start the service (refuses to start if validation fails).
+
+home-warden only ever acts on the one host it has been explicitly pinned to (see
+[Designated host](#designated-host) below). On the intended host, for the first
+install:
 
 ```bash
 # Optional: set conf path if not at ~/home/nginx/server/nginx.conf
 # export HOME_NGINX_CONF=/path/to/nginx/server/nginx.conf
+./scripts/setup-service --confirm-host   # or omit and answer the interactive prompt
+```
+
+Subsequent runs on the same host need no flag:
+
+```bash
 ./scripts/setup-service
 ```
+
+## Designated host
+
+`scripts/lib/host-guard` refuses every mutating action (setup-service, on-deploy,
+cert-renewer, healthcheck alerts, the conf-watch reload) unless the current host
+matches the one pinned in `~/.config/home-warden-host` / `~/.config/home-warden-machine-id`.
+These are host-local files, **never committed to the repo** (see
+`.cursor/rules/no-private-infra.mdc`) — nothing pins home-warden to a real hostname
+in tracked files.
+
+- First run on the intended host: `./scripts/setup-service --confirm-host` (or answer
+  `y` at the interactive prompt) records that host as the pin.
+- Moving to different hardware: `./scripts/setup-service --repin-host` on the new host.
+- Everywhere else (a dev laptop, a CI runner, a session-init hook that happens to run
+  `scripts/on-deploy`), these scripts print a refusal and exit non-zero instead of
+  touching live state.
+- `./scripts/setup-service --status` reports the current pin and whether this host
+  matches it, without mutating anything.
+- `HOME_WARDEN_SKIP_HOST_GUARD=1` bypasses the check — manual testing only, never set
+  it in a unit or timer.
 
 ## Optional preflight
 
@@ -193,6 +223,7 @@ Editor save storms / temp files in the conf directory may trigger extra runs;
 ## Notes
 
 - Units are **system** (not user linger): systemd binds 80/443 and passes fds via `Environment=NGINX=3:4;`.
-- `ConditionHost` pins the units to the designated host (machine-id **or** hostname).
+- `ConditionHost` pins the units to the designated host (machine-id **or** hostname); see
+  [Designated host](#designated-host) for the same guard applied inside the scripts themselves.
 - IPv4-only listens in Milestone 1; dual-stack fd mapping is a follow-up.
 - Certbot runs as the service owner; reload of `home-warden.service` is done via a privileged `ExecStartPost` on the oneshot unit (no passwordless sudo required for the timer).

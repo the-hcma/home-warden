@@ -14,8 +14,20 @@
 #
 # Logging: write to stdout/stderr only. When run from home-warden-reload.service,
 # systemd appends those streams to ~/scratch/home-warden/nginx-test-and-reload.log.
+#
+# Refuses to run anywhere but the host pinned by
+# `scripts/setup-service --confirm-host` (see scripts/lib/host-guard).
 
 set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly script_dir
+
+# shellcheck source=scripts/lib/host-guard
+source "${script_dir}/lib/host-guard"
+if ! hw_host_guard_enforce "nginx-test-and-reload"; then
+  exit 1
+fi
 
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 home_nginx_conf="${HOME_NGINX_CONF:-}"

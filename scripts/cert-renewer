@@ -19,6 +19,9 @@
 #   ./scripts/cert-renewer
 #   ./scripts/cert-renewer --dry-run
 # Logs (timer): ~/scratch/home-warden/cert-renewer.log
+#
+# Refuses to run anywhere but the host pinned by
+# `scripts/setup-service --confirm-host` (see scripts/lib/host-guard).
 
 set -euo pipefail
 
@@ -26,6 +29,12 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly script_dir
 repo_dir="$(cd "${script_dir}/.." && pwd)"
 readonly repo_dir
+
+# shellcheck source=scripts/lib/host-guard
+source "${script_dir}/lib/host-guard"
+if ! hw_host_guard_enforce "cert-renewer"; then
+  exit 2
+fi
 
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 conf_dir="${CONF_DIR:-${HOME}/conf/home-warden}"
