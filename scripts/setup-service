@@ -2,7 +2,7 @@
 # Install home-warden system socket + service (privileged ports via systemd).
 # Expands etc/systemd templates into /etc/systemd/system/ with sudo.
 #
-# Placeholders: @@OWNER@@ @@SCRATCH_DIR@@ @@CONF_DIR@@ @@HOME_NGINX_CONF@@
+# Placeholders: @@OWNER@@ @@SCRATCH_DIR@@ @@CONF_DIR@@ @@HOME_NGINX_CONF@@ @@HOME_DIR@@
 # Injects ConditionHost=|<machine-id> and ConditionHost=|<hostname> (OR).
 #
 # Flow (non-dry-run):
@@ -310,6 +310,7 @@ expand_unit() {
       -e "s|@@HOME_NGINX_CONF@@|${HOME_NGINX_CONF}|g" \
       -e "s|@@HOME_NGINX_CONF_DIR@@|${home_nginx_conf_dir}|g" \
       -e "s|@@REPO_DIR@@|${repo_dir}|g" \
+      -e "s|@@HOME_DIR@@|${HOME}|g" \
       -e "s|@@DEPLOYED_COMMIT@@|${DEPLOYED_COMMIT}|g" \
       "${src}"
   )"
