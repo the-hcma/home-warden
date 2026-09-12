@@ -19,12 +19,15 @@ User=@@OWNER@@
 Group=@@OWNER@@
 WorkingDirectory=@@REPO_DIR@@
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=HOME=%h
+# %h resolves to the service *manager's* home (root, in system scope) not
+# @@OWNER@@'s — set it explicitly so scripts/lib/host-guard finds the pin
+# under the operator's ~/.config, not /root/.config.
+Environment=HOME=@@HOME_DIR@@
 Environment=SCRATCH_DIR=@@SCRATCH_DIR@@
 Environment=CONF_DIR=@@CONF_DIR@@
 Environment=CERTBOT_CONFIG_DIR=@@CONF_DIR@@/certs
 Environment=HOME_WARDEN_RELOAD=0
-EnvironmentFile=-%h/.config/home-warden-certbot.env
+EnvironmentFile=-@@HOME_DIR@@/.config/home-warden-certbot.env
 # Script does the renew; reload runs privileged so the timer needs no passwordless sudo.
 ExecStart=@@REPO_DIR@@/scripts/cert-renewer
 ExecStartPost=-+/usr/bin/systemctl try-reload-or-restart home-warden.service

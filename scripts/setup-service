@@ -277,6 +277,13 @@ prepare_scratch() {
 }
 
 validate_nginx_config() {
+  # -t still opens the conf's `pid` path (logs/nginx.pid, same file the live
+  # service writes) for writing even though it never starts workers. The conf
+  # already declares its own `pid` directive, so overriding it via -g fails
+  # with "duplicate" — instead let -t run, then hand the pid file back to
+  # OWNER so it doesn't leave the unprivileged home-warden.service unable to
+  # write its own pid on the next start.
+  local -r conf_pid="${scratch_dir}/logs/nginx.pid"
   echo "Validating nginx config (sudo nginx -t)..."
   if ((dry_run)); then
     echo "DRY-RUN: sudo nginx -p ${scratch_dir}/ -t -c ${home_nginx_conf}"
@@ -285,6 +292,9 @@ validate_nginx_config() {
   if ! sudo nginx -p "${scratch_dir}/" -t -c "${home_nginx_conf}"; then
     echo "ERROR: nginx -t failed — refusing to install/start home-warden" >&2
     exit 1
+  fi
+  if [[ -f "${conf_pid}" ]]; then
+    sudo chown "${owner}:${owner}" "${conf_pid}"
   fi
   echo "nginx -t OK"
 }

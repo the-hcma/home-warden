@@ -19,9 +19,12 @@ User=@@OWNER@@
 Group=@@OWNER@@
 WorkingDirectory=@@REPO_DIR@@
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=HOME=%h
+# %h resolves to the service *manager's* home (root, in system scope) not
+# @@OWNER@@'s — set it explicitly so scripts/lib/host-guard finds the pin
+# under the operator's ~/.config, not /root/.config.
+Environment=HOME=@@HOME_DIR@@
 Environment=SCRATCH_DIR=@@SCRATCH_DIR@@
-EnvironmentFile=-%h/.config/home-warden-healthcheck.env
+EnvironmentFile=-@@HOME_DIR@@/.config/home-warden-healthcheck.env
 ExecStart=@@REPO_DIR@@/scripts/healthcheck
 TimeoutStartSec=2min
 StandardOutput=append:@@SCRATCH_DIR@@/healthcheck.log
