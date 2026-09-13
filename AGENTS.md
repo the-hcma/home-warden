@@ -133,6 +133,60 @@ repository root using [repository-helpers](https://github.com/the-hcma/repositor
 
 ---
 
+## Python Conventions
+
+Python is allowed per the Language & Runtime policy above (service-catalog
+tooling in [#45](https://github.com/the-hcma/home-warden/issues/45)/[#54](https://github.com/the-hcma/home-warden/issues/54)/[#57](https://github.com/the-hcma/home-warden/issues/57),
+private-CA tooling in [#49](https://github.com/the-hcma/home-warden/issues/49),
+the Gixy-Next security lint in [#50](https://github.com/the-hcma/home-warden/issues/50)).
+These conventions are established here as required by that policy's "first
+Python code" clause.
+
+Follows [the-hcma/domesti-bot](https://github.com/the-hcma/domesti-bot)'s
+established Python conventions rather than inventing a second, divergent
+set for the org — this repo's needs are a small subset of domesti-bot's, so
+adopt the shape, not its full scale (no browser-launching, LAN-banner, or
+device-manager machinery here).
+
+- **Package layout**: importable code lives under `app/` (plus `config/`
+  for the server entrypoint), matching domesti-bot — not loose scripts
+  under `scripts/`. `scripts/` keeps its existing role (thin, no-extension
+  Bash entry points) but a Python one now just shells out via `uv run`
+  (e.g. `exec uv run catalog-health-check "$@"`) rather than being the
+  implementation itself.
+- **`uv`** is the dependency manager — `pyproject.toml` + `uv.lock`, both
+  committed. Target **Python ≥ 3.12** (`.python-version` pins the exact
+  dev version). `uv sync --group dev` installs everything, including test
+  and lint tooling.
+- **FastAPI + uvicorn** for any HTTP surface (e.g. the-hcma/home-warden#57's
+  catalog-health endpoint) — `app/api/app.py`'s `create_app()` factory,
+  routes as `APIRouter`s under `app/api/*_routes.py`, one process serving
+  all of them rather than a service per endpoint.
+- **Type hints** on function signatures, enforced via **`pyright`**
+  (`basic` mode, `pyrightconfig.json`) in CI — matching domesti-bot.
+- **`ruff`** (`[tool.ruff]` in `pyproject.toml`: `line-length = 120`,
+  `target-version = "py312"`, `format.quote-style = "double"`,
+  `lint.select = ["E", "F", "I"]`) is mandatory for both linting and
+  formatting — mirrors domesti-bot's config verbatim. Zero findings is the
+  bar, matching shellcheck's `-S info` bar for Bash. A `# noqa: <code>`
+  suppression needs a comment explaining why, same rule as Bash's
+  `# shellcheck disable=`.
+- **`pytest`** (`tests/python/`, `test_*.py`) — not stdlib `unittest`,
+  matching domesti-bot. `httpx` + FastAPI's `TestClient` for route tests.
+  Mock/stub any real network or subprocess call (Cloudflare API,
+  `openssl`, `certbot`); tests must not depend on live infrastructure or
+  credentials.
+- **Remote timeouts and bounded retries** apply identically to Python as
+  to Bash — see the rule cited in Language & Runtime above. Every
+  `urllib.request`/`socket` call sets an explicit timeout; no unbounded
+  retry loop.
+- CI wiring lives under `.github/ci/` (`setup-python`, `ruff`, `pytest`),
+  mirroring both domesti-bot's own `.github/ci/*` scripts and this repo's
+  existing `.github/ci/secret-scan` — see
+  [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
+
+---
+
 ## Development
 
 ```bash
@@ -184,6 +238,7 @@ CI lives in `.github/workflows/ci.yml`:
 - Guard (gtmq / CodeRabbit / push-dedup)
 - Secret scan (`.github/ci/secret-scan`)
 - Validate (required files + optional `nginx -t`)
+- Python (`.github/ci/ruff` + `.github/ci/pytest` + `.github/ci/pyright`, via `uv`)
 
 No PR may be merged with a failing CI check.
 
@@ -191,7 +246,10 @@ No PR may be merged with a failing CI check.
 
 ## Pre-Commit Checklist
 
-- [ ] `bash -n` / `shellcheck -S info` on changed scripts under `scripts/`
+- [ ] `bash -n` / `shellcheck -S info` on changed Bash scripts under `scripts/`
+- [ ] `uv run ruff check app config tests scripts` / `uv run ruff format
+      --check app config tests scripts`, `uv run pytest`, and `uv run
+      pyright` pass on changed Python
 - [ ] `nginx -t` when config changed (local nginx 1.28.x preferred)
 - [ ] No certs, keys, or secrets in the diff
 - [ ] Commit message follows Conventional Commits

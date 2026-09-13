@@ -128,6 +128,48 @@ jobs:
           nginx -t -c "$PWD/nginx/nginx.conf"
           ./scripts/ci-shellcheck
 
+  python-lint:
+    name: Python Lint
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: latest
+      - name: Ruff (lint + format check)
+        run: bash .github/ci/ruff
+
+  python-test:
+    name: Pytest
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: latest
+      - name: Pytest
+        run: bash .github/ci/pytest
+
+  python-typecheck:
+    name: Pyright
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: latest
+      - name: Pyright
+        run: bash .github/ci/pyright
+
   secret-scan:
     name: Secret Scan
     needs: guard

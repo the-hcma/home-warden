@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# ci/setup-python — install the pinned Python + sync dependencies via uv.
+# Mirrors the-hcma/domesti-bot's .github/ci/setup-python.
+set -euo pipefail
+required="$(tr -d '[:space:]' <.python-version | cut -d. -f1,2)"
+uv python install "${required}"
+current="$(uv run python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+if [[ "${current}" != "${required}" ]]; then
+  echo "Python version mismatch: using ${current} but .python-version pins ${required}"
+  exit 1
+fi
+uv sync --group dev

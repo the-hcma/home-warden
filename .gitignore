@@ -17,6 +17,13 @@ scratch/
 .DS_Store
 *.swp
 
+# Python (uv-managed; uv.lock stays tracked)
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
 # Local conf (examples stay tracked as conf/*.example)
 conf/*
 !conf/*.example

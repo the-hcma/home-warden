@@ -40,7 +40,11 @@ Concretely, in progress or planned beyond v1:
   rendered from, instead of hand-edited `conf.d` entries. Schema drafted
   and validated against a real render; hardening the renderer itself
   (fidelity, PII/config hygiene) is tracked separately
-  ([#54](https://github.com/the-hcma/home-warden/issues/54)).
+  ([#54](https://github.com/the-hcma/home-warden/issues/54)), and
+  validating that the catalog's promises hold against live infrastructure
+  (cert existence/validity, DNS existence, internal upstream health) —
+  with auto-healing — is split out further still
+  ([#57](https://github.com/the-hcma/home-warden/issues/57)).
 - **Private CA for client certs** ([#49](https://github.com/the-hcma/home-warden/issues/49))
   — issuing, tracking, and revoking mTLS client certs for the
   `client_cert` field the catalog schema already reserves. Plan is to
