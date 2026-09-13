@@ -32,6 +32,33 @@ terminates traffic and issues certs also owns the records that route to it.
 The phases and non-goals below describe what's shipped and deliberately
 deferred so far, not a ceiling on the project.
 
+Concretely, in progress or planned beyond v1:
+
+- **Service catalog** ([#45](https://github.com/the-hcma/home-warden/issues/45))
+  — a structured JSON catalog of fronted services (plus non-fronted
+  `background_units`, e.g. repository-helpers timers) that nginx config is
+  rendered from, instead of hand-edited `conf.d` entries. Schema drafted
+  and validated against a real render; hardening the renderer itself
+  (fidelity, PII/config hygiene) is tracked separately
+  ([#54](https://github.com/the-hcma/home-warden/issues/54)).
+- **Private CA for client certs** ([#49](https://github.com/the-hcma/home-warden/issues/49))
+  — issuing, tracking, and revoking mTLS client certs for the
+  `client_cert` field the catalog schema already reserves. Plan is to
+  extract/adapt the existing, tested PKI implementation in
+  [`the-hcma/my-tracks`'s `app/pki.py`](https://github.com/the-hcma/my-tracks/blob/main/app/pki.py)
+  (CA + server/client cert generation, CRL generation, PKCS12 bundling,
+  cert introspection, built on the standard `cryptography` package)
+  rather than write CA/cert issuance code from scratch — see #49 for the
+  license caveat (`my-tracks` is PolyForm Noncommercial 1.0.0; home-warden
+  is MIT) that needs a deliberate, documented decision before any code
+  moves.
+- **Security linting** ([#50](https://github.com/the-hcma/home-warden/issues/50))
+  — Gixy-Next static analysis of rendered/hand-written nginx config in CI.
+- **Web UI** ([#55](https://github.com/the-hcma/home-warden/issues/55)) — a
+  TypeScript frontend (the one case Language & Runtime reserves
+  TypeScript for) for managing the service catalog day-to-day, once it's
+  not just hand-edited JSON.
+
 ---
 
 ## Goals
