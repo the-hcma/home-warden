@@ -34,6 +34,18 @@ def test_cli_missing_catalog_file(monkeypatch, tmp_path: Path) -> None:
     assert main() == 2
 
 
+def test_cli_malformed_catalog_shape_exits_2(monkeypatch, tmp_path: Path, capsys) -> None:
+    # Structurally-wrong-but-syntactically-valid JSON (e.g. a typo'd key)
+    # must exit 2 with a clear message, not silently validate zero
+    # services (exit 0) or crash with an unhandled traceback.
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"service": []}))
+    monkeypatch.setattr(sys, "argv", ["catalog-health-check", "--services-json", str(catalog_path)])
+    monkeypatch.setattr("app.catalog_health_cli.enforce_host_guard", lambda caller: True)
+    assert main() == 2
+    assert "services" in capsys.readouterr().err
+
+
 def test_cli_unusable_cloudflare_credentials_exits_2(monkeypatch, tmp_path: Path, capsys) -> None:
     def _raise_unusable(path):
         raise ValueError("no usable Cloudflare credentials")

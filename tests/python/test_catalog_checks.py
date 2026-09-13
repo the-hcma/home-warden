@@ -24,6 +24,7 @@ from app.catalog_checks import (
     check_cert,
     check_dns,
     check_upstream,
+    load_catalog,
     parse_cloudflare_credentials,
     run_all,
 )
@@ -74,6 +75,52 @@ def make_self_signed_cert(
         capture_output=True,
     )
     return cert_path
+
+
+# --- load_catalog ---------------------------------------------------------
+
+
+def test_load_catalog_missing_file(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        load_catalog(tmp_path / "missing.json")
+
+
+def test_load_catalog_invalid_json(tmp_path: Path) -> None:
+    path = tmp_path / "services.json"
+    path.write_text("{not valid json")
+    with pytest.raises(ValueError, match="invalid JSON"):
+        load_catalog(path)
+
+
+def test_load_catalog_non_object_top_level(tmp_path: Path) -> None:
+    # A bare list/string parses as valid JSON but isn't a usable catalog --
+    # must fail loudly here, not crash run_all with AttributeError later.
+    path = tmp_path / "services.json"
+    path.write_text("[]")
+    with pytest.raises(ValueError, match="must be an object"):
+        load_catalog(path)
+
+
+def test_load_catalog_missing_services_key(tmp_path: Path) -> None:
+    # A typo'd/renamed key ("service" instead of "services") must fail
+    # loudly, not silently validate zero services and report healthy.
+    path = tmp_path / "services.json"
+    path.write_text('{"service": []}')
+    with pytest.raises(ValueError, match="services"):
+        load_catalog(path)
+
+
+def test_load_catalog_non_list_services_value(tmp_path: Path) -> None:
+    path = tmp_path / "services.json"
+    path.write_text('{"services": "oops"}')
+    with pytest.raises(ValueError, match="services"):
+        load_catalog(path)
+
+
+def test_load_catalog_ok(tmp_path: Path) -> None:
+    path = tmp_path / "services.json"
+    path.write_text('{"services": [{"name": "svc"}]}')
+    assert load_catalog(path) == {"services": [{"name": "svc"}]}
 
 
 # --- parse_cloudflare_credentials ---------------------------------------
@@ -243,6 +290,25 @@ def test_check_upstream_ipv6_host_bracketed() -> None:
     assert called_req.full_url.startswith("http://[::1]:7990")
 
 
+def test_check_upstream_non_http_listener_reported_as_fail() -> None:
+    # A listener that's up but doesn't speak HTTP (e.g. an "http" catalog
+    # entry actually pointed at a TLS port) makes urlopen raise
+    # http.client.BadStatusLine, which urllib does NOT wrap in URLError --
+    # must be a "fail" result, not an unhandled exception escaping the
+    # check (and crashing run_all / the route / the CLI).
+    import http.client
+
+    service = {"kind": "proxy", "upstream": {"scheme": "http", "host": "10.0.0.5", "port": 8443, "path": "/"}}
+    with (
+        patch("socket.create_connection"),
+        patch("urllib.request.urlopen") as mock_urlopen,
+    ):
+        mock_urlopen.side_effect = http.client.BadStatusLine("garbage")
+        result = check_upstream("svc", service, timeout=1)
+    assert result.status == "fail"
+    assert "HTTP probe" in result.detail
+
+
 # --- _cf_request ---------------------------------------------------------
 
 
@@ -348,7 +414,10 @@ def test_check_dns_no_zone_found() -> None:
 
 
 def test_check_dns_no_records() -> None:
-    service = {"server_name": "app.example.com"}
+    # Single-label-suffix domain (one candidate zone: "example.com" itself)
+    # so the zone-found-but-empty-records path doesn't also need a second
+    # candidate's mock responses.
+    service = {"server_name": "example.com"}
     with patch(
         "app.catalog_checks._cf_request",
         side_effect=[{"result": [{"id": "zone123"}]}, {"result": []}],
@@ -356,6 +425,26 @@ def test_check_dns_no_records() -> None:
         result = check_dns("svc", service, cf_headers={"x": "y"}, timeout=5, max_retries=1)
     assert result.status == "fail"
     assert "no A/AAAA/CNAME record" in result.detail
+
+
+def test_check_dns_falls_back_to_more_specific_nested_zone() -> None:
+    # Account holds both example.com and app.example.com as separate
+    # zones; the record lives in the nested (more specific) one.
+    # candidate_zone_names tries "example.com" first -- it exists but has
+    # no record for the domain -- then "app.example.com", which does.
+    service = {"server_name": "app.example.com"}
+    with patch(
+        "app.catalog_checks._cf_request",
+        side_effect=[
+            {"result": [{"id": "parent-zone"}]},  # zone lookup: example.com found
+            {"result": []},  # record lookup in parent-zone: nothing
+            {"result": [{"id": "child-zone"}]},  # zone lookup: app.example.com found
+            {"result": [{"type": "A", "content": "203.0.113.20"}]},  # record lookup: found
+        ],
+    ):
+        result = check_dns("svc", service, cf_headers={"x": "y"}, timeout=5, max_retries=1)
+    assert result.status == "ok"
+    assert "zone=app.example.com" in result.detail
 
 
 # --- run_all -------------------------------------------------------------

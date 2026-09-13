@@ -48,13 +48,24 @@ def load_catalog(path: Path) -> dict:
     plain exceptions (not SystemExit) since this is shared by the long-lived
     FastAPI route as well as the one-shot CLI; each entry point decides how
     to present the failure.
+
+    Validates top-level shape (object with a list "services"), not just
+    JSON syntax -- a typo'd/renamed key (`{"service": [...]}`) or a
+    non-object top level would otherwise either silently validate zero
+    services and report healthy, or crash `run_all` with an unhandled
+    AttributeError instead of failing loudly at this boundary.
     """
     if not path.is_file():
         raise FileNotFoundError(f"missing catalog file {path}")
     try:
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
     except json.JSONDecodeError as e:
         raise ValueError(f"invalid JSON in {path}: {e}") from e
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: top-level JSON must be an object, got {type(data).__name__}")
+    if not isinstance(data.get("services"), list):
+        raise ValueError(f"{path}: missing or non-list top-level 'services' key")
+    return data
 
 
 def parse_cloudflare_credentials(path: Path) -> dict[str, str] | None:
@@ -208,36 +219,36 @@ def check_dns(
     if cf_headers is None:
         return CheckResult(name, "dns", "skip", "no Cloudflare credentials configured")
 
-    zone_id: str | None = None
-    zone_name: str | None = None
+    # Try every candidate zone (apex-first), not just the first one that
+    # exists: an account can hold both a parent zone and a more specific
+    # nested zone, and the record actually lives in whichever one the
+    # domain was delegated into. Stopping at the first match that *exists*
+    # (rather than the first that *has the record*) reports a healthy
+    # domain as failing when its zone isn't the least-specific one found.
+    any_zone_found = False
     try:
         for candidate in candidate_zone_names(domain):
-            url = f"{CF_API_BASE}/zones?name={urllib.parse.quote(candidate)}"
-            data = _cf_request(url, cf_headers, timeout, max_retries)
-            results = data.get("result") or []
-            if results:
-                zone_id = results[0]["id"]
-                zone_name = candidate
-                break
-    except Exception as e:  # keep one Cloudflare hiccup from crashing the whole report
-        return CheckResult(name, "dns", "fail", f"Cloudflare zone lookup error: {e}")
+            zone_url = f"{CF_API_BASE}/zones?name={urllib.parse.quote(candidate)}"
+            zone_data = _cf_request(zone_url, cf_headers, timeout, max_retries)
+            zone_results = zone_data.get("result") or []
+            if not zone_results:
+                continue
+            any_zone_found = True
+            zone_id = zone_results[0]["id"]
 
-    if zone_id is None:
+            rec_url = f"{CF_API_BASE}/zones/{zone_id}/dns_records?name={urllib.parse.quote(domain)}"
+            rec_data = _cf_request(rec_url, cf_headers, timeout, max_retries)
+            records = rec_data.get("result") or []
+            relevant = [r for r in records if r.get("type") in ("A", "AAAA", "CNAME")]
+            if relevant:
+                summary = ", ".join(f"{r['type']}={r.get('content')}" for r in relevant)
+                return CheckResult(name, "dns", "ok", f"zone={candidate} {summary}")
+    except Exception as e:  # keep one Cloudflare hiccup from crashing the whole report
+        return CheckResult(name, "dns", "fail", f"Cloudflare lookup error: {e}")
+
+    if not any_zone_found:
         return CheckResult(name, "dns", "fail", f"no Cloudflare zone found for {domain}")
-
-    try:
-        url = f"{CF_API_BASE}/zones/{zone_id}/dns_records?name={urllib.parse.quote(domain)}"
-        data = _cf_request(url, cf_headers, timeout, max_retries)
-        records = data.get("result") or []
-    except Exception as e:  # keep one Cloudflare hiccup from crashing the whole report
-        return CheckResult(name, "dns", "fail", f"Cloudflare record lookup error: {e}")
-
-    relevant = [r for r in records if r.get("type") in ("A", "AAAA", "CNAME")]
-    if not relevant:
-        return CheckResult(name, "dns", "fail", f"no A/AAAA/CNAME record for {domain} in zone {zone_name}")
-
-    summary = ", ".join(f"{r['type']}={r.get('content')}" for r in relevant)
-    return CheckResult(name, "dns", "ok", f"zone={zone_name} {summary}")
+    return CheckResult(name, "dns", "fail", f"no A/AAAA/CNAME record for {domain} in any matching Cloudflare zone")
 
 
 def check_upstream(name: str, service: dict, timeout: float) -> CheckResult:
@@ -277,7 +288,12 @@ def check_upstream(name: str, service: dict, timeout: float) -> CheckResult:
         # Any HTTP response -- even an error status -- proves something is
         # listening and answering, which is what this dimension checks for.
         code = e.code
-    except (urllib.error.URLError, TimeoutError, socket.timeout) as e:
+    except Exception as e:
+        # Broad on purpose, mirroring check_dns: a listener that's up but
+        # doesn't speak HTTP (e.g. a TLS port, or any non-HTTP service)
+        # raises http.client.HTTPException/BadStatusLine, which urllib does
+        # NOT wrap in URLError -- that must be a "fail" result (exactly
+        # what this dimension exists to catch), not an unhandled crash.
         return CheckResult(name, "upstream", "fail", f"TCP connect ok but HTTP probe to {url} failed: {e}")
 
     return CheckResult(name, "upstream", "ok", f"{url} responded HTTP {code}")

@@ -68,6 +68,21 @@ def test_health_catalog_invalid_json_returns_500(tmp_path: Path) -> None:
     assert "invalid JSON" in resp.json()["detail"]
 
 
+def test_health_catalog_malformed_catalog_shape_returns_500(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"service": []}))  # typo'd key
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_health_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_health_routes.services_json_path", return_value=catalog_path),
+    ):
+        resp = client.get("/health/catalog")
+
+    assert resp.status_code == 500
+    assert "services" in resp.json()["detail"]
+
+
 def test_health_catalog_unusable_cloudflare_credentials_returns_500(tmp_path: Path) -> None:
     catalog_path = tmp_path / "services.json"
     catalog_path.write_text(json.dumps({"services": []}))
