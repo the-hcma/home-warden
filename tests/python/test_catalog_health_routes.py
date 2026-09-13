@@ -1,0 +1,71 @@
+"""Tests for GET /health/catalog (app.api.catalog_health_routes)."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
+
+from app.api.app import create_app
+from app.catalog_checks import CheckResult
+
+
+def make_client() -> TestClient:
+    return TestClient(create_app())
+
+
+def test_health_catalog_host_guard_refused() -> None:
+    client = make_client()
+    with patch("app.api.catalog_health_routes.enforce_host_guard", return_value=False):
+        resp = client.get("/health/catalog")
+    assert resp.status_code == 503
+
+
+def test_health_catalog_missing_catalog_file(tmp_path: Path) -> None:
+    client = make_client()
+    with (
+        patch("app.api.catalog_health_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_health_routes.services_json_path", return_value=tmp_path / "missing.json"),
+    ):
+        resp = client.get("/health/catalog")
+    assert resp.status_code == 404
+
+
+def test_health_catalog_ok(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": [{"name": "svc", "kind": "static"}]}))
+
+    fake_results = [CheckResult("svc", "upstream", "skip", "kind='static', no upstream to probe")]
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_health_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_health_routes.services_json_path", return_value=catalog_path),
+        patch("app.api.catalog_health_routes.run_all", return_value=fake_results),
+    ):
+        resp = client.get("/health/catalog")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["healthy"] is True
+    assert body["checks"][0]["service"] == "svc"
+
+
+def test_health_catalog_unhealthy_when_any_check_fails(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": []}))
+
+    fake_results = [CheckResult("svc", "cert", "fail", "missing")]
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_health_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_health_routes.services_json_path", return_value=catalog_path),
+        patch("app.api.catalog_health_routes.run_all", return_value=fake_results),
+    ):
+        resp = client.get("/health/catalog")
+
+    assert resp.status_code == 200
+    assert resp.json()["healthy"] is False

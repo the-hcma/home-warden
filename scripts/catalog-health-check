@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# One-shot cert/DNS/internal-upstream catalog validation (the-hcma/home-warden#57).
+# Thin wrapper around the app.catalog_health_cli console script -- see that
+# module's docstring for env vars, flags, and exit codes.
+#
+# Usage:
+#   ./scripts/catalog-health-check
+#   ./scripts/catalog-health-check --verbose
+
+set -euo pipefail
+
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_dir}"
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "catalog-health-check: install uv (https://docs.astral.sh/uv/) or run 'uv sync' in ${repo_dir}" >&2
+  exit 1
+fi
+
+exec uv run catalog-health-check "$@"

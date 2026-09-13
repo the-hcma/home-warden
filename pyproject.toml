@@ -29,6 +29,9 @@ dependencies = [
     "uvicorn[standard]>=0.52.4",
 ]
 
+[project.scripts]
+catalog-health-check = "app.catalog_health_cli:main"
+
 [project.urls]
 Homepage = "https://github.com/the-hcma/home-warden"
 Repository = "https://github.com/the-hcma/home-warden"

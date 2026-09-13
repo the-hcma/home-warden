@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Start home-warden's HTTP API (FastAPI + uvicorn) -- see config/serve.py.
+# Thin wrapper, mirroring the-hcma/domesti-bot's scripts/domesti-bot-server.
+#
+# Usage:
+#   ./scripts/catalog-health-server
+#   ./scripts/catalog-health-server --listen-port 8090
+
+set -euo pipefail
+
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_dir}"
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "catalog-health-server: install uv (https://docs.astral.sh/uv/) or run 'uv sync' in ${repo_dir}" >&2
+  exit 1
+fi
+
+exec uv run python -m config.serve "$@"
