@@ -172,7 +172,11 @@ device-manager machinery here).
   suppression needs a comment explaining why, same rule as Bash's
   `# shellcheck disable=`.
 - **`pytest`** (`tests/python/`, `test_*.py`) — not stdlib `unittest`,
-  matching domesti-bot. `httpx` + FastAPI's `TestClient` for route tests.
+  matching domesti-bot. **`httpx2`** (not `httpx`) + FastAPI's
+  `TestClient` for route tests — Starlette's `testclient` does `import
+  httpx2 as httpx` internally and prefers it (using plain `httpx` there
+  is the deprecated path); `httpx2` is the only HTTP-client package
+  actually in `uv.lock`.
   Mock/stub any real network or subprocess call (Cloudflare API,
   `openssl`, `certbot`); tests must not depend on live infrastructure or
   credentials.
