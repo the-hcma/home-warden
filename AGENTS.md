@@ -47,8 +47,19 @@ repository root using [repository-helpers](https://github.com/the-hcma/repositor
 - Primary artifacts: nginx config, systemd units, Bash install/ops scripts under `scripts/`.
 - Target **bash ≥ 5.x** (every script declares `#!/usr/bin/env bash` and uses `set -euo pipefail`).
 - **No `.sh` extension.** The shebang declares the interpreter.
-- No Node.js helpers and no Python scripting for install/ops paths unless CI and
-  AGENTS are updated deliberately (Milestone 1 stays pure Bash).
+- **Language policy**: Bash stays the default for install/ops scripts under
+  `scripts/` — prefer it unless a task genuinely needs something Bash can't
+  do well. **Python is allowed** (e.g. the service-catalog renderer work in
+  [#45](https://github.com/the-hcma/home-warden/issues/45), the private-CA
+  tooling in [#49](https://github.com/the-hcma/home-warden/issues/49), the
+  Gixy-Next security lint in
+  [#50](https://github.com/the-hcma/home-warden/issues/50)) — this
+  supersedes the earlier "Milestone 1 stays pure Bash" restriction.
+  **TypeScript** is reserved for a future web UI, not install/ops paths.
+  The first Python code landing in this repo must also add its own
+  linting/formatting conventions here (mirroring the Bash section below),
+  plus any CI wiring (`scripts/ci-shellcheck` is Bash-only today) — not
+  assumed to inherit the Bash rules as-is.
 - External tools as needed: `nginx`, `systemctl`, `git`, `gh`, `openssl`, `certbot`.
 - **Remote timeouts and bounded retries:** `.cursor/rules/remote-timeouts-retries.mdc`
   (`alwaysApply`, org rule — template sync
