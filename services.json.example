@@ -8,8 +8,9 @@
     "upstream.scheme is almost always 'http' (home-warden terminates TLS); 'https' is only for a backend that already terminates its own TLS and home-warden proxies through to it.",
     "websocket: true adds proxy_http_version 1.1, Upgrade/Connection header forwarding, and proxy_buffering off — required for any backend using WebSockets (chat, live dashboards, terminal-over-HTTP UIs, etc.).",
     "forward_host_header: true adds proxy_set_header Host $host — needed when the backend cares about the original request Host (virtual hosting, cookie domain matching); omit when the backend doesn't care or sets its own Host expectations.",
-    "gzip defaults to on if omitted; set false only when the backend already sets its own strong ETag/caching headers that gzip re-encoding would invalidate (see the fpdf-service example below).",
+    "gzip defaults to on if omitted; set false only when the backend already sets its own strong ETag/caching headers that gzip re-encoding would invalidate (see the admin-console example below, modeled on proxying Cockpit).",
     "allow_cidrs is a source-IP allowlist; deny all() is implicit for everything not listed — this is network-level access control, separate from client_cert (identity-level, via mTLS).",
+    "managed_by is optional, purely informational (never consumed by a renderer) — documents which systemd unit/repo actually runs a proxy's upstream, for operator traceability. repo + unit for a the-hcma-owned service; host is the machine that unit runs on (often NOT the home-warden host itself — see the-hcma/home-warden#45's crossplane-extensibility notes on why this stays catalog-only bookkeeping, not something crossplane or the renderer needs to understand). For a third-party/distro service (nothing to attribute to a the-hcma repo), omit repo/unit and use note instead.",
     "client_cert.mode: 'off' (default if omitted), 'optional', or 'required'. NEVER 'optional_no_ca' — that value is deliberately not offered by this schema because it skips chain/expiry/revocation checks entirely. See the-hcma/home-warden#49 for how ca_bundle/crl get produced (this catalog only references their paths, it doesn't issue or revoke certs).",
     "client_cert belongs at the per-service (per-vhost) level, not nested under a location or extra_location_blocks — ssl_verify_client/ssl_client_certificate are only valid in nginx's http/server context, never location.",
     "extra_location_blocks is an escape hatch (raw nginx location-block snippets) for one-off directives that don't fit the schema yet — use sparingly; a repeatedly-needed extra_location_blocks entry is a signal the schema should grow a real field instead.",
@@ -28,7 +29,12 @@
       },
       "websocket": false,
       "forward_host_header": false,
-      "allow_cidrs": ["10.0.0.0/24", "192.168.1.0/24"]
+      "allow_cidrs": ["10.0.0.0/24", "192.168.1.0/24"],
+      "managed_by": {
+        "repo": "the-hcma/example-dashboard",
+        "unit": "example-dashboard.service",
+        "host": "backend.example.internal"
+      }
     },
     {
       "name": "example-chat",
@@ -42,22 +48,12 @@
       },
       "websocket": true,
       "forward_host_header": true,
-      "allow_cidrs": ["10.0.0.0/24", "192.168.1.0/24"]
-    },
-    {
-      "name": "example-fpdf-service",
-      "server_name": "fpdf.example.com",
-      "kind": "proxy",
-      "upstream": {
-        "scheme": "http",
-        "host": "backend.example.internal",
-        "port": 8003,
-        "path": "/"
-      },
-      "websocket": false,
-      "forward_host_header": false,
-      "gzip": false,
-      "allow_cidrs": ["10.0.0.0/24", "192.168.1.0/24"]
+      "allow_cidrs": ["10.0.0.0/24", "192.168.1.0/24"],
+      "managed_by": {
+        "repo": "the-hcma/example-chat",
+        "unit": "example-chat.service",
+        "host": "backend.example.internal"
+      }
     },
     {
       "name": "example-downloads",
@@ -74,14 +70,19 @@
       "server_name": "admin.example.com",
       "kind": "proxy",
       "upstream": {
-        "scheme": "http",
+        "scheme": "https",
         "host": "backend.example.internal",
         "port": 9090,
         "path": "/"
       },
-      "websocket": false,
-      "forward_host_header": true,
+      "websocket": true,
+      "forward_host_header": false,
+      "gzip": false,
       "allow_cidrs": ["10.0.0.0/24"],
+      "managed_by": {
+        "host": "backend.example.internal",
+        "note": "third-party distro admin console (e.g. Cockpit) — not a the-hcma repo, no unit to attribute"
+      },
       "client_cert": {
         "mode": "required",
         "ca_bundle": "/path/to/client-ca.pem",
