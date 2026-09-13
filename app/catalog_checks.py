@@ -60,6 +60,12 @@ def load_catalog(path: Path) -> dict:
 def parse_cloudflare_credentials(path: Path) -> dict[str, str] | None:
     """Parse certbot-dns-cloudflare's flat `key = value` credentials file
     (conf/cloudflare.ini.example) into Cloudflare API auth headers.
+
+    Returns None only when the file doesn't exist at all -- that's a
+    legitimate "DNS checks not configured" state. Raises ValueError when
+    the file exists but yields no usable credentials (missing/typo'd
+    keys, an empty token): a config typo should fail loudly, not read as
+    "not configured" and quietly skip the whole DNS dimension as healthy.
     """
     if not path.is_file():
         return None
@@ -79,15 +85,21 @@ def parse_cloudflare_credentials(path: Path) -> dict[str, str] | None:
         return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     if email and api_key:
         return {"X-Auth-Email": email, "X-Auth-Key": api_key, "Content-Type": "application/json"}
-    return None
+    raise ValueError(
+        f"{path} exists but has no usable Cloudflare credentials "
+        "(expected dns_cloudflare_api_token, or dns_cloudflare_email + dns_cloudflare_api_key)"
+    )
 
 
 def _cf_request(url: str, headers: dict[str, str], timeout: float, max_retries: int) -> dict:
     """GET a Cloudflare API URL with bounded, jittered-backoff retries.
     Only retries transient failures (network errors, 5xx) -- never a 4xx.
+    `max_retries` is clamped to at least 1 attempt -- "don't retry" (0)
+    still means try once, not "crash with an assertion error and get
+    reported as a false DNS failure."
     """
     last_err: Exception | None = None
-    for attempt in range(max_retries):
+    for attempt in range(max(1, max_retries)):
         if attempt:
             time.sleep(min(2**attempt, 8) + random.uniform(0, 0.5))
         req = urllib.request.Request(url, headers=headers)
@@ -160,8 +172,16 @@ def check_cert(name: str, service: dict, certs_live_dir: Path, alert_days: int, 
         stripped = line.strip()
         if stripped.startswith("notAfter="):
             enddate = stripped[len("notAfter=") :]
-        elif stripped.startswith("DNS:"):
-            sans = [part.strip()[len("DNS:") :] for part in stripped.split(",") if part.strip().startswith("DNS:")]
+            continue
+        # DNS names can share a line with other general-name types (e.g.
+        # "IP Address:10.0.0.5, DNS:app.example.com") -- scan every
+        # comma-separated entry on every line, don't require the whole
+        # line to start with "DNS:", and accumulate rather than overwrite
+        # in case openssl ever wraps the SAN list across lines.
+        for part in stripped.split(","):
+            part = part.strip()
+            if part.startswith("DNS:"):
+                sans.append(part[len("DNS:") :])
 
     if domain not in sans:
         return CheckResult(

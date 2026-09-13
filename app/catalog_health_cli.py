@@ -61,7 +61,13 @@ def main() -> int:
         print(f"catalog-health-check: {e}", file=sys.stderr)
         return 2
 
-    cf_headers = None if args.skip_dns else parse_cloudflare_credentials(args.cloudflare_credentials)
+    cf_headers = None
+    if not args.skip_dns:
+        try:
+            cf_headers = parse_cloudflare_credentials(args.cloudflare_credentials)
+        except ValueError as e:
+            print(f"catalog-health-check: {e}", file=sys.stderr)
+            return 2
 
     results = run_all(
         catalog,

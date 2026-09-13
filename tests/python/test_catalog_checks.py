@@ -9,7 +9,9 @@ infrastructure or credentials").
 
 from __future__ import annotations
 
+import email.message
 import subprocess
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,6 +19,7 @@ import pytest
 
 from app.catalog_checks import (
     CheckResult,
+    _cf_request,
     candidate_zone_names,
     check_cert,
     check_dns,
@@ -26,14 +29,28 @@ from app.catalog_checks import (
 )
 
 
-def make_self_signed_cert(cert_dir: Path, domain: str, *, days: int, sans: list[str] | None = None) -> Path:
-    """Generate a real self-signed cert for `domain` under cert_dir/domain/fullchain.pem."""
+def make_self_signed_cert(
+    cert_dir: Path,
+    domain: str,
+    *,
+    days: int,
+    sans: list[str] | None = None,
+    leading_general_names: list[str] | None = None,
+) -> Path:
+    """Generate a real self-signed cert for `domain` under cert_dir/domain/fullchain.pem.
+
+    `leading_general_names` uses openssl's -addext syntax (e.g.
+    ["IP:10.0.0.5"], which openssl prints back as "IP Address:10.0.0.5")
+    and is placed before the DNS entries in the SAN extension, to exercise
+    general-name lists that don't start with "DNS:".
+    """
     san_list = sans if sans is not None else [domain]
     domain_dir = cert_dir / domain
     domain_dir.mkdir(parents=True, exist_ok=True)
     cert_path = domain_dir / "fullchain.pem"
     key_path = domain_dir / "privkey.pem"
-    san_ext = ",".join(f"DNS:{s}" for s in san_list)
+    general_names = list(leading_general_names or []) + [f"DNS:{s}" for s in san_list]
+    san_ext = ",".join(general_names)
     subprocess.run(
         [
             "openssl",
@@ -84,6 +101,23 @@ def test_parse_cloudflare_credentials_comments_and_blanks(tmp_path: Path) -> Non
     path = tmp_path / "cloudflare.ini"
     path.write_text("# comment\n\ndns_cloudflare_api_token = tok\n")
     assert parse_cloudflare_credentials(path) is not None
+
+
+def test_parse_cloudflare_credentials_present_but_unusable_raises(tmp_path: Path) -> None:
+    # A typo'd key: present file, but nothing usable in it -- must not be
+    # mistaken for "not configured" (that's the missing-file case, which
+    # returns None rather than raising).
+    path = tmp_path / "cloudflare.ini"
+    path.write_text("dns_cloudflare_api_tokenn = tok\n")
+    with pytest.raises(ValueError, match="no usable Cloudflare credentials"):
+        parse_cloudflare_credentials(path)
+
+
+def test_parse_cloudflare_credentials_email_without_key_raises(tmp_path: Path) -> None:
+    path = tmp_path / "cloudflare.ini"
+    path.write_text("dns_cloudflare_email = ops@example.com\n")
+    with pytest.raises(ValueError):
+        parse_cloudflare_credentials(path)
 
 
 # --- candidate_zone_names -------------------------------------------------
@@ -140,6 +174,16 @@ def test_check_cert_san_mismatch(tmp_path: Path) -> None:
     assert "not covered" in result.detail
 
 
+def test_check_cert_san_line_with_leading_non_dns_entry(tmp_path: Path) -> None:
+    # A SAN list like "IP Address:10.0.0.5, DNS:app.example.com" doesn't
+    # start with "DNS:" -- the parser must still find the DNS entry rather
+    # than reporting a valid, correctly-issued cert as failing.
+    domain = "app.example.com"
+    make_self_signed_cert(tmp_path, domain, days=365, sans=[domain], leading_general_names=["IP:10.0.0.5"])
+    result = check_cert("svc", {"server_name": domain}, tmp_path, alert_days=10, timeout=5)
+    assert result.status == "ok"
+
+
 # --- check_upstream ----------------------------------------------------------
 
 
@@ -188,8 +232,6 @@ def test_check_upstream_ok() -> None:
 
 
 def test_check_upstream_ipv6_host_bracketed() -> None:
-    import urllib.error
-
     service = {"kind": "proxy", "upstream": {"scheme": "http", "host": "::1", "port": 7990, "path": "/"}}
     with (
         patch("socket.create_connection"),
@@ -199,6 +241,76 @@ def test_check_upstream_ipv6_host_bracketed() -> None:
         check_upstream("svc", service, timeout=1)
     called_req = mock_urlopen.call_args[0][0]
     assert called_req.full_url.startswith("http://[::1]:7990")
+
+
+# --- _cf_request ---------------------------------------------------------
+
+
+def _http_error(code: int, reason: str) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError("url", code, reason, email.message.Message(), None)
+
+
+def test_cf_request_max_retries_zero_still_attempts_once() -> None:
+    # "Don't retry" (0) must still mean one real attempt, not zero -- a
+    # naive range(0) loop leaves last_err unset and crashes instead of
+    # either succeeding or raising the real underlying error.
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"result": []}'
+
+    with patch("urllib.request.urlopen", return_value=_FakeResponse()) as mock_urlopen:
+        result = _cf_request("https://api.cloudflare.com/x", {}, timeout=5, max_retries=0)
+    assert result == {"result": []}
+    assert mock_urlopen.call_count == 1
+
+
+def test_cf_request_4xx_no_retry() -> None:
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.side_effect = _http_error(403, "forbidden")
+        with pytest.raises(urllib.error.HTTPError):
+            _cf_request("https://api.cloudflare.com/x", {}, timeout=5, max_retries=3)
+    assert mock_urlopen.call_count == 1
+
+
+def test_cf_request_5xx_retries_then_succeeds() -> None:
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"result": ["ok"]}'
+
+    with (
+        patch("time.sleep"),
+        patch("urllib.request.urlopen") as mock_urlopen,
+    ):
+        mock_urlopen.side_effect = [
+            _http_error(500, "server error"),
+            _FakeResponse(),
+        ]
+        result = _cf_request("https://api.cloudflare.com/x", {}, timeout=5, max_retries=3)
+    assert result == {"result": ["ok"]}
+    assert mock_urlopen.call_count == 2
+
+
+def test_cf_request_exhausts_retries_raises_last_error() -> None:
+    with (
+        patch("time.sleep"),
+        patch("urllib.request.urlopen") as mock_urlopen,
+    ):
+        mock_urlopen.side_effect = _http_error(503, "unavailable")
+        with pytest.raises(urllib.error.HTTPError):
+            _cf_request("https://api.cloudflare.com/x", {}, timeout=5, max_retries=2)
+    assert mock_urlopen.call_count == 2
 
 
 # --- check_dns ---------------------------------------------------------------

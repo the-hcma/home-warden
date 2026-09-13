@@ -53,6 +53,40 @@ def test_health_catalog_ok(tmp_path: Path) -> None:
     assert body["checks"][0]["service"] == "svc"
 
 
+def test_health_catalog_invalid_json_returns_500(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text("{not valid json")
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_health_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_health_routes.services_json_path", return_value=catalog_path),
+    ):
+        resp = client.get("/health/catalog")
+
+    assert resp.status_code == 500
+    assert "invalid JSON" in resp.json()["detail"]
+
+
+def test_health_catalog_unusable_cloudflare_credentials_returns_500(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": []}))
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_health_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_health_routes.services_json_path", return_value=catalog_path),
+        patch(
+            "app.api.catalog_health_routes.parse_cloudflare_credentials",
+            side_effect=ValueError("no usable Cloudflare credentials"),
+        ),
+    ):
+        resp = client.get("/health/catalog?skip_dns=false")
+
+    assert resp.status_code == 500
+    assert "credentials" in resp.json()["detail"]
+
+
 def test_health_catalog_unhealthy_when_any_check_fails(tmp_path: Path) -> None:
     catalog_path = tmp_path / "services.json"
     catalog_path.write_text(json.dumps({"services": []}))

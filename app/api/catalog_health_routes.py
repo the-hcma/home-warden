@@ -45,7 +45,12 @@ def get_catalog_health(
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
-    cf_headers = None if skip_dns else parse_cloudflare_credentials(cloudflare_credentials_path())
+    cf_headers = None
+    if not skip_dns:
+        try:
+            cf_headers = parse_cloudflare_credentials(cloudflare_credentials_path())
+        except ValueError as e:
+            raise HTTPException(status_code=500, detail=str(e)) from e
 
     results = run_all(
         catalog,
