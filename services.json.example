@@ -1,0 +1,139 @@
+{
+  "version": 1,
+  "_notes": [
+    "Schema reference for the-hcma/home-warden#45 (service catalog + renderer design) — the renderer described in that issue does not exist yet; this file documents the intended shape, not a working feature.",
+    "Operator copy: $XDG_CONFIG_HOME/home-warden/services.json (usually ~/.config/home-warden/services.json), symlinked from the private the-hcma/config repo's home-warden/ directory — mirrors the domesti-bot convention (see that repo's README + thehcma/config's README).",
+    "services: one entry per public vhost. kind is 'proxy' (reverse-proxies to an upstream) or 'static' (serves files directly from disk).",
+    "Shared/global nginx settings (ssl_ciphers, ssl_protocols, ssl_dhparam path, ssl_session_cache/_timeout, HSTS header, client_max_body_size, log_format, worker/connection tuning) are NOT per-service fields — they belong to the shared template the renderer applies to every vhost, not this catalog.",
+    "upstream.scheme is almost always 'http' (home-warden terminates TLS); 'https' is only for a backend that already terminates its own TLS and home-warden proxies through to it.",
+    "websocket: true adds proxy_http_version 1.1, Upgrade/Connection header forwarding, and proxy_buffering off — required for any backend using WebSockets (chat, live dashboards, terminal-over-HTTP UIs, etc.).",
+    "forward_host_header: true adds proxy_set_header Host $host — needed when the backend cares about the original request Host (virtual hosting, cookie domain matching); omit when the backend doesn't care or sets its own Host expectations.",
+    "gzip defaults to on if omitted; set false only when the backend already sets its own strong ETag/caching headers that gzip re-encoding would invalidate (see the admin-console example below, modeled on proxying Cockpit).",
+    "allow_cidrs is a source-IP allowlist; deny all() is implicit for everything not listed — this is network-level access control, separate from client_cert (identity-level, via mTLS).",
+    "managed_by is optional, purely informational (never consumed by a renderer) — documents which systemd unit/repo actually runs a proxy's upstream, for operator traceability. repo + unit for a the-hcma-owned service; host is the machine that unit runs on (often NOT the home-warden host itself — see the-hcma/home-warden#45's crossplane-extensibility notes on why this stays catalog-only bookkeeping, not something crossplane or the renderer needs to understand). For a third-party/distro service (nothing to attribute to a the-hcma repo), omit repo/unit and use note instead.",
+    "client_cert.mode: 'off' (default if omitted), 'optional', or 'required'. NEVER 'optional_no_ca' — that value is deliberately not offered by this schema because it skips chain/expiry/revocation checks entirely. See the-hcma/home-warden#49 for how ca_bundle/crl get produced (this catalog only references their paths, it doesn't issue or revoke certs).",
+    "client_cert belongs at the per-service (per-vhost) level, not nested under a location or extra_location_blocks — ssl_verify_client/ssl_client_certificate are only valid in nginx's http/server context, never location.",
+    "extra_location_blocks is an escape hatch (raw nginx location-block snippets) for one-off directives that don't fit the schema yet — use sparingly; a repeatedly-needed extra_location_blocks entry is a signal the schema should grow a real field instead.",
+    "streams: one entry per raw TCP passthrough (nginx stream{} block) — for protocols home-warden forwards without terminating TLS itself, e.g. a broker that handles its own TLS.",
+    "background_units: systemd units this host runs that are NOT fronted by nginx at all — no vhost, no proxy_pass. Deliberately scoped narrow: only the repository-helpers dev-convenience timers below (verified against this host's real systemctl --user output) are captured; home-warden's own system-scope units (home-warden.socket/.service, home-warden-certbot.timer, etc.) are already exhaustively documented in docs/host-prerequisites.md's 'Operating units' table and are not duplicated here.",
+    "background_units[].scope: 'user' (repository-helpers' generic per-machine dev-convenience units, installed via that repo's own scripts/setup-service — see the-hcma/repository-helpers#630/#631 for why these use a namespace distinct from home-warden's own host-pin) vs 'system' (home-warden's own privileged units — none listed here per the note above). host_scope documents that these are NOT pinned to one host the way home-warden's ConditionHost-guarded units are — they run on any machine that has repository-helpers cloned and these timers enabled via start-development, so a single fixed `host` field (like managed_by.host for nginx-fronted services) doesn't apply."
+  ],
+  "services": [
+    {
+      "name": "example-dashboard",
+      "server_name": "dashboard.example.com",
+      "kind": "proxy",
+      "upstream": {
+        "scheme": "http",
+        "host": "backend.example.internal",
+        "port": 8001,
+        "path": "/"
+      },
+      "websocket": false,
+      "forward_host_header": false,
+      "allow_cidrs": ["10.0.0.0/24", "192.168.1.0/24"],
+      "managed_by": {
+        "repo": "the-hcma/example-dashboard",
+        "unit": "example-dashboard.service",
+        "host": "backend.example.internal"
+      }
+    },
+    {
+      "name": "example-chat",
+      "server_name": "chat.example.com",
+      "kind": "proxy",
+      "upstream": {
+        "scheme": "http",
+        "host": "backend.example.internal",
+        "port": 8002,
+        "path": "/"
+      },
+      "websocket": true,
+      "forward_host_header": true,
+      "allow_cidrs": ["10.0.0.0/24", "192.168.1.0/24"],
+      "managed_by": {
+        "repo": "the-hcma/example-chat",
+        "unit": "example-chat.service",
+        "host": "backend.example.internal"
+      }
+    },
+    {
+      "name": "example-downloads",
+      "server_name": "downloads.example.com",
+      "kind": "static",
+      "static": {
+        "root": "/srv/example/downloads",
+        "listing_path": "/listing/"
+      },
+      "allow_cidrs": ["10.0.0.0/24", "192.168.1.0/24"]
+    },
+    {
+      "name": "example-admin-console",
+      "server_name": "admin.example.com",
+      "kind": "proxy",
+      "upstream": {
+        "scheme": "https",
+        "host": "backend.example.internal",
+        "port": 9090,
+        "path": "/"
+      },
+      "websocket": true,
+      "forward_host_header": false,
+      "gzip": false,
+      "allow_cidrs": ["10.0.0.0/24"],
+      "managed_by": {
+        "host": "backend.example.internal",
+        "note": "third-party distro admin console (e.g. Cockpit) — not a the-hcma repo, no unit to attribute"
+      },
+      "client_cert": {
+        "mode": "required",
+        "ca_bundle": "/path/to/client-ca.pem",
+        "verify_depth": 1,
+        "crl": "/path/to/client-ca.crl",
+        "allow_cn": []
+      }
+    }
+  ],
+  "streams": [
+    {
+      "name": "example-mqtt",
+      "listen_port": 8883,
+      "upstream": {
+        "host": "backend.example.internal",
+        "port": 8883
+      }
+    }
+  ],
+  "background_units": [
+    {
+      "name": "dep-updater",
+      "repo": "the-hcma/repository-helpers",
+      "service": "dep-updater.service",
+      "timer": "dep-updater.timer",
+      "scope": "user",
+      "host_scope": "any host with repository-helpers cloned + timers enabled via start-development",
+      "schedule": "OnCalendar=*-*-* 03:00:00, Persistent=true",
+      "role": "Create stacked dependency-update PRs (npm/Python/Rust/GitHub Actions)"
+    },
+    {
+      "name": "github-repo-lint",
+      "repo": "the-hcma/repository-helpers",
+      "service": "github-repo-lint.service",
+      "timer": "github-repo-lint.timer",
+      "scope": "user",
+      "host_scope": "any host with repository-helpers cloned + timers enabled via start-development",
+      "schedule": "OnCalendar=*-*-* 04:00:00, Persistent=true",
+      "role": "Audit/onboard org repos (merge queue, protect-main, workflows, Dependabot)"
+    },
+    {
+      "name": "secret-audit",
+      "repo": "the-hcma/repository-helpers",
+      "service": "secret-audit.service",
+      "timer": "secret-audit.timer",
+      "scope": "user",
+      "host_scope": "any host with repository-helpers cloned + timers enabled via start-development",
+      "schedule": "OnCalendar=*-*-* 05:00:00, Persistent=true",
+      "role": "TruffleHog deep secret scan (full git history)"
+    }
+  ]
+}

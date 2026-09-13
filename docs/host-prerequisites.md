@@ -82,6 +82,26 @@ home-warden-specific timer needed.
 | Clone of this repository | Units, scripts, local `conf/` |
 | Nginx config path | Pointed at by `HOME_NGINX_CONF` (default `~/home/nginx/server/nginx.conf`) |
 
+## Service catalog (design in progress — not yet consumed by anything)
+
+[#45](https://github.com/the-hcma/home-warden/issues/45) is designing a
+structured (JSON) catalog of the services home-warden fronts, so the nginx
+vhost list can eventually be generated instead of hand-maintained. Schema
+reference: [`services.json.example`](../services.json.example) at this
+repo's root. The **operator's real catalog** follows the same private,
+XDG-backed pattern already used for domesti-bot's local rules:
+
+```text
+~/.config/home-warden  ──symlink──►  ~/.local/share/config/home-warden
+                                      (private the-hcma/config clone)
+```
+
+See `thehcma/config`'s own README for the full first-time-setup steps
+(clone to `~/.local/share/config`, symlink `~/.config/home-warden` into it).
+Nothing in home-warden reads this file yet — no renderer exists until #45's
+open design questions (where it renders from/to, commit- vs. deploy-time)
+are settled.
+
 ## Packages (pre-install)
 
 ```bash
