@@ -49,6 +49,7 @@ management (live today), and eventually DNS itself. See
 | [docs/host-prerequisites.md](./docs/host-prerequisites.md) | Ubuntu 26 host install, day-2 ops, unit reference |
 | [PLAN.md](./PLAN.md) | Original design rationale, phases, open questions |
 | [AGENTS.md](./AGENTS.md) | Contributor / agent ground rules |
+| [services.json.example](./services.json.example) | Service-catalog schema reference ([#45](https://github.com/the-hcma/home-warden/issues/45), design in progress — no renderer yet) |
 
 ## Install (service host)
 
