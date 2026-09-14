@@ -52,16 +52,19 @@ def get_catalog_health(
         except ValueError as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
-    results = run_all(
-        catalog,
-        certs_live_dir=certs_live_dir(),
-        alert_days=alert_days(),
-        cf_headers=cf_headers,
-        timeout=timeout_seconds(),
-        max_retries=max_retries(),
-        skip_cert=skip_cert,
-        skip_dns=skip_dns,
-        skip_upstream=skip_upstream,
-    )
+    try:
+        results = run_all(
+            catalog,
+            certs_live_dir=certs_live_dir(),
+            alert_days=alert_days(),
+            cf_headers=cf_headers,
+            timeout=timeout_seconds(),
+            max_retries=max_retries(),
+            skip_cert=skip_cert,
+            skip_dns=skip_dns,
+            skip_upstream=skip_upstream,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
     healthy = not any(r.status == "fail" for r in results)
     return {"healthy": healthy, "checks": [asdict(r) for r in results]}

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 
+import pytest
+
 from config.serve import DEFAULT_PORT, build_arg_parser, resolve_listen_address
 
 
@@ -35,7 +37,13 @@ def test_env_used_when_no_cli_flag() -> None:
 
 
 def test_invalid_port_raises() -> None:
-    import pytest
-
     with pytest.raises(SystemExit):
         resolve_listen_address(_args(listen_port=70000), env={})
+
+
+def test_non_numeric_env_port_raises_systemexit_not_valueerror() -> None:
+    # --listen-port goes through argparse's type=int (clean SystemExit on
+    # bad input); the env var path used to reach a bare int() and escape
+    # as an uncaught ValueError instead of the same clean SystemExit.
+    with pytest.raises(SystemExit):
+        resolve_listen_address(_args(), env={"HOME_WARDEN_LISTEN_PORT": "809O"})

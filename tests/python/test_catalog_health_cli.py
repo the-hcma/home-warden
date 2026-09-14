@@ -81,3 +81,34 @@ def test_cli_reports_failures_via_exit_code(monkeypatch, tmp_path: Path, capsys)
     out = json.loads(capsys.readouterr().out)
     assert exit_code == 1
     assert out[0]["status"] == "fail"
+
+
+def test_cli_exits_0_when_all_checks_ok_or_skipped(monkeypatch, tmp_path: Path, capsys) -> None:
+    # The documented "Exit: 0 all checks ok/skipped" contract, never
+    # directly asserted before -- every other exit-code test proves 1 or 2.
+    catalog_path = tmp_path / "services.json"
+    service = {"name": "svc", "kind": "static", "server_name": "x.example.com"}
+    catalog_path.write_text(json.dumps({"services": [service]}))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["catalog-health-check", "--services-json", str(catalog_path), "--skip-cert", "--skip-dns"],
+    )
+    monkeypatch.setattr("app.catalog_health_cli.enforce_host_guard", lambda caller: True)
+    exit_code = main()
+    out = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert out[0]["status"] == "skip"
+
+
+def test_cli_invalid_timeout_exits_2(monkeypatch, tmp_path: Path, capsys) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": []}))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["catalog-health-check", "--services-json", str(catalog_path), "--timeout", "0"],
+    )
+    monkeypatch.setattr("app.catalog_health_cli.enforce_host_guard", lambda caller: True)
+    assert main() == 2
+    assert "timeout" in capsys.readouterr().err

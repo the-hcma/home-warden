@@ -123,6 +123,25 @@ def test_load_catalog_ok(tmp_path: Path) -> None:
     assert load_catalog(path) == {"services": [{"name": "svc"}]}
 
 
+def test_load_catalog_non_object_service_entry(tmp_path: Path) -> None:
+    # A non-object list element would otherwise crash run_all mid-report
+    # at service.get("name", ...) instead of failing loudly here.
+    path = tmp_path / "services.json"
+    path.write_text('{"services": ["not-an-object"]}')
+    with pytest.raises(ValueError, match=r"services\[0\] must be an object"):
+        load_catalog(path)
+
+
+def test_load_catalog_flattened_upstream_string(tmp_path: Path) -> None:
+    # A hand-edited catalog flattening "upstream" to a bare string --
+    # exactly what a renderer-less schema invites -- would otherwise crash
+    # check_upstream mid-report at upstream.get("host").
+    path = tmp_path / "services.json"
+    path.write_text('{"services": [{"name": "x", "kind": "proxy", "upstream": "http://backend:8000"}]}')
+    with pytest.raises(ValueError, match=r"services\[0\]\.upstream must be an object"):
+        load_catalog(path)
+
+
 # --- parse_cloudflare_credentials ---------------------------------------
 
 
@@ -231,6 +250,19 @@ def test_check_cert_san_line_with_leading_non_dns_entry(tmp_path: Path) -> None:
     assert result.status == "ok"
 
 
+def test_check_cert_corrupt_file_reported_as_fail(tmp_path: Path) -> None:
+    # A present-but-unparseable "cert" (truncated/corrupt PEM, or someone
+    # else's file entirely) must be a "fail" result, not an escaping
+    # exception -- the same contract every other failure mode here has.
+    domain = "app.example.com"
+    cert_dir = tmp_path / domain
+    cert_dir.mkdir()
+    (cert_dir / "fullchain.pem").write_text("not a certificate\n")
+    result = check_cert("svc", {"server_name": domain}, tmp_path, alert_days=10)
+    assert result.status == "fail"
+    assert "failed to parse" in result.detail
+
+
 # --- check_upstream ----------------------------------------------------------
 
 
@@ -307,6 +339,45 @@ def test_check_upstream_non_http_listener_reported_as_fail() -> None:
         result = check_upstream("svc", service, timeout=1)
     assert result.status == "fail"
     assert "HTTP probe" in result.detail
+
+
+def test_check_upstream_http_error_status_still_counts_as_ok() -> None:
+    # Any HTTP response -- even a 5xx -- proves something is listening and
+    # answering, which is what this dimension checks for; the response
+    # body/status isn't this check's concern.
+    service = {"kind": "proxy", "upstream": {"scheme": "http", "host": "10.0.0.5", "port": 8080, "path": "/"}}
+    with (
+        patch("socket.create_connection"),
+        patch("urllib.request.urlopen") as mock_urlopen,
+    ):
+        mock_urlopen.side_effect = _http_error(502, "bad gateway")
+        result = check_upstream("svc", service, timeout=5)
+    assert result.status == "ok"
+    assert "responded HTTP 502" in result.detail
+
+
+def test_check_upstream_https_scheme_uses_unverified_context() -> None:
+    # The https branch is the only consumer of ssl._create_unverified_context();
+    # a regression there should still reach a clean ok/fail result, not raise.
+    service = {"kind": "proxy", "upstream": {"scheme": "https", "host": "10.0.0.5", "port": 9090, "path": "/"}}
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def getcode(self):
+            return 200
+
+    with (
+        patch("socket.create_connection"),
+        patch("urllib.request.urlopen", return_value=_FakeResponse()) as mock_urlopen,
+    ):
+        result = check_upstream("svc", service, timeout=5)
+    assert result.status == "ok"
+    assert mock_urlopen.call_args.kwargs["context"] is not None
 
 
 # --- _cf_request ---------------------------------------------------------
@@ -447,6 +518,17 @@ def test_check_dns_falls_back_to_more_specific_nested_zone() -> None:
     assert "zone=app.example.com" in result.detail
 
 
+def test_check_dns_cf_request_exception_reported_as_fail() -> None:
+    # A real Cloudflare auth/4xx failure (or any other _cf_request
+    # exception) must be a "fail" result, not an exception escaping
+    # check_dns -> run_all -> the route/CLI.
+    service = {"server_name": "app.example.com"}
+    with patch("app.catalog_checks._cf_request", side_effect=_http_error(403, "forbidden")):
+        result = check_dns("svc", service, cf_headers={"x": "y"}, timeout=5, max_retries=1)
+    assert result.status == "fail"
+    assert "Cloudflare lookup error" in result.detail
+
+
 # --- run_all -------------------------------------------------------------
 
 
@@ -470,6 +552,20 @@ def test_run_all_respects_skip_flags(tmp_path: Path) -> None:
 def test_run_all_empty_catalog() -> None:
     results = run_all({}, certs_live_dir=Path("/nonexistent"), alert_days=10, cf_headers=None, timeout=1, max_retries=1)
     assert results == []
+
+
+def test_run_all_rejects_non_positive_timeout() -> None:
+    # timeout<=0 reaches socket.settimeout() as an uncaught ValueError
+    # (not an OSError) if it isn't caught here first.
+    with pytest.raises(ValueError, match="timeout must be positive"):
+        run_all({}, certs_live_dir=Path("/nonexistent"), alert_days=10, cf_headers=None, timeout=0, max_retries=1)
+
+
+def test_run_all_rejects_negative_alert_days() -> None:
+    # A negative alert_days would otherwise silently make the expiry
+    # comparison pass for a cert that's already expired.
+    with pytest.raises(ValueError, match="alert_days must be non-negative"):
+        run_all({}, certs_live_dir=Path("/nonexistent"), alert_days=-1, cf_headers=None, timeout=5, max_retries=1)
 
 
 if __name__ == "__main__":

@@ -69,17 +69,21 @@ def main() -> int:
             print(f"catalog-health-check: {e}", file=sys.stderr)
             return 2
 
-    results = run_all(
-        catalog,
-        certs_live_dir=args.certs_live_dir,
-        alert_days=args.alert_days,
-        cf_headers=cf_headers,
-        timeout=args.timeout,
-        max_retries=args.max_retries,
-        skip_cert=args.skip_cert,
-        skip_dns=args.skip_dns,
-        skip_upstream=args.skip_upstream,
-    )
+    try:
+        results = run_all(
+            catalog,
+            certs_live_dir=args.certs_live_dir,
+            alert_days=args.alert_days,
+            cf_headers=cf_headers,
+            timeout=args.timeout,
+            max_retries=args.max_retries,
+            skip_cert=args.skip_cert,
+            skip_dns=args.skip_dns,
+            skip_upstream=args.skip_upstream,
+        )
+    except ValueError as e:
+        print(f"catalog-health-check: {e}", file=sys.stderr)
+        return 2
 
     if args.verbose:
         for r in results:

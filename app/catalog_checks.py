@@ -51,11 +51,15 @@ def load_catalog(path: Path) -> dict:
     FastAPI route as well as the one-shot CLI; each entry point decides how
     to present the failure.
 
-    Validates top-level shape (object with a list "services"), not just
-    JSON syntax -- a typo'd/renamed key (`{"service": [...]}`) or a
-    non-object top level would otherwise either silently validate zero
-    services and report healthy, or crash `run_all` with an unhandled
-    AttributeError instead of failing loudly at this boundary.
+    Validates shape -- not just JSON syntax -- at both the top level
+    (object with a list "services") and per-entry (each entry an object;
+    its "upstream", if present, an object): a typo'd/renamed key
+    (`{"service": [...]}`), a non-object top level, or a flattened
+    `"upstream": "http://backend:8000"` (exactly what a renderer-less,
+    hand-edited catalog invites) would otherwise either silently validate
+    zero services and report healthy, or crash `run_all`/`check_upstream`
+    with an unhandled AttributeError mid-report instead of failing loudly
+    at this one boundary.
     """
     if not path.is_file():
         raise FileNotFoundError(f"missing catalog file {path}")
@@ -65,8 +69,15 @@ def load_catalog(path: Path) -> dict:
         raise ValueError(f"invalid JSON in {path}: {e}") from e
     if not isinstance(data, dict):
         raise ValueError(f"{path}: top-level JSON must be an object, got {type(data).__name__}")
-    if not isinstance(data.get("services"), list):
+    services = data.get("services")
+    if not isinstance(services, list):
         raise ValueError(f"{path}: missing or non-list top-level 'services' key")
+    for i, entry in enumerate(services):
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path}: services[{i}] must be an object, got {type(entry).__name__}")
+        upstream = entry.get("upstream")
+        if upstream is not None and not isinstance(upstream, dict):
+            raise ValueError(f"{path}: services[{i}].upstream must be an object, got {type(upstream).__name__}")
     return data
 
 
@@ -291,7 +302,22 @@ def run_all(
     skip_dns: bool = False,
     skip_upstream: bool = False,
 ) -> list[CheckResult]:
-    """Run the requested dimensions for every service in the catalog."""
+    """Run the requested dimensions for every service in the catalog.
+
+    Validates `timeout`/`alert_days` here -- the one choke point both the
+    CLI and the route funnel through -- rather than downstream in each
+    check: a non-positive timeout reaches `socket.settimeout()` as an
+    uncaught `ValueError` (not an `OSError`, so check_upstream's own catch
+    doesn't see it), and a negative alert_days would silently make the
+    expiry comparison pass for a cert that's already expired. Raising here
+    keeps both consumers' existing exit-2/HTTP-500 config-error contract
+    intact instead of an escaping exception or a silent false-healthy.
+    """
+    if timeout <= 0:
+        raise ValueError(f"timeout must be positive, got {timeout}")
+    if alert_days < 0:
+        raise ValueError(f"alert_days must be non-negative, got {alert_days}")
+
     results: list[CheckResult] = []
     for service in catalog.get("services") or []:
         name = service.get("name", "<unnamed>")
