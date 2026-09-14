@@ -242,7 +242,7 @@ CI lives in `.github/workflows/ci.yml`:
 - Guard (gtmq / CodeRabbit / push-dedup)
 - Secret scan (`.github/ci/secret-scan`)
 - Validate (required files + optional `nginx -t`)
-- Python (`.github/ci/ruff` + `.github/ci/pytest` + `.github/ci/pyright`, via `uv`)
+- Python (`.github/ci/python-static` [ruff + pyright] + `.github/ci/pytest`, via `uv`)
 
 No PR may be merged with a failing CI check.
 

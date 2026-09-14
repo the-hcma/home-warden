@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# ci/python-static — lint + format-check + type-check Python via uv in one sync.
+# Mirrors the-hcma/domesti-bot's .github/ci/python-static (minus
+# assert-uv-lock-version, which home-warden does not yet use).
+set -euo pipefail
+bash .github/ci/setup-python
+uv run ruff check app config tests scripts
+uv run ruff format --check app config tests scripts
+uv run pyright
