@@ -1,21 +1,27 @@
 """Tests for app.catalog_checks.
 
-Cert tests generate real, local, ephemeral self-signed certs via openssl
-as test fixtures (deterministic, no network/live infra) and exercise
-check_cert's actual `cryptography`-based parsing against them. DNS/upstream
+Cert tests build real, local, ephemeral self-signed certs directly with
+`cryptography` as test fixtures (deterministic, no network/live infra, no
+subprocess/openssl dependency -- matching check_cert's own implementation)
+and exercise check_cert's actual parsing against them. DNS/upstream
 network calls are mocked -- see AGENTS.md's Python Conventions ("tests
 must not depend on live infrastructure or credentials").
 """
 
 from __future__ import annotations
 
+import datetime
 import email.message
-import subprocess
+import ipaddress
 import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 
 from app.catalog_checks import (
     CheckResult,
@@ -36,44 +42,40 @@ def make_self_signed_cert(
     *,
     days: int,
     sans: list[str] | None = None,
-    leading_general_names: list[str] | None = None,
+    leading_general_names: list[x509.GeneralName] | None = None,
+    no_sans: bool = False,
 ) -> Path:
-    """Generate a real self-signed cert for `domain` under cert_dir/domain/fullchain.pem.
+    """Build a real self-signed cert for `domain` under
+    cert_dir/domain/fullchain.pem, purely with `cryptography` -- no
+    subprocess/openssl dependency.
 
-    `leading_general_names` uses openssl's -addext syntax (e.g.
-    ["IP:10.0.0.5"], which openssl prints back as "IP Address:10.0.0.5")
-    and is placed before the DNS entries in the SAN extension, to exercise
-    general-name lists that don't start with "DNS:".
+    `leading_general_names` (e.g. `[x509.IPAddress(ipaddress.ip_address("10.0.0.5"))]`)
+    are placed before the DNS entries in the SAN extension, to exercise
+    general-name lists that don't start with a DNS name. `no_sans=True`
+    omits the SAN extension entirely.
     """
-    san_list = sans if sans is not None else [domain]
+    san_names = sans if sans is not None else [domain]
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, domain)])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + datetime.timedelta(days=days))
+    )
+    if not no_sans:
+        general_names = list(leading_general_names or []) + [x509.DNSName(s) for s in san_names]
+        builder = builder.add_extension(x509.SubjectAlternativeName(general_names), critical=False)
+    cert = builder.sign(key, hashes.SHA256())
+
     domain_dir = cert_dir / domain
     domain_dir.mkdir(parents=True, exist_ok=True)
     cert_path = domain_dir / "fullchain.pem"
-    key_path = domain_dir / "privkey.pem"
-    general_names = list(leading_general_names or []) + [f"DNS:{s}" for s in san_list]
-    san_ext = ",".join(general_names)
-    subprocess.run(
-        [
-            "openssl",
-            "req",
-            "-x509",
-            "-newkey",
-            "rsa:2048",
-            "-nodes",
-            "-keyout",
-            str(key_path),
-            "-out",
-            str(cert_path),
-            "-days",
-            str(days),
-            "-subj",
-            f"/CN={domain}",
-            "-addext",
-            f"subjectAltName={san_ext}",
-        ],
-        check=True,
-        capture_output=True,
-    )
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
     return cert_path
 
 
@@ -240,14 +242,27 @@ def test_check_cert_san_mismatch(tmp_path: Path) -> None:
     assert "not covered" in result.detail
 
 
-def test_check_cert_san_line_with_leading_non_dns_entry(tmp_path: Path) -> None:
-    # A SAN list like "IP Address:10.0.0.5, DNS:app.example.com" doesn't
-    # start with "DNS:" -- the parser must still find the DNS entry rather
-    # than reporting a valid, correctly-issued cert as failing.
+def test_check_cert_san_with_leading_non_dns_entry(tmp_path: Path) -> None:
+    # A SAN extension mixing general-name types (e.g. IP + DNS) must
+    # still find the DNS entry -- get_values_for_type(DNSName) filters by
+    # type regardless of ordering, but this pins that contract explicitly.
     domain = "app.example.com"
-    make_self_signed_cert(tmp_path, domain, days=365, sans=[domain], leading_general_names=["IP:10.0.0.5"])
+    ip_entry = x509.IPAddress(ipaddress.ip_address("10.0.0.5"))
+    make_self_signed_cert(tmp_path, domain, days=365, sans=[domain], leading_general_names=[ip_entry])
     result = check_cert("svc", {"server_name": domain}, tmp_path, alert_days=10)
     assert result.status == "ok"
+
+
+def test_check_cert_no_san_extension_reported_as_fail(tmp_path: Path) -> None:
+    # A CN-only cert with no SubjectAlternativeName extension at all must
+    # not crash check_cert with an unhandled x509.ExtensionNotFound --
+    # every other cert fixture in this file adds at least one DNS SAN, so
+    # nothing else exercises the except branch that catches this.
+    domain = "app.example.com"
+    make_self_signed_cert(tmp_path, domain, days=365, no_sans=True)
+    result = check_cert("svc", {"server_name": domain}, tmp_path, alert_days=10)
+    assert result.status == "fail"
+    assert "not covered" in result.detail
 
 
 def test_check_cert_corrupt_file_reported_as_fail(tmp_path: Path) -> None:
