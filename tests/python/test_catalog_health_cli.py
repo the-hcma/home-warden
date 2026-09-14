@@ -112,3 +112,15 @@ def test_cli_invalid_timeout_exits_2(monkeypatch, tmp_path: Path, capsys) -> Non
     monkeypatch.setattr("app.catalog_health_cli.enforce_host_guard", lambda caller: True)
     assert main() == 2
     assert "timeout" in capsys.readouterr().err
+
+
+def test_cli_malformed_env_knob_exits_2_not_traceback(monkeypatch, capsys) -> None:
+    # ALERT_DAYS is read as an argparse *default* -- int(os.environ[...])
+    # inside build_arg_parser(), before argparse itself even runs and
+    # before host-guard/load_catalog/run_all's own error handling. A
+    # malformed value here must still exit 2, not crash with an
+    # uncaught traceback before any of that machinery runs.
+    monkeypatch.setenv("ALERT_DAYS", "ten")
+    monkeypatch.setattr(sys, "argv", ["catalog-health-check"])
+    assert main() == 2
+    assert "ten" in capsys.readouterr().err

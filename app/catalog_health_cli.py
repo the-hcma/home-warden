@@ -50,26 +50,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    args = build_arg_parser().parse_args()
+    # One error boundary for config resolution (argparse defaults call
+    # app.catalog_health_settings' env getters, e.g. ALERT_DAYS=ten ->
+    # int() raises here, before argparse itself even runs) and a second
+    # for the load-and-check flow (load_catalog, parse_cloudflare_credentials,
+    # run_all) -- deliberately just these two, not one try per call, so the
+    # exit-2 "usage/config error" contract is decided once for this whole
+    # module rather than re-litigated call-by-call as new callers are added.
+    try:
+        args = build_arg_parser().parse_args()
+    except ValueError as e:
+        print(f"catalog-health-check: {e}", file=sys.stderr)
+        return 2
 
     if not enforce_host_guard("catalog-health-check"):
         return 2
 
     try:
         catalog = load_catalog(args.services_json)
-    except (FileNotFoundError, ValueError) as e:
-        print(f"catalog-health-check: {e}", file=sys.stderr)
-        return 2
-
-    cf_headers = None
-    if not args.skip_dns:
-        try:
+        cf_headers = None
+        if not args.skip_dns:
             cf_headers = parse_cloudflare_credentials(args.cloudflare_credentials)
-        except ValueError as e:
-            print(f"catalog-health-check: {e}", file=sys.stderr)
-            return 2
-
-    try:
         results = run_all(
             catalog,
             certs_live_dir=args.certs_live_dir,
@@ -81,7 +82,7 @@ def main() -> int:
             skip_dns=args.skip_dns,
             skip_upstream=args.skip_upstream,
         )
-    except ValueError as e:
+    except (FileNotFoundError, ValueError) as e:
         print(f"catalog-health-check: {e}", file=sys.stderr)
         return 2
 

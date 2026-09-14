@@ -278,9 +278,13 @@ def test_check_upstream_missing_host_port() -> None:
 
 
 def test_check_upstream_tcp_fail() -> None:
-    # Port 1 on loopback: reserved, essentially guaranteed closed/refused.
+    # Mocked, not a real connect to a "probably closed" port: an
+    # environment where something really is listening on 127.0.0.1:1
+    # (a sandboxed/port-forwarded CI runner) would otherwise make this
+    # test's outcome depend on the machine it runs on.
     service = {"kind": "proxy", "upstream": {"scheme": "http", "host": "127.0.0.1", "port": 1, "path": "/"}}
-    result = check_upstream("svc", service, timeout=1)
+    with patch("socket.create_connection", side_effect=OSError("connection refused")):
+        result = check_upstream("svc", service, timeout=1)
     assert result.status == "fail"
     assert "TCP connect" in result.detail
 
@@ -527,6 +531,26 @@ def test_check_dns_cf_request_exception_reported_as_fail() -> None:
         result = check_dns("svc", service, cf_headers={"x": "y"}, timeout=5, max_retries=1)
     assert result.status == "fail"
     assert "Cloudflare lookup error" in result.detail
+
+
+def test_check_dns_irrelevant_record_type_is_not_a_match() -> None:
+    # A zone answering with only a TXT/MX/NS record for the name is not
+    # the same as having an A/AAAA/CNAME pointing at this host -- the
+    # record-type filter must actually exclude it, not just happen to
+    # (every other test's fixture records are either empty or already
+    # A-type, so this is the only test that could catch the filter being
+    # dropped or inverted).
+    service = {"server_name": "example.com"}
+    with patch(
+        "app.catalog_checks._cf_request",
+        side_effect=[
+            {"result": [{"id": "zone123"}]},
+            {"result": [{"type": "TXT", "content": "v=spf1 -all"}]},
+        ],
+    ):
+        result = check_dns("svc", service, cf_headers={"x": "y"}, timeout=5, max_retries=1)
+    assert result.status == "fail"
+    assert "no A/AAAA/CNAME record" in result.detail
 
 
 # --- run_all -------------------------------------------------------------

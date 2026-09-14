@@ -118,6 +118,26 @@ def test_health_catalog_invalid_settings_returns_500(tmp_path: Path) -> None:
     assert "timeout" in resp.json()["detail"]
 
 
+def test_health_catalog_malformed_env_knob_returns_500(tmp_path: Path, monkeypatch) -> None:
+    # A malformed ALERT_DAYS env var (int() raises inside the real
+    # alert_days() getter, not a mocked return value) must be a clean
+    # 500, not an unhandled exception -- the route's actual env-parsing
+    # path, not a stand-in for it.
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": []}))
+    monkeypatch.setenv("ALERT_DAYS", "ten")
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_health_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_health_routes.services_json_path", return_value=catalog_path),
+    ):
+        resp = client.get("/health/catalog")
+
+    assert resp.status_code == 500
+    assert "ten" in resp.json()["detail"]
+
+
 def test_health_catalog_unhealthy_when_any_check_fails(tmp_path: Path) -> None:
     catalog_path = tmp_path / "services.json"
     catalog_path.write_text(json.dumps({"services": []}))

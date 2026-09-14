@@ -38,21 +38,17 @@ def get_catalog_health(
             detail="this host is not the designated home-warden host (see scripts/lib/host-guard)",
         )
 
+    # One error boundary for the whole load-and-check flow (load_catalog,
+    # parse_cloudflare_credentials, run_all -- and, via the arguments
+    # evaluated in that same run_all(...) call, the env getters in
+    # app.catalog_health_settings) rather than one try per call: the
+    # 404/500 contract is decided once for this route, not re-litigated
+    # call-by-call as new config inputs are added.
     try:
         catalog = load_catalog(services_json_path())
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except ValueError as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
-
-    cf_headers = None
-    if not skip_dns:
-        try:
+        cf_headers = None
+        if not skip_dns:
             cf_headers = parse_cloudflare_credentials(cloudflare_credentials_path())
-        except ValueError as e:
-            raise HTTPException(status_code=500, detail=str(e)) from e
-
-    try:
         results = run_all(
             catalog,
             certs_live_dir=certs_live_dir(),
@@ -64,7 +60,10 @@ def get_catalog_health(
             skip_dns=skip_dns,
             skip_upstream=skip_upstream,
         )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
+
     healthy = not any(r.status == "fail" for r in results)
     return {"healthy": healthy, "checks": [asdict(r) for r in results]}
