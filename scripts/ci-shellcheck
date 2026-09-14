@@ -1,11 +1,29 @@
 #!/usr/bin/env bash
-# Local/CI helper: bash -n + shellcheck -S info for all executable scripts/.
+# Local/CI helper: bash -n + shellcheck -S info for all bash scripts under scripts/.
+# Filters by shebang (not just "executable") so a non-bash script (e.g. a
+# Python entry point, also extension-less per convention) isn't misread as bash.
 set -euo pipefail
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_dir}"
-mapfile -t scripts < <(find scripts -type f -executable ! -name 'ci-shellcheck' | sort)
+
+scripts=()
+shebang=""
+file=""
+while IFS= read -r -d '' file; do
+  [[ "$(basename "${file}")" == "ci-shellcheck" ]] && continue
+  read -r shebang <"${file}" || shebang=""
+  if [[ "${shebang}" == "#!/usr/bin/env bash" ]]; then
+    scripts+=("${file}")
+  elif [[ "${shebang}" != "#!/usr/bin/env python3" ]]; then
+    # Recognized non-bash shebangs (Python) are silently skipped; anything
+    # else (a typo'd bash shebang, a shell we don't support) must be seen,
+    # not silently dropped from coverage.
+    echo "ci-shellcheck: unrecognized shebang '${shebang}' in ${file} -- not checked" >&2
+  fi
+done < <(find scripts -type f -executable -print0 | sort -z)
+
 if [[ ${#scripts[@]} -eq 0 ]]; then
-  echo "No executable scripts under scripts/" >&2
+  echo "No executable bash scripts under scripts/" >&2
   exit 1
 fi
 bash -n "${scripts[@]}"

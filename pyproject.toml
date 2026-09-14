@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "home-warden"
+version = "0.1.0"
+description = "Service-catalog tooling for home-warden (Python surface: the-hcma/home-warden#57)."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Henrique Andrade", email = "thehcma@users.noreply.github.com" },
+]
+requires-python = ">=3.12"
+keywords = ["home-warden", "fastapi", "nginx", "service-catalog"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.52.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/the-hcma/home-warden"
+Repository = "https://github.com/the-hcma/home-warden"
+Issues = "https://github.com/the-hcma/home-warden/issues"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["app", "config"]
+
+[tool.hatch.build.targets.sdist]
+packages = ["app", "config"]
+
+[tool.uv]
+package = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+python_files = ["test_*.py"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "config"]
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.12.0",
+    "pyright>=1.1.411",
+    "pytest>=9.1.1",
+    "ruff>=0.16.6",
+]
