@@ -20,17 +20,19 @@ app.api.catalog_health_routes (on-demand HTTP, for the future web UI).
 
 from __future__ import annotations
 
+import datetime
 import json
 import random
 import socket
 import ssl
-import subprocess
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+
+from cryptography import x509
 
 CF_API_BASE = "https://api.cloudflare.com/client/v4"
 
@@ -141,7 +143,15 @@ def candidate_zone_names(domain: str):
         yield ".".join(labels[i - 1 :])
 
 
-def check_cert(name: str, service: dict, certs_live_dir: Path, alert_days: int, timeout: float) -> CheckResult:
+def check_cert(name: str, service: dict, certs_live_dir: Path, alert_days: int) -> CheckResult:
+    """Uses the `cryptography` package directly rather than shelling out to
+    `openssl x509` -- structured field access (not_valid_after_utc, the
+    SubjectAlternativeName extension's typed DNSName list) instead of
+    parsing the CLI's human-readable text output, which is exactly the
+    class of bug that text-parsing produced here before (a SAN entry
+    sharing a line with a non-DNS general name got dropped). Matches the
+    precedent already set by the-hcma/my-tracks' app/pki.py.
+    """
     domain = service.get("server_name")
     if not domain:
         return CheckResult(name, "cert", "skip", "no server_name on this catalog entry")
@@ -151,48 +161,15 @@ def check_cert(name: str, service: dict, certs_live_dir: Path, alert_days: int, 
         return CheckResult(name, "cert", "fail", f"missing: {cert_path}")
 
     try:
-        proc = subprocess.run(
-            [
-                "openssl",
-                "x509",
-                "-in",
-                str(cert_path),
-                "-noout",
-                "-enddate",
-                "-ext",
-                "subjectAltName",
-                "-checkend",
-                str(alert_days * 86400),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return CheckResult(name, "cert", "fail", f"openssl timed out after {timeout}s")
+        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+    except (ValueError, OSError) as e:
+        return CheckResult(name, "cert", "fail", f"failed to parse {cert_path}: {e}")
 
-    # -checkend sets returncode 1 when the cert will lapse within the window;
-    # any other nonzero code is a real parse/read error, not an expiry signal.
-    if proc.returncode not in (0, 1):
-        return CheckResult(name, "cert", "fail", f"openssl error: {proc.stderr.strip()}")
-
-    enddate = ""
-    sans: list[str] = []
-    for line in proc.stdout.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("notAfter="):
-            enddate = stripped[len("notAfter=") :]
-            continue
-        # DNS names can share a line with other general-name types (e.g.
-        # "IP Address:10.0.0.5, DNS:app.example.com") -- scan every
-        # comma-separated entry on every line, don't require the whole
-        # line to start with "DNS:", and accumulate rather than overwrite
-        # in case openssl ever wraps the SAN list across lines.
-        for part in stripped.split(","):
-            part = part.strip()
-            if part.startswith("DNS:"):
-                sans.append(part[len("DNS:") :])
+    try:
+        san_ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+        sans = san_ext.value.get_values_for_type(x509.DNSName)
+    except x509.ExtensionNotFound:
+        sans = []
 
     if domain not in sans:
         return CheckResult(
@@ -201,9 +178,12 @@ def check_cert(name: str, service: dict, certs_live_dir: Path, alert_days: int, 
             "fail",
             f"{domain} not covered by cert SANs ({', '.join(sans) or 'none found'})",
         )
-    if proc.returncode == 1:
-        return CheckResult(name, "cert", "fail", f"expires within {alert_days}d (notAfter={enddate})")
-    return CheckResult(name, "cert", "ok", f"notAfter={enddate}; SANs cover {domain}")
+
+    not_after = cert.not_valid_after_utc
+    seconds_left = (not_after - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+    if seconds_left < alert_days * 86400:
+        return CheckResult(name, "cert", "fail", f"expires within {alert_days}d (notAfter={not_after.isoformat()})")
+    return CheckResult(name, "cert", "ok", f"notAfter={not_after.isoformat()}; SANs cover {domain}")
 
 
 def check_dns(
@@ -316,7 +296,7 @@ def run_all(
     for service in catalog.get("services") or []:
         name = service.get("name", "<unnamed>")
         if not skip_cert:
-            results.append(check_cert(name, service, certs_live_dir, alert_days, timeout))
+            results.append(check_cert(name, service, certs_live_dir, alert_days))
         if not skip_dns:
             results.append(check_dns(name, service, cf_headers, timeout, max_retries))
         if not skip_upstream:

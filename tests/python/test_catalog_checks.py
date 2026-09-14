@@ -1,10 +1,10 @@
 """Tests for app.catalog_checks.
 
 Cert tests generate real, local, ephemeral self-signed certs via openssl
-(deterministic, no network/live infra) and exercise check_cert's actual
-subprocess parsing. DNS/upstream network calls are mocked -- see
-AGENTS.md's Python Conventions ("tests must not depend on live
-infrastructure or credentials").
+as test fixtures (deterministic, no network/live infra) and exercise
+check_cert's actual `cryptography`-based parsing against them. DNS/upstream
+network calls are mocked -- see AGENTS.md's Python Conventions ("tests
+must not depend on live infrastructure or credentials").
 """
 
 from __future__ import annotations
@@ -186,12 +186,12 @@ def test_candidate_zone_names_two_labels() -> None:
 
 
 def test_check_cert_no_server_name(tmp_path: Path) -> None:
-    result = check_cert("svc", {}, tmp_path, alert_days=10, timeout=5)
+    result = check_cert("svc", {}, tmp_path, alert_days=10)
     assert result == CheckResult("svc", "cert", "skip", "no server_name on this catalog entry")
 
 
 def test_check_cert_missing_file(tmp_path: Path) -> None:
-    result = check_cert("svc", {"server_name": "app.example.com"}, tmp_path, alert_days=10, timeout=5)
+    result = check_cert("svc", {"server_name": "app.example.com"}, tmp_path, alert_days=10)
     assert result.status == "fail"
     assert "missing" in result.detail
 
@@ -199,7 +199,7 @@ def test_check_cert_missing_file(tmp_path: Path) -> None:
 def test_check_cert_valid(tmp_path: Path) -> None:
     domain = "app.example.com"
     make_self_signed_cert(tmp_path, domain, days=365)
-    result = check_cert("svc", {"server_name": domain}, tmp_path, alert_days=10, timeout=5)
+    result = check_cert("svc", {"server_name": domain}, tmp_path, alert_days=10)
     assert result.status == "ok"
     assert "notAfter=" in result.detail
 
@@ -208,7 +208,7 @@ def test_check_cert_expiring_soon(tmp_path: Path) -> None:
     domain = "app.example.com"
     make_self_signed_cert(tmp_path, domain, days=1)
     # alert_days huge relative to a 1-day cert -> always inside the alert window
-    result = check_cert("svc", {"server_name": domain}, tmp_path, alert_days=400, timeout=5)
+    result = check_cert("svc", {"server_name": domain}, tmp_path, alert_days=400)
     assert result.status == "fail"
     assert "expires within" in result.detail
 
@@ -216,7 +216,7 @@ def test_check_cert_expiring_soon(tmp_path: Path) -> None:
 def test_check_cert_san_mismatch(tmp_path: Path) -> None:
     domain = "app.example.com"
     make_self_signed_cert(tmp_path, domain, days=365, sans=["other.example.com"])
-    result = check_cert("svc", {"server_name": domain}, tmp_path, alert_days=10, timeout=5)
+    result = check_cert("svc", {"server_name": domain}, tmp_path, alert_days=10)
     assert result.status == "fail"
     assert "not covered" in result.detail
 
@@ -227,7 +227,7 @@ def test_check_cert_san_line_with_leading_non_dns_entry(tmp_path: Path) -> None:
     # than reporting a valid, correctly-issued cert as failing.
     domain = "app.example.com"
     make_self_signed_cert(tmp_path, domain, days=365, sans=[domain], leading_general_names=["IP:10.0.0.5"])
-    result = check_cert("svc", {"server_name": domain}, tmp_path, alert_days=10, timeout=5)
+    result = check_cert("svc", {"server_name": domain}, tmp_path, alert_days=10)
     assert result.status == "ok"
 
 
