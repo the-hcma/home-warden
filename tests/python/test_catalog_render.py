@@ -446,6 +446,24 @@ def test_ipv6_stream_upstream_gets_bracket_notation(tmp_path: Path) -> None:
     _parse_ok(rendered, tmp_path)
 
 
+def test_hostname_stream_upstream_is_not_bracketed(tmp_path: Path) -> None:
+    # Regression: the only stream fixture in this suite was IPv6, so a bug
+    # making _stream_upstream_address's bracketing unconditional (instead
+    # of gated on ":" in host) would leave the suite green while every
+    # hostname-addressed stream -- the normal case, per
+    # services.json.example's "backend.example.internal" -- rendered a
+    # bracketed proxy_pass that nginx rejects at config load.
+    catalog = {
+        "streams": [
+            {"name": "s", "listen_port": 1883, "upstream": {"host": "backend.internal", "port": 1883}},
+        ],
+    }
+    rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
+    assert "proxy_pass backend.internal:1883;" in rendered
+    assert "[backend.internal]" not in rendered
+    _parse_ok(rendered, tmp_path)
+
+
 def test_ipv6_upstream_host_gets_bracket_notation(tmp_path: Path) -> None:
     catalog = {"services": [_proxy_service(upstream={"scheme": "http", "host": "2001:db8::1", "port": 8080})]}
     rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
