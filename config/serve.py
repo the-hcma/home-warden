@@ -1,18 +1,14 @@
 """Run home-warden's HTTP API (FastAPI + uvicorn).
 
-Currently exposes only GET /health/catalog (the-hcma/home-warden#57); the
-future web UI (#55) is expected to grow this the way its consumers need,
-not to gain its own second process.
-
-Default bind: 127.0.0.1:8090 -- loopback-only until an operator explicitly
-opts into something else via --listen-host/--listen-port or the
-HOME_WARDEN_LISTEN_HOST/HOME_WARDEN_LISTEN_PORT env vars (e.g. once this
-runs under its own systemd unit).
+Exposes the catalog health route plus the authenticated web UI. nginx remains
+this service's only supported TLS/public entrypoint, so the backend binds
+loopback-only even when operators pass explicit CLI/env overrides.
 """
 
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import os
 
 import uvicorn
@@ -44,6 +40,12 @@ def resolve_listen_address(args: argparse.Namespace, *, env: dict[str, str] | No
             raise SystemExit(f"home-warden-server: invalid HOME_WARDEN_LISTEN_PORT={port_raw!r}") from exc
     if not 0 <= port <= 65535:
         raise SystemExit(f"home-warden-server: --listen-port out of range (0..65535): {port}")
+    if host != "localhost":
+        try:
+            if not ipaddress.ip_address(host).is_loopback:
+                raise SystemExit(f"home-warden-server: --listen-host must be loopback-only, got {host!r}")
+        except ValueError as exc:
+            raise SystemExit(f"home-warden-server: --listen-host must be loopback-only, got {host!r}") from exc
     return host, port
 
 

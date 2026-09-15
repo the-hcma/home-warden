@@ -1,25 +1,171 @@
-// Entry point for home-warden's admin web UI (the-hcma/home-warden#55).
+// Entry point for home-warden's admin web UI (#55 / #68).
 //
-// Scaffold-only (the-hcma/home-warden#67): this proves the pnpm + esbuild +
-// TypeScript pipeline end-to-end -- static text, no fetches, no real
-// features yet. Later sub-issues (#69 catalog CRUD, #70 health dashboard)
-// replace this with real panels.
+// Intentionally minimal: just enough DOM + fetch plumbing to prove the
+// PAM-backed login, session cookie, and logout flow end-to-end. Real admin
+// panels land in later sub-issues (#69 catalog CRUD, #70 health dashboard).
 
-function mount(root: HTMLElement): void {
+type SessionResponse = {
+  authenticated: true;
+  username: string;
+};
+
+const appPath = "/";
+const loginPath = "/login";
+
+function mountAppShell(root: HTMLElement): void {
+  void renderAppShell(root);
+}
+
+function mountLoginForm(root: HTMLElement): void {
+  let errorNode: HTMLParagraphElement | null = null;
+
   const heading = document.createElement("h1");
+  heading.textContent = "home-warden login";
+
+  const form = document.createElement("form");
+  const passwordInput = document.createElement("input");
+  const passwordLabel = document.createElement("label");
+  const submitButton = document.createElement("button");
+  const usernameInput = document.createElement("input");
+  const usernameLabel = document.createElement("label");
+
+  form.autocomplete = "on";
+  passwordInput.autocomplete = "current-password";
+  passwordInput.name = "password";
+  passwordInput.required = true;
+  passwordInput.type = "password";
+  passwordLabel.textContent = "Password";
+  passwordLabel.htmlFor = "password";
+  passwordInput.id = passwordLabel.htmlFor;
+  submitButton.textContent = "Log in";
+  submitButton.type = "submit";
+  usernameInput.autocomplete = "username";
+  usernameInput.id = "username";
+  usernameInput.name = "username";
+  usernameInput.required = true;
+  usernameLabel.textContent = "Username";
+  usernameLabel.htmlFor = usernameInput.id;
+
+  form.append(
+    usernameLabel,
+    document.createElement("br"),
+    usernameInput,
+    document.createElement("br"),
+    passwordLabel,
+    document.createElement("br"),
+    passwordInput,
+    document.createElement("br"),
+    submitButton,
+  );
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitButton.disabled = true;
+    clearLoginError();
+    void login(usernameInput.value, passwordInput.value)
+      .then(() => {
+        window.location.assign(appPath);
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : "Login failed";
+        errorNode = document.createElement("p");
+        errorNode.textContent = message;
+        root.append(errorNode);
+      })
+      .finally(() => {
+        submitButton.disabled = false;
+      });
+  });
+
+  root.append(heading, form);
+
+  function clearLoginError(): void {
+    if (errorNode) {
+      errorNode.remove();
+      errorNode = null;
+    }
+  }
+}
+
+function mountPage(root: HTMLElement): void {
+  if (window.location.pathname === loginPath) {
+    mountLoginForm(root);
+    return;
+  }
+  mountAppShell(root);
+}
+
+async function login(username: string, password: string): Promise<void> {
+  const response = await fetch("/auth/login", {
+    body: JSON.stringify({ password, username }),
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+}
+
+async function logout(): Promise<void> {
+  await fetch("/auth/logout", {
+    credentials: "same-origin",
+    method: "POST",
+  });
+  window.location.assign(loginPath);
+}
+
+async function renderAppShell(root: HTMLElement): Promise<void> {
+  const session = await readSession();
+  if (!session) {
+    window.location.assign(loginPath);
+    return;
+  }
+
+  const heading = document.createElement("h1");
+  const logoutButton = document.createElement("button");
+  const summary = document.createElement("p");
+
   heading.textContent = "home-warden";
+  logoutButton.textContent = "Log out";
+  logoutButton.type = "button";
+  summary.textContent = `Signed in as ${session.username}.`;
+  logoutButton.addEventListener("click", () => {
+    void logout();
+  });
 
-  const status = document.createElement("p");
-  status.textContent = "Web UI scaffold is running.";
+  root.replaceChildren(heading, summary, logoutButton);
+}
 
-  root.append(heading, status);
+async function readSession(): Promise<SessionResponse | null> {
+  const response = await fetch("/auth/session", {
+    credentials: "same-origin",
+    method: "GET",
+  });
+  if (response.status === 401) {
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  return (await response.json()) as SessionResponse;
+}
+
+async function errorMessage(response: Response): Promise<string> {
+  try {
+    const body = (await response.json()) as { detail?: unknown };
+    if (typeof body.detail === "string" && body.detail) {
+      return body.detail;
+    }
+  } catch {
+    // Ignore non-JSON error bodies and fall back to the status text.
+  }
+  return response.statusText || "Request failed";
 }
 
 const root = document.getElementById("app");
 if (root) {
-  mount(root);
+  mountPage(root);
 } else {
-  // Fails loudly in the browser console rather than silently doing nothing --
-  // a missing #app means index.html and main.ts have drifted apart.
   console.error("home-warden: #app root element not found");
 }

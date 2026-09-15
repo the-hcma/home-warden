@@ -13,7 +13,7 @@ from app.catalog_checks import CheckResult
 
 
 def make_client() -> TestClient:
-    return TestClient(create_app())
+    return TestClient(create_app(session_secret="test-session-secret"), base_url="https://testserver")
 
 
 def test_health_catalog_host_guard_refused() -> None:

@@ -1,27 +1,64 @@
-"""Tests for app.api.app's static-serving scaffold (the-hcma/home-warden#67).
+"""Tests for app.api.app's authenticated static-serving scaffold (#67/#68).
 
-Covers only the scaffold's own concerns -- the index route and the /static/
-mount actually serve the committed/built files. Route-specific behavior
-(health, future catalog/auth routes) is tested alongside those routers.
+Covers only the scaffold's own concerns -- the index/login routes and the
+/static/ mount actually serve the committed/built files, gated by session
+auth. Route-specific behavior (health, future catalog/auth routes) is
+tested alongside those routers.
 """
 
 from __future__ import annotations
+
+from http import HTTPStatus
 
 from fastapi.testclient import TestClient
 
 from app.api.app import STATIC_DIR, create_app
 
 
+def _allow_all(username: str, password: str) -> bool:
+    return True
+
+
 def make_client() -> TestClient:
-    return TestClient(create_app())
+    return TestClient(
+        create_app(authenticate_user=_allow_all, session_secret="test-session-secret"),
+        base_url="https://testserver",
+    )
 
 
-def test_index_serves_static_html() -> None:
+def test_authenticated_root_serves_static_html() -> None:
     client = make_client()
+    login = client.post("/auth/login", json={"username": "alice", "password": "ignored"})
+    assert login.status_code == HTTPStatus.OK
+
     resp = client.get("/")
-    assert resp.status_code == 200
+    assert resp.status_code == HTTPStatus.OK
     assert resp.headers["content-type"].startswith("text/html")
     assert '<div id="app">' in resp.text
+
+
+def test_login_route_serves_static_html_when_logged_out() -> None:
+    client = make_client()
+    resp = client.get("/login")
+    assert resp.status_code == HTTPStatus.OK
+    assert resp.headers["content-type"].startswith("text/html")
+    assert '<div id="app">' in resp.text
+
+
+def test_login_route_redirects_to_root_when_already_authenticated() -> None:
+    client = make_client()
+    client.post("/auth/login", json={"username": "alice", "password": "ignored"})
+
+    resp = client.get("/login", follow_redirects=False)
+    assert resp.status_code == HTTPStatus.SEE_OTHER
+    assert resp.headers["location"] == "/"
+
+
+def test_root_redirects_to_login_when_logged_out() -> None:
+    client = make_client()
+    resp = client.get("/", follow_redirects=False)
+    assert resp.status_code == HTTPStatus.SEE_OTHER
+    assert resp.headers["location"] == "/login"
 
 
 def test_static_dir_is_the_committed_app_api_static_dir() -> None:

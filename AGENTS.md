@@ -315,12 +315,22 @@ small subset of domesti-bot's, so adopt the shape, not its full scale.
 - **Dependabot**: a dedicated `npm` / `/web` entry in
   `.github/dependabot.yml`, grouped by package (`typescript`, `esbuild`)
   to reduce PR noise — separate from the existing `github-actions` entry.
-- **Auth and transport**: none in the scaffold itself. PAM-based login and
-  the requirement that this UI is *only* ever reachable through nginx's
-  own HTTPS (never a direct/plaintext listener) are #68's scope — see
-  that issue and #55's "Decided" section before adding any real route
-  that isn't already behind those, and before assuming the scaffold's
-  dev-only loopback bind is safe to expose as-is.
+- **Auth and transport**: PAM-backed login lands in #68 via the
+  `python-pam` dependency (plus a direct `six` pin because that package's
+  published metadata omits it), a short-lived signed session cookie
+  (`HttpOnly`, `Secure`, `SameSite=Strict`) stored by FastAPI/Starlette,
+  and a persistent signing secret in
+  `$XDG_CONFIG_HOME/home-warden/session-secret` (default
+  `~/.config/home-warden/session-secret`). The backend stays loopback-only;
+  nginx remains the only supported TLS/public entrypoint.
+- **Operator config**: the web UI is opt-in through
+  `$XDG_CONFIG_HOME/home-warden/config.toml` (default
+  `~/.config/home-warden/config.toml`), read with stdlib `tomllib`.
+  Today this file carries only `fqdn = "warden.example.com"`; missing,
+  empty, or malformed TOML disables the self-catalog web-ui vhost instead
+  of crashing startup. Existing env-var settings in
+  `app/catalog_health_settings.py` are intentionally still env-driven
+  until a later migration issue lands.
 
 ---
 

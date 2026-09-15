@@ -24,6 +24,7 @@
 #   OWNER            Service user (default: current user)
 #   SCRATCH_DIR      Runtime prefix for nginx -p (default: ~/scratch/home-warden)
 #   CONF_DIR         Durable SSL material (default: ~/conf/home-warden)
+#   XDG_CONFIG_HOME  Base dir for ~/.config-style files (default: ~/.config)
 
 set -euo pipefail
 
@@ -35,10 +36,14 @@ readonly unit_template_dir="${repo_dir}/etc/systemd"
 readonly system_unit_dir="/etc/systemd/system"
 readonly logrotate_template="${repo_dir}/etc/logrotate/home-warden"
 readonly logrotate_dest="/etc/logrotate.d/home-warden"
+readonly home_warden_config_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/home-warden"
+readonly home_warden_config_path="${home_warden_config_dir}/config.toml"
 
-# shellcheck source=scripts/lib/host-guard
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/host-guard
 source "${script_dir}/lib/host-guard"
-# shellcheck source=scripts/lib/nginx-pid
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/nginx-pid
 source "${script_dir}/lib/nginx-pid"
 
 owner="${OWNER:-$(id -un)}"
@@ -156,6 +161,71 @@ resolve_home_nginx_conf() {
     return 0
   fi
   return 1
+}
+
+is_valid_fqdn() {
+  local -r fqdn="${1:-}"
+  [[ "${fqdn}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
+}
+
+write_home_warden_config() {
+  local -r fqdn="${1:-}"
+  run mkdir -p "${home_warden_config_dir}"
+  if ((dry_run)); then
+    if [[ -n "${fqdn}" ]]; then
+      echo "DRY-RUN: would write ${home_warden_config_path} with fqdn=${fqdn}"
+    else
+      echo "DRY-RUN: would write ${home_warden_config_path} with web UI disabled"
+    fi
+    return 0
+  fi
+  if [[ -n "${fqdn}" ]]; then
+    cat >"${home_warden_config_path}" <<EOF
+# home-warden web UI config.
+# Set the HTTPS hostname nginx should serve the admin UI under.
+fqdn = "${fqdn}"
+EOF
+  else
+    cat >"${home_warden_config_path}" <<'EOF'
+# home-warden web UI config.
+# Leave fqdn empty to keep the admin UI disabled.
+fqdn = ""
+EOF
+  fi
+  chmod 600 "${home_warden_config_path}"
+}
+
+maybe_create_web_ui_config() {
+  local fqdn=""
+  if [[ -f "${home_warden_config_path}" ]]; then
+    return 0
+  fi
+  if ((dry_run)); then
+    if [[ -t 0 && -t 1 ]] && ((confirm_host == 0 && repin_host == 0)); then
+      echo "DRY-RUN: would prompt for the web UI FQDN and write ${home_warden_config_path}"
+    fi
+    return 0
+  fi
+  if ! [[ -t 0 && -t 1 ]] || ((confirm_host)) || ((repin_host)); then
+    return 0
+  fi
+
+  echo "Optional: configure the home-warden web UI hostname."
+  echo "  Leave blank to keep the web UI disabled for now."
+  while :; do
+    read -r -p "Admin UI FQDN (blank to disable): " fqdn
+    if [[ -z "${fqdn}" ]]; then
+      write_home_warden_config ""
+      echo "Created ${home_warden_config_path} with the web UI disabled."
+      return 0
+    fi
+    if is_valid_fqdn "${fqdn}"; then
+      write_home_warden_config "${fqdn}"
+      echo "Created ${home_warden_config_path}."
+      return 0
+    fi
+    echo "ERROR: enter a hostname like warden.example.com, or leave it blank to disable." >&2
+  done
 }
 
 run() {
@@ -411,6 +481,7 @@ print_status() {
   echo "  home nginx.conf: ${home_nginx_conf:-<unset>}"
   echo "  deployed commit: ${deployed_commit:-$(git -C "${repo_dir}" rev-parse --short HEAD 2>/dev/null || echo '<unset>')}"
   echo "  service log:     ${scratch_dir}/home-warden.log"
+  echo "  config.toml:     ${home_warden_config_path}"
   echo "  nginx error log: ${scratch_dir}/logs/error.log"
   echo "  nginx access log:${scratch_dir}/logs/access.log"
   echo "  pinned host:     ${pinned_host:-<unset>} (${hw_pinned_host_file})"
@@ -488,6 +559,8 @@ main() {
     exit 1
   fi
   home_nginx_conf="${resolved}"
+
+  maybe_create_web_ui_config
 
   require_sudo
   check_prerequisites
