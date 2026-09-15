@@ -18,11 +18,13 @@ from unittest.mock import MagicMock
 import pytest
 from starlette.requests import Request
 
+import app.home_warden_auth as home_warden_auth
 from app.home_warden_auth import (
     _pam_authenticator,
     authenticate_with_pam,
     ensure_session_secret,
     get_session_username,
+    session_secret_path,
 )
 
 
@@ -45,6 +47,65 @@ def test_ensure_session_secret_file_is_owner_only(tmp_path: Path) -> None:
     ensure_session_secret(secret_path)
     mode = stat.S_IMODE(secret_path.stat().st_mode)
     assert mode == 0o600
+
+
+def test_ensure_session_secret_uses_concurrent_winners_file(monkeypatch, tmp_path: Path) -> None:
+    """Simulates the FileExistsError race: another process creates the file
+    between our read and our os.open call. We must read back *its* secret,
+    not silently keep signing with our own in-process one (or every worker
+    would sign with a different key)."""
+    secret_path = tmp_path / "session-secret"
+    winner_secret = "winner-secret-value"
+
+    real_open = home_warden_auth.os.open
+
+    def fake_open(path, flags, mode=0o777):
+        # The "winner" writes its own secret to the file the instant our
+        # os.open would have created it, then we still raise FileExistsError
+        # as os.open itself would if the file already existed.
+        Path(path).write_text(f"{winner_secret}\n", encoding="utf-8")
+        Path(path).chmod(0o600)
+        raise FileExistsError(path)
+
+    monkeypatch.setattr(home_warden_auth.os, "open", fake_open)
+    result = ensure_session_secret(secret_path)
+    monkeypatch.setattr(home_warden_auth.os, "open", real_open)
+
+    assert result == winner_secret
+
+
+def test_ensure_session_secret_repairs_empty_leftover_file(tmp_path: Path) -> None:
+    """A 0-byte file (e.g. left behind by a process that crashed between
+    os.open and os.write) must be treated as missing and repaired, not
+    returned as-is or looped on forever."""
+    secret_path = tmp_path / "session-secret"
+    secret_path.write_text("", encoding="utf-8")
+
+    result = ensure_session_secret(secret_path)
+
+    assert result
+    assert secret_path.read_text(encoding="utf-8").strip() == result
+
+
+def test_ensure_session_secret_falls_back_in_memory_on_unwritable_dir(monkeypatch, tmp_path: Path) -> None:
+    """When the config directory can't be created/written to at all
+    (OSError other than FileExistsError), ensure_session_secret must still
+    return a usable secret instead of raising."""
+    secret_path = tmp_path / "nested" / "session-secret"
+
+    def raising_mkdir(*args, **kwargs):
+        raise PermissionError("read-only filesystem")
+
+    monkeypatch.setattr(Path, "mkdir", raising_mkdir)
+    result = ensure_session_secret(secret_path)
+
+    assert result
+    assert not secret_path.exists()
+
+
+def test_session_secret_path_defaults_next_to_config(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(home_warden_auth, "config_path", lambda: tmp_path / "config.toml")
+    assert session_secret_path() == tmp_path / "session-secret"
 
 
 def test_authenticate_with_pam_rejects_empty_username_without_calling_pam(monkeypatch) -> None:
