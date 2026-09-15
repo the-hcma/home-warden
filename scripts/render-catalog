@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Render a home-warden service catalog (services.json) into nginx config.
+# Thin wrapper around the app.catalog_render_cli console script -- see that
+# module's docstring for env vars, flags, and exit codes.
+# See the-hcma/home-warden#54.
+#
+# Usage:
+#   ./scripts/render-catalog
+#   ./scripts/render-catalog --output /tmp/rendered.conf
+#   ./scripts/render-catalog --services-json ./services.json.example --certs-live-dir /tmp/certs
+
+set -euo pipefail
+
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_dir}"
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "render-catalog: install uv (https://docs.astral.sh/uv/) or run 'uv sync' in ${repo_dir}" >&2
+  exit 1
+fi
+
+exec uv run render-catalog "$@"

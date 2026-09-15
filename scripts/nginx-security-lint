@@ -13,6 +13,15 @@
 #   GIXY_LEVEL       minimum severity to report (LOW, MEDIUM, or HIGH,
 #                     matching gixy's -l/-ll/-lll); default: LOW (report
 #                     everything).
+#   GIXY_SKIPS       comma-separated Gixy-Next test names to skip (gixy's
+#                     own --skips) — for a documented, narrow exception,
+#                     not a way to silence findings without a reason. Empty
+#                     by default: this repo's own nginx/nginx.conf fixture
+#                     has zero known false positives, so it runs with no
+#                     skips; see .github/ci/catalog-render-validate for the
+#                     one place this repo does set it (websocket support
+#                     inherently needs proxy_buffering off, and every
+#                     proxy_pass here intentionally has a literal path).
 #
 # Requires the `lint` uv dependency group (`uv sync --group lint`); this
 # script invokes it automatically via `uv run --group lint`.
@@ -93,8 +102,13 @@ case "${level}" in
 esac
 
 if [[ "${verbose}" -eq 1 ]]; then
-  echo "nginx-security-lint: uv run --group lint gixy ${level_flag} ${conf_path}" >&2
+  echo "nginx-security-lint: uv run --group lint gixy ${level_flag} ${GIXY_SKIPS:+--skips ${GIXY_SKIPS} }${conf_path}" >&2
 fi
 
 cd "${repo_dir}"
-exec uv run --group lint gixy "${level_flag}" "${conf_path}"
+gixy_args=("${level_flag}")
+if [[ -n "${GIXY_SKIPS:-}" ]]; then
+  gixy_args+=(--skips "${GIXY_SKIPS}")
+fi
+gixy_args+=("${conf_path}")
+exec uv run --group lint gixy "${gixy_args[@]}"

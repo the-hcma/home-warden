@@ -398,6 +398,7 @@ name = "home-warden"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "crossplane" },
     { name = "cryptography" },
     { name = "fastapi" },
     { name = "uvicorn", extra = ["standard"] },
@@ -416,6 +417,7 @@ lint = [
 
 [package.metadata]
 requires-dist = [
+    { name = "crossplane", specifier = ">=0.5.8" },
     { name = "cryptography", specifier = ">=50.0.1" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.4" },
