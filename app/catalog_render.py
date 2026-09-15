@@ -174,7 +174,15 @@ def _build_allow_cn_map(service: dict, index: int) -> dict | None:
         # (multiple CN attributes are legal in an X.509 name) -- that's a
         # CA issuance-policy concern (home-warden#49's tooling doesn't
         # exist yet to enforce single-CN subjects), not something a
-        # regex over the flattened DN string can fully close.
+        # regex over the flattened DN string can fully close. Nor does it
+        # treat a `+`-joined multi-valued RDN (RFC 2253/4514, e.g.
+        # "OU=x+CN=alice") as an RDN boundary -- only `,` is matched as a
+        # separator -- so a CN packed into a multi-valued RDN alongside
+        # another attribute won't match. Multi-valued RDNs are a rarer
+        # X.509 construct than a CN value containing a comma or plus
+        # sign (which _escape_map_pattern does handle), so this stays an
+        # out-of-scope edge case alongside the duplicate-CN one, tracked
+        # under #49 rather than widening the anchor pattern here.
         #
         # See _FILE_BACKSLASH_ATOM for why this lookbehind needs 4 literal
         # backslash characters in the rendered file, not the 2 a bare
