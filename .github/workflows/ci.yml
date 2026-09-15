@@ -195,6 +195,29 @@ jobs:
       - name: Render catalog fixture + nginx -t + Gixy-Next
         run: bash .github/ci/catalog-render-validate
 
+  web-build:
+    name: Web (typecheck + build)
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "20"
+
+      # Corepack from web/packageManager + pnpm store cache (mirrors
+      # the-hcma/domesti-bot's own web-build job, the-hcma/home-warden#55's
+      # adopted structural model).
+      - uses: the-hcma/repository-helpers/actions/setup-pnpm-corepack@cde3063aa1e030fcac59bbf215131a3bd25d7908
+        with:
+          working-directory: web
+
+      - name: Web (typecheck + build)
+        run: bash .github/ci/web-build
+
   secret-scan:
     name: Secret Scan
     needs: guard

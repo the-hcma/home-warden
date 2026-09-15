@@ -28,3 +28,8 @@ __pycache__/
 conf/*
 !conf/*.example
 !conf/README.md
+
+# Web UI (the-hcma/home-warden#55/#67) -- esbuild output + pnpm store are
+# build artifacts, not source; web/pnpm-lock.yaml stays tracked.
+web/node_modules/
+app/api/static/dist/
