@@ -341,6 +341,20 @@ def test_unrecognized_client_cert_mode_raises_value_error(tmp_path: Path) -> Non
         render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
 
 
+def test_allow_cn_scalar_string_raises_value_error(tmp_path: Path) -> None:
+    # Regression: allow_cn's shape is never validated by app.catalog_checks
+    # (only the top-level services list and upstream objects are), so a
+    # catalog writing allow_cn as a bare string -- "allow_cn": "alice"
+    # instead of ["alice"] -- used to iterate the *string*, silently
+    # rendering one map entry per character ("CN=a", "CN=l", "CN=i", ...)
+    # instead of one entry for the whole CN. Fail loud instead.
+    catalog = {
+        "services": [_proxy_service(client_cert={"mode": "required", "ca_bundle": "/tmp/ca.pem", "allow_cn": "alice"})]
+    }
+    with pytest.raises(ValueError, match="allow_cn"):
+        render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
+
+
 def test_allow_cn_with_optional_mode_raises_value_error(tmp_path: Path) -> None:
     # Regression: the allow_cn gate 403s any request whose $ssl_client_s_dn
     # doesn't match, including a cert-less one (the map's `default 0`

@@ -154,6 +154,19 @@ def _build_allow_cn_map(service: dict, index: int) -> dict | None:
     allow_cn = (service.get("client_cert") or {}).get("allow_cn")
     if not allow_cn:
         return None
+    # Neither this module nor app/catalog_checks.py's load_catalog
+    # validates allow_cn's shape, so a catalog that writes it as a scalar
+    # string (or a JSON object) would otherwise iterate per-character (or
+    # per-key) below -- rendering a map with one entry per letter of the
+    # intended CN instead of one entry for the whole CN, a silent
+    # weakening of the allowlist rather than a syntax error an operator
+    # would notice. Fail loud instead, consistent with the neighboring
+    # client_cert checks in _client_cert_directives.
+    if not isinstance(allow_cn, list) or not all(isinstance(cn, str) for cn in allow_cn):
+        raise ValueError(
+            f"client_cert.allow_cn must be a list of strings for service {service.get('name', '<unnamed>')!r}, "
+            f"got {allow_cn!r}"
+        )
     map_block = [_directive("default", args=["0"])]
     for cn in allow_cn:
         # $ssl_client_s_dn is RFC 2253 form with RDNs printed in *reverse*
