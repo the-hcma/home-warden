@@ -1,8 +1,9 @@
-// Entry point for home-warden's admin web UI (#55 / #68 / #69).
+// Entry point for home-warden's admin web UI (#55 / #68 / #69 / #70).
 //
 // Still intentionally framework-free: plain DOM + fetch keeps the first UI
 // issues small and inspectable while the backend contract settles.
 
+type AppView = "catalog" | "health";
 type CatalogAction = "create" | "delete" | "update";
 type ServiceKind = "proxy" | "static";
 type SessionResponse = {
@@ -89,9 +90,97 @@ type CatalogState = {
   previewRequest: CatalogMutationRequest | null;
   services: ServiceEntry[];
 };
+type DashboardState = {
+  data: HealthResponse | null;
+  error: string | null;
+  lastUpdatedLabel: string | null;
+  loading: boolean;
+  refreshing: boolean;
+};
+type HealthCheck = {
+  detail: string;
+  dimension: "cert" | "dns" | "upstream";
+  service: string;
+  status: "fail" | "ok" | "skip";
+};
+type HealthGroup = {
+  checks: Record<HealthCheck["dimension"], HealthCheck | null>;
+  service: string;
+};
+type HealthResponse = {
+  checks: HealthCheck[];
+  healthy: boolean;
+};
 
 const appPath = "/";
+const healthPollIntervalMs = 30_000;
 const loginPath = "/login";
+
+function appendCheckbox(
+  form: HTMLFormElement,
+  labelText: string,
+  checked: boolean,
+  onChange: (checked: boolean) => void,
+): void {
+  const input = document.createElement("input");
+  const label = document.createElement("label");
+
+  input.checked = checked;
+  input.type = "checkbox";
+  input.addEventListener("change", () => {
+    onChange(input.checked);
+  });
+
+  label.textContent = labelText;
+  form.append(input, document.createTextNode(" "), label, document.createElement("br"));
+}
+
+function appendTextArea(
+  form: HTMLFormElement,
+  labelText: string,
+  value: string,
+  onChange: (value: string) => void,
+): void {
+  const label = document.createElement("label");
+  const textarea = document.createElement("textarea");
+
+  label.textContent = labelText;
+  textarea.rows = 4;
+  textarea.value = value;
+  textarea.addEventListener("input", () => {
+    onChange(textarea.value);
+  });
+
+  form.append(label, document.createElement("br"), textarea, document.createElement("br"));
+}
+
+function appendTextInput(
+  form: HTMLFormElement,
+  labelText: string,
+  value: string,
+  onChange: (value: string) => void,
+  type = "text",
+): void {
+  const input = document.createElement("input");
+  const label = document.createElement("label");
+
+  input.type = type;
+  input.value = value;
+  input.addEventListener("input", () => {
+    onChange(input.value);
+  });
+
+  label.textContent = labelText;
+  form.append(label, document.createElement("br"), input, document.createElement("br"));
+}
+
+async function applyCatalogMutation(request: CatalogMutationRequest): Promise<ApplyResponse> {
+  return fetchJson<ApplyResponse>("/catalog/apply", {
+    body: JSON.stringify(request),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  });
+}
 
 function blankFormState(): FormState {
   return {
@@ -186,6 +275,19 @@ function buildServiceFromForm(form: FormState, base: ServiceEntry | null, forUpd
   return service;
 }
 
+function buildStatusBadge(status: HealthCheck["status"]): HTMLElement {
+  const badge = document.createElement("span");
+
+  badge.textContent = status.toUpperCase();
+  badge.style.borderRadius = "999px";
+  badge.style.display = "inline-block";
+  badge.style.fontSize = "0.8rem";
+  badge.style.fontWeight = "700";
+  badge.style.padding = "0.15rem 0.55rem";
+  styleStatusBadge(badge, status);
+  return badge;
+}
+
 function cloneJson<T extends JsonValue>(value: T): T {
   return structuredClone(value);
 }
@@ -202,6 +304,26 @@ async function errorMessage(response: Response): Promise<string> {
   return response.statusText || "Request failed";
 }
 
+function extractCertDomain(check: HealthCheck): string | null {
+  const coverPrefix = "SANs cover ";
+  const coverIndex = check.detail.indexOf(coverPrefix);
+  if (coverIndex >= 0) {
+    return check.detail.slice(coverIndex + coverPrefix.length).trim() || null;
+  }
+
+  const missingPathMatch = /\/live\/([^/]+)\/fullchain\.pem/u.exec(check.detail);
+  if (missingPathMatch?.[1]) {
+    return missingPathMatch[1];
+  }
+
+  const sanFailureMatch = /^([^ ]+) not covered by cert SANs/u.exec(check.detail);
+  if (sanFailureMatch?.[1]) {
+    return sanFailureMatch[1];
+  }
+
+  return null;
+}
+
 async function fetchJson<T>(path: string, init: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -211,6 +333,53 @@ async function fetchJson<T>(path: string, init: RequestInit): Promise<T> {
     throw new Error(await errorMessage(response));
   }
   return (await response.json()) as T;
+}
+
+function groupHealthChecks(checks: HealthCheck[]): HealthGroup[] {
+  const groups = new Map<string, HealthGroup>();
+
+  for (const check of checks) {
+    let group = groups.get(check.service);
+    if (!group) {
+      group = {
+        checks: {
+          cert: null,
+          dns: null,
+          upstream: null,
+        },
+        service: check.service,
+      };
+      groups.set(check.service, group);
+    }
+    group.checks[check.dimension] = check;
+  }
+
+  return Array.from(groups.values()).sort((left, right) => left.service.localeCompare(right.service));
+}
+
+function inferRenewalState(check: HealthCheck): string {
+  if (check.status === "skip") {
+    return "Not configured";
+  }
+
+  const expiry = parseExpiryDate(check.detail);
+  if (check.status === "ok") {
+    if (!expiry) {
+      return "Healthy";
+    }
+    const daysLeft = Math.ceil((expiry.getTime() - Date.now()) / 86_400_000);
+    return daysLeft >= 0 ? `Healthy (${daysLeft}d left)` : `Expired ${Math.abs(daysLeft)}d ago`;
+  }
+
+  if (check.detail.startsWith("expires within ")) {
+    if (!expiry) {
+      return "Renewal due soon";
+    }
+    const daysLeft = Math.ceil((expiry.getTime() - Date.now()) / 86_400_000);
+    return daysLeft >= 0 ? `Renew soon (${daysLeft}d left)` : `Expired ${Math.abs(daysLeft)}d ago`;
+  }
+
+  return "Action needed";
 }
 
 async function login(username: string, password: string): Promise<void> {
@@ -248,7 +417,7 @@ function mountAppShell(root: HTMLElement): void {
   });
 }
 
-function mountCatalogManager(root: HTMLElement): void {
+function mountCatalogManager(root: HTMLElement): () => void {
   const state: CatalogState = {
     applying: false,
     error: null,
@@ -261,10 +430,124 @@ function mountCatalogManager(root: HTMLElement): void {
     services: [],
   };
   let actionsHost: HTMLDivElement | null = null;
+  let disposed = false;
   let previewHost: HTMLElement | null = null;
 
   render();
-  void refreshServices().finally(render);
+  void refreshServices().finally(() => {
+    safeRender();
+  });
+
+  return () => {
+    disposed = true;
+    root.replaceChildren();
+  };
+
+  async function applyCurrentPreview(): Promise<void> {
+    if (state.applying || !state.previewRequest || disposed) {
+      return;
+    }
+
+    state.applying = true;
+    state.error = null;
+    state.message = "Applying catalog change…";
+    safeRender();
+    try {
+      const result = await applyCatalogMutation(state.previewRequest);
+      if (disposed) {
+        return;
+      }
+      if (result.deleted_name) {
+        resetEditor();
+        state.message = `Deleted ${result.deleted_name}.`;
+      } else if (result.service) {
+        invalidatePreview();
+        state.form = serviceToFormState(result.service);
+        state.message = `Applied ${result.service.name}.`;
+        state.originalService = result.service;
+      } else {
+        invalidatePreview();
+        state.message = "Applied catalog change.";
+      }
+      const refreshPromise = refreshServices();
+      safeRender();
+      await refreshPromise;
+      if (disposed) {
+        return;
+      }
+    } catch (error: unknown) {
+      if (disposed) {
+        return;
+      }
+      state.error = error instanceof Error ? error.message : "Apply failed";
+    } finally {
+      state.applying = false;
+    }
+    safeRender();
+  }
+
+  function beginCreate(): void {
+    if (disposed) {
+      return;
+    }
+    state.error = null;
+    state.message = "Creating a new service.";
+    resetEditor();
+    safeRender();
+  }
+
+  async function beginDelete(name: string): Promise<void> {
+    if (disposed) {
+      return;
+    }
+    state.error = null;
+    state.message = `Previewing deletion of ${name}…`;
+    invalidatePreview();
+    safeRender();
+
+    try {
+      const request: CatalogMutationRequest = { action: "delete", name };
+      const preview = await previewCatalogMutation(request);
+      if (disposed) {
+        return;
+      }
+      state.message = `Preview ready for deleting ${name}.`;
+      state.preview = preview;
+      state.previewRequest = request;
+    } catch (error: unknown) {
+      if (disposed) {
+        return;
+      }
+      state.error = error instanceof Error ? error.message : "Preview failed";
+    }
+    safeRender();
+  }
+
+  async function beginEdit(name: string): Promise<void> {
+    if (disposed) {
+      return;
+    }
+    state.error = null;
+    state.message = `Loading ${name}…`;
+    invalidatePreview();
+    safeRender();
+
+    try {
+      const service = await readCatalogService(name);
+      if (disposed) {
+        return;
+      }
+      state.form = serviceToFormState(service);
+      state.message = `Editing ${name}.`;
+      state.originalService = service;
+    } catch (error: unknown) {
+      if (disposed) {
+        return;
+      }
+      state.error = error instanceof Error ? error.message : "Failed to load service";
+    }
+    safeRender();
+  }
 
   function invalidatePreview(): void {
     state.preview = null;
@@ -280,141 +563,60 @@ function mountCatalogManager(root: HTMLElement): void {
     }
   }
 
-  function resetEditor(): void {
-    state.form = blankFormState();
-    state.originalService = null;
-    invalidatePreview();
-  }
-
-  async function applyCurrentPreview(): Promise<void> {
-    if (state.applying || !state.previewRequest) {
+  async function previewCurrentForm(): Promise<void> {
+    if (disposed) {
       return;
     }
-
-    state.applying = true;
-    state.error = null;
-    state.message = "Applying catalog change…";
-    render();
-    try {
-      const result = await applyCatalogMutation(state.previewRequest);
-      if (result.deleted_name) {
-        resetEditor();
-        state.message = `Deleted ${result.deleted_name}.`;
-      } else if (result.service) {
-        invalidatePreview();
-        state.originalService = result.service;
-        state.form = serviceToFormState(result.service);
-        state.message = `Applied ${result.service.name}.`;
-      } else {
-        invalidatePreview();
-        state.message = "Applied catalog change.";
-      }
-      const refreshPromise = refreshServices();
-      render();
-      await refreshPromise;
-    } catch (error: unknown) {
-      state.error = error instanceof Error ? error.message : "Apply failed";
-    } finally {
-      state.applying = false;
-    }
-    render();
-  }
-
-  async function beginCreate(): Promise<void> {
-    state.error = null;
-    state.message = "Creating a new service.";
-    resetEditor();
-    render();
-  }
-
-  async function beginDelete(name: string): Promise<void> {
-    state.error = null;
-    state.message = `Previewing deletion of ${name}…`;
-    invalidatePreview();
-    render();
-
-    try {
-      const request: CatalogMutationRequest = { action: "delete", name };
-      state.preview = await previewCatalogMutation(request);
-      state.previewRequest = request;
-      state.message = `Preview ready for deleting ${name}.`;
-    } catch (error: unknown) {
-      state.error = error instanceof Error ? error.message : "Preview failed";
-    }
-    render();
-  }
-
-  async function beginEdit(name: string): Promise<void> {
-    state.error = null;
-    state.message = `Loading ${name}…`;
-    invalidatePreview();
-    render();
-
-    try {
-      const service = await readCatalogService(name);
-      state.form = serviceToFormState(service);
-      state.originalService = service;
-      state.message = `Editing ${name}.`;
-    } catch (error: unknown) {
-      state.error = error instanceof Error ? error.message : "Failed to load service";
-    }
-    render();
-  }
-
-  async function previewCurrentForm(): Promise<void> {
     state.error = null;
     state.message = "Rendering preview…";
     invalidatePreview();
-    render();
+    safeRender();
 
     try {
       const nextService = buildServiceFromForm(state.form, state.originalService, state.originalService !== null);
       const request: CatalogMutationRequest = state.originalService
         ? { action: "update", name: state.originalService.name, service: nextService }
         : { action: "create", service: nextService };
-      state.preview = await previewCatalogMutation(request);
-      state.previewRequest = request;
+      const preview = await previewCatalogMutation(request);
+      if (disposed) {
+        return;
+      }
       state.message = `Preview ready for ${nextService.name || "this service"}.`;
+      state.preview = preview;
+      state.previewRequest = request;
     } catch (error: unknown) {
+      if (disposed) {
+        return;
+      }
       state.error = error instanceof Error ? error.message : "Preview failed";
     }
-    render();
+    safeRender();
   }
 
   async function refreshServices(): Promise<void> {
     state.loading = true;
     state.error = null;
     try {
-      state.services = await readCatalogServices();
+      const services = await readCatalogServices();
+      if (disposed) {
+        return;
+      }
+      state.services = services;
     } catch (error: unknown) {
+      if (disposed) {
+        return;
+      }
       state.error = error instanceof Error ? error.message : "Failed to load services";
       state.services = [];
     }
     state.loading = false;
   }
 
-  function render(): void {
-    const container = document.createElement("div");
-    const layout = document.createElement("div");
-    const listSection = document.createElement("section");
-    const editorSection = document.createElement("section");
-    const actions = renderActions();
-    const previewSection = renderPreviewSection();
-
-    listSection.append(renderServiceList());
-    editorSection.append(renderServiceEditor());
-
-    layout.style.display = "grid";
-    layout.style.gap = "1.5rem";
-    layout.append(listSection, editorSection, previewSection);
-
-    actionsHost = actions;
-    previewHost = previewSection;
-    container.append(actions, layout);
-    root.replaceChildren(container);
-  }
-
   function refreshCatalogChrome(): void {
+    if (disposed) {
+      return;
+    }
+
     const nextActions = renderActions();
     const nextPreview = renderPreviewSection();
 
@@ -428,6 +630,29 @@ function mountCatalogManager(root: HTMLElement): void {
     previewHost = nextPreview;
   }
 
+  function render(): void {
+    const actions = renderActions();
+    const container = document.createElement("div");
+    const editorSection = document.createElement("section");
+    const layout = document.createElement("div");
+    const listSection = document.createElement("section");
+    const previewSection = renderPreviewSection();
+
+    editorSection.append(renderServiceEditor());
+    listSection.append(renderServiceList());
+    styleSection(editorSection);
+    styleSection(listSection);
+
+    layout.style.display = "grid";
+    layout.style.gap = "1.5rem";
+    layout.append(listSection, editorSection, previewSection);
+
+    actionsHost = actions;
+    previewHost = previewSection;
+    container.append(actions, layout);
+    root.replaceChildren(container);
+  }
+
   function renderActions(): HTMLDivElement {
     const actions = document.createElement("div");
     const heading = document.createElement("h2");
@@ -439,7 +664,7 @@ function mountCatalogManager(root: HTMLElement): void {
     addButton.textContent = "Add service";
     addButton.type = "button";
     addButton.addEventListener("click", () => {
-      void beginCreate();
+      beginCreate();
     });
     actions.append(addButton);
 
@@ -458,9 +683,10 @@ function mountCatalogManager(root: HTMLElement): void {
   }
 
   function renderPreviewBlock(title: string, content: string, status: string): HTMLElement {
-    const wrapper = document.createElement("div");
     const heading = document.createElement("h4");
     const pre = document.createElement("pre");
+    const wrapper = document.createElement("div");
+
     heading.textContent = `${title} (${status})`;
     pre.textContent = content || "(empty)";
     pre.style.fontFamily = "monospace";
@@ -471,8 +697,9 @@ function mountCatalogManager(root: HTMLElement): void {
   }
 
   function renderPreviewPane(): HTMLElement {
-    const section = document.createElement("div");
     const heading = document.createElement("h3");
+    const section = document.createElement("div");
+
     heading.textContent = "Preview / diff";
     section.append(heading);
 
@@ -513,15 +740,16 @@ function mountCatalogManager(root: HTMLElement): void {
   function renderPreviewSection(): HTMLElement {
     const previewSection = document.createElement("section");
     previewSection.append(renderPreviewPane());
+    styleSection(previewSection);
     return previewSection;
   }
 
   function renderServiceEditor(): HTMLElement {
-    const section = document.createElement("div");
     const form = document.createElement("form");
     const heading = document.createElement("h3");
     const kindSelect = document.createElement("select");
     const previewButton = document.createElement("button");
+    const section = document.createElement("div");
 
     heading.textContent = state.originalService ? `Edit ${state.originalService.name}` : "New service";
     section.append(heading);
@@ -545,7 +773,7 @@ function mountCatalogManager(root: HTMLElement): void {
     kindSelect.addEventListener("change", () => {
       state.form.kind = kindSelect.value === "static" ? "static" : "proxy";
       markPreviewStale();
-      render();
+      safeRender();
     });
     form.append(kindLabel, document.createElement("br"), kindSelect, document.createElement("br"));
 
@@ -554,10 +782,16 @@ function mountCatalogManager(root: HTMLElement): void {
         state.form.upstreamHost = value;
         markPreviewStale();
       });
-      appendTextInput(form, "Upstream port", state.form.upstreamPort, (value) => {
-        state.form.upstreamPort = value;
-        markPreviewStale();
-      }, "number");
+      appendTextInput(
+        form,
+        "Upstream port",
+        state.form.upstreamPort,
+        (value) => {
+          state.form.upstreamPort = value;
+          markPreviewStale();
+        },
+        "number",
+      );
       appendTextInput(form, "Upstream path", state.form.upstreamPath, (value) => {
         state.form.upstreamPath = value;
         markPreviewStale();
@@ -613,7 +847,7 @@ function mountCatalogManager(root: HTMLElement): void {
     cancelButton.type = "button";
     cancelButton.addEventListener("click", () => {
       resetEditor();
-      render();
+      safeRender();
     });
 
     form.addEventListener("submit", (event) => {
@@ -626,8 +860,9 @@ function mountCatalogManager(root: HTMLElement): void {
   }
 
   function renderServiceList(): HTMLElement {
-    const section = document.createElement("div");
     const heading = document.createElement("h3");
+    const section = document.createElement("div");
+
     heading.textContent = "Services";
     section.append(heading);
 
@@ -647,25 +882,32 @@ function mountCatalogManager(root: HTMLElement): void {
 
     const table = document.createElement("table");
     const headerRow = document.createElement("tr");
+
+    styleTable(table);
     for (const title of ["Name", "Server name", "Kind", "Actions"]) {
       const cell = document.createElement("th");
       cell.textContent = title;
+      styleTableCell(cell, true);
       headerRow.append(cell);
     }
     table.append(headerRow);
 
     for (const service of state.services) {
-      const row = document.createElement("tr");
-      const nameCell = document.createElement("td");
-      const serverCell = document.createElement("td");
-      const kindCell = document.createElement("td");
       const actionsCell = document.createElement("td");
       const deleteButton = document.createElement("button");
       const editButton = document.createElement("button");
+      const kindCell = document.createElement("td");
+      const nameCell = document.createElement("td");
+      const row = document.createElement("tr");
+      const serverCell = document.createElement("td");
 
+      kindCell.textContent = service.kind;
       nameCell.textContent = service.name;
       serverCell.textContent = service.server_name;
-      kindCell.textContent = service.kind;
+      styleTableCell(actionsCell);
+      styleTableCell(kindCell);
+      styleTableCell(nameCell);
+      styleTableCell(serverCell);
 
       editButton.textContent = "Edit";
       editButton.type = "button";
@@ -686,6 +928,304 @@ function mountCatalogManager(root: HTMLElement): void {
 
     section.append(table);
     return section;
+  }
+
+  function resetEditor(): void {
+    state.form = blankFormState();
+    state.originalService = null;
+    invalidatePreview();
+  }
+
+  function safeRender(): void {
+    if (!disposed) {
+      render();
+    }
+  }
+}
+
+function mountHealthDashboard(root: HTMLElement): () => void {
+  const state: DashboardState = {
+    data: null,
+    error: null,
+    lastUpdatedLabel: null,
+    loading: true,
+    refreshing: false,
+  };
+  let disposed = false;
+  let intervalId: number | null = null;
+  let requestVersion = 0;
+
+  void refreshHealth("initial");
+  intervalId = window.setInterval(() => {
+    void refreshHealth("poll");
+  }, healthPollIntervalMs);
+  render();
+
+  return () => {
+    disposed = true;
+    if (intervalId !== null) {
+      window.clearInterval(intervalId);
+      intervalId = null;
+    }
+    root.replaceChildren();
+  };
+
+  async function refreshHealth(source: "initial" | "manual" | "poll"): Promise<void> {
+    const currentRequest = requestVersion + 1;
+    const hasData = state.data !== null;
+
+    requestVersion = currentRequest;
+    state.error = null;
+    state.loading = !hasData;
+    state.refreshing = hasData;
+    safeRender();
+
+    try {
+      const data = await readCatalogHealth();
+      if (disposed || currentRequest !== requestVersion) {
+        return;
+      }
+      state.data = data;
+      state.error = null;
+      state.lastUpdatedLabel = new Date().toLocaleString();
+    } catch (error: unknown) {
+      if (disposed || currentRequest !== requestVersion) {
+        return;
+      }
+      const message = error instanceof Error ? error.message : "Failed to load health data";
+      state.error = hasData && source !== "initial" ? `Refresh failed: ${message}` : message;
+    }
+
+    if (disposed || currentRequest !== requestVersion) {
+      return;
+    }
+    state.loading = false;
+    state.refreshing = false;
+    safeRender();
+  }
+
+  function render(): void {
+    const container = document.createElement("div");
+    const controls = document.createElement("div");
+    const heading = document.createElement("h2");
+    const refreshButton = document.createElement("button");
+
+    heading.textContent = "Health dashboard";
+    controls.append(heading);
+
+    refreshButton.disabled = state.loading || state.refreshing;
+    refreshButton.textContent = state.refreshing ? "Refreshing…" : "Refresh now";
+    refreshButton.type = "button";
+    refreshButton.addEventListener("click", () => {
+      void refreshHealth("manual");
+    });
+    controls.append(refreshButton);
+
+    const cadence = document.createElement("p");
+    cadence.textContent = state.lastUpdatedLabel
+      ? `Auto-refreshes every 30s. Last updated ${state.lastUpdatedLabel}.`
+      : "Auto-refreshes every 30s.";
+    controls.append(cadence);
+
+    if (state.error) {
+      const errorNode = document.createElement("p");
+      errorNode.textContent = state.data ? `${state.error}. Showing last successful response.` : state.error;
+      controls.append(errorNode);
+    }
+
+    if (state.loading && !state.data) {
+      const loadingNode = document.createElement("p");
+      loadingNode.textContent = "Loading health checks…";
+      container.append(controls, loadingNode);
+      root.replaceChildren(container);
+      return;
+    }
+
+    if (!state.data) {
+      const emptyNode = document.createElement("p");
+      emptyNode.textContent = "Health data is not available yet.";
+      container.append(controls, emptyNode);
+      root.replaceChildren(container);
+      return;
+    }
+
+    container.append(
+      controls,
+      renderHealthSummary(state.data),
+      renderServiceDashboard(state.data),
+      renderCertificatePanel(state.data),
+    );
+    root.replaceChildren(container);
+  }
+
+  function renderCertificatePanel(data: HealthResponse): HTMLElement {
+    const certChecks = data.checks
+      .filter((check) => check.dimension === "cert")
+      .sort((left, right) => left.service.localeCompare(right.service));
+    const section = document.createElement("section");
+    const heading = document.createElement("h3");
+
+    heading.textContent = "Certificates";
+    section.append(heading);
+    styleSection(section);
+
+    if (certChecks.length === 0) {
+      const empty = document.createElement("p");
+      empty.textContent = "No server-certificate checks were returned.";
+      section.append(empty, renderClientCertPlaceholder());
+      return section;
+    }
+
+    const table = document.createElement("table");
+    const headerRow = document.createElement("tr");
+
+    styleTable(table);
+    for (const title of ["Service", "Domain", "Status", "Renewal", "Detail"]) {
+      const cell = document.createElement("th");
+      cell.textContent = title;
+      styleTableCell(cell, true);
+      headerRow.append(cell);
+    }
+    table.append(headerRow);
+
+    for (const check of certChecks) {
+      const detailCell = document.createElement("td");
+      const domainCell = document.createElement("td");
+      const renewalCell = document.createElement("td");
+      const row = document.createElement("tr");
+      const serviceCell = document.createElement("td");
+      const statusCell = document.createElement("td");
+
+      detailCell.textContent = check.detail;
+      domainCell.textContent = extractCertDomain(check) ?? "Unavailable from current API response";
+      renewalCell.textContent = inferRenewalState(check);
+      serviceCell.textContent = check.service;
+      statusCell.append(buildStatusBadge(check.status));
+      styleTableCell(detailCell);
+      styleTableCell(domainCell);
+      styleTableCell(renewalCell);
+      styleTableCell(serviceCell);
+      styleTableCell(statusCell);
+
+      row.append(serviceCell, domainCell, statusCell, renewalCell, detailCell);
+      table.append(row);
+    }
+
+    section.append(table, renderClientCertPlaceholder());
+    return section;
+  }
+
+  function renderCheckCell(check: HealthCheck | null): HTMLElement {
+    const wrapper = document.createElement("div");
+
+    if (!check) {
+      wrapper.textContent = "No check returned.";
+      return wrapper;
+    }
+
+    const detail = document.createElement("p");
+    detail.textContent = check.detail;
+    detail.style.marginBottom = "0";
+    detail.style.marginTop = "0.35rem";
+    detail.style.whiteSpace = "pre-wrap";
+
+    wrapper.append(buildStatusBadge(check.status), detail);
+    return wrapper;
+  }
+
+  function renderClientCertPlaceholder(): HTMLElement {
+    const heading = document.createElement("h4");
+    const note = document.createElement("p");
+    const section = document.createElement("div");
+
+    heading.textContent = "Client-cert / CRL status";
+    note.textContent = "Coming soon — placeholder for #49's client-cert and CRL observability.";
+    section.append(heading, note);
+    return section;
+  }
+
+  function renderHealthSummary(data: HealthResponse): HTMLElement {
+    const groups = groupHealthChecks(data.checks);
+    const failCount = data.checks.filter((check) => check.status === "fail").length;
+    const healthyServices = groups.filter(
+      (group) => !Object.values(group.checks).some((check) => check?.status === "fail"),
+    ).length;
+    const section = document.createElement("section");
+    const heading = document.createElement("h3");
+    const summary = document.createElement("p");
+    const totals = document.createElement("p");
+
+    heading.textContent = data.healthy ? "Overall status: healthy" : "Overall status: attention needed";
+    summary.textContent =
+      groups.length > 0
+        ? `${healthyServices}/${groups.length} services have no failing checks.`
+        : "No services were returned by /health/catalog.";
+
+    const okCount = data.checks.filter((check) => check.status === "ok").length;
+    const skipCount = data.checks.filter((check) => check.status === "skip").length;
+    totals.textContent = `${okCount} ok, ${failCount} fail, ${skipCount} skip across ${data.checks.length} checks.`;
+
+    section.append(heading, summary, totals);
+    styleSection(section);
+    return section;
+  }
+
+  function renderServiceDashboard(data: HealthResponse): HTMLElement {
+    const groups = groupHealthChecks(data.checks);
+    const section = document.createElement("section");
+    const heading = document.createElement("h3");
+
+    heading.textContent = "Per-service checks";
+    section.append(heading);
+    styleSection(section);
+
+    if (groups.length === 0) {
+      const empty = document.createElement("p");
+      empty.textContent = "No service checks were returned.";
+      section.append(empty);
+      return section;
+    }
+
+    const table = document.createElement("table");
+    const headerRow = document.createElement("tr");
+
+    styleTable(table);
+    for (const title of ["Service", "Cert", "DNS", "Upstream"]) {
+      const cell = document.createElement("th");
+      cell.textContent = title;
+      styleTableCell(cell, true);
+      headerRow.append(cell);
+    }
+    table.append(headerRow);
+
+    for (const group of groups) {
+      const certCell = document.createElement("td");
+      const dnsCell = document.createElement("td");
+      const row = document.createElement("tr");
+      const serviceCell = document.createElement("td");
+      const upstreamCell = document.createElement("td");
+
+      certCell.append(renderCheckCell(group.checks.cert));
+      dnsCell.append(renderCheckCell(group.checks.dns));
+      serviceCell.textContent = group.service;
+      upstreamCell.append(renderCheckCell(group.checks.upstream));
+      styleTableCell(certCell);
+      styleTableCell(dnsCell);
+      styleTableCell(serviceCell);
+      styleTableCell(upstreamCell);
+
+      row.append(serviceCell, certCell, dnsCell, upstreamCell);
+      table.append(row);
+    }
+
+    section.append(table);
+    return section;
+  }
+
+  function safeRender(): void {
+    if (!disposed) {
+      render();
+    }
   }
 }
 
@@ -775,12 +1315,15 @@ function parseAllowCidrs(value: string): string[] {
     .filter((entry) => entry.length > 0);
 }
 
-async function applyCatalogMutation(request: CatalogMutationRequest): Promise<ApplyResponse> {
-  return fetchJson<ApplyResponse>("/catalog/apply", {
-    body: JSON.stringify(request),
-    headers: { "Content-Type": "application/json" },
-    method: "POST",
-  });
+function parseExpiryDate(detail: string): Date | null {
+  const match = /notAfter=([^); ]+)/u.exec(detail);
+
+  if (!match?.[1]) {
+    return null;
+  }
+
+  const expiry = new Date(match[1]);
+  return Number.isNaN(expiry.getTime()) ? null : expiry;
 }
 
 async function previewCatalogMutation(request: CatalogMutationRequest): Promise<PreviewResponse> {
@@ -788,6 +1331,12 @@ async function previewCatalogMutation(request: CatalogMutationRequest): Promise<
     body: JSON.stringify(request),
     headers: { "Content-Type": "application/json" },
     method: "POST",
+  });
+}
+
+async function readCatalogHealth(): Promise<HealthResponse> {
+  return fetchJson<HealthResponse>("/health/catalog", {
+    method: "GET",
   });
 }
 
@@ -826,19 +1375,43 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
     return;
   }
 
+  const content = document.createElement("div");
   const heading = document.createElement("h1");
-  const logoutButton = document.createElement("button");
+  const nav = document.createElement("div");
   const shell = document.createElement("div");
   const summary = document.createElement("p");
+  const toolbar = document.createElement("div");
+  let activeView: AppView = "health";
   let logoutErrorNode: HTMLParagraphElement | null = null;
+  let unmountCurrentView: (() => void) | null = null;
 
   heading.textContent = "home-warden";
+  summary.textContent = `Signed in as ${session.username}.`;
+
+  const catalogButton = document.createElement("button");
+  const healthButton = document.createElement("button");
+  const logoutButton = document.createElement("button");
+
+  catalogButton.textContent = "Catalog";
+  catalogButton.type = "button";
+  catalogButton.addEventListener("click", () => {
+    mountView("catalog");
+  });
+
+  healthButton.textContent = "Health dashboard";
+  healthButton.type = "button";
+  healthButton.addEventListener("click", () => {
+    mountView("health");
+  });
+
   logoutButton.textContent = "Log out";
   logoutButton.type = "button";
-  summary.textContent = `Signed in as ${session.username}.`;
   logoutButton.addEventListener("click", () => {
     logoutButton.disabled = true;
     logout()
+      .then(() => {
+        unmountCurrentView?.();
+      })
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : "Log out failed";
         logoutErrorNode?.remove();
@@ -851,8 +1424,32 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
       });
   });
 
-  root.replaceChildren(heading, summary, logoutButton, shell);
-  mountCatalogManager(shell);
+  nav.style.display = "flex";
+  nav.style.gap = "0.5rem";
+  nav.append(healthButton, catalogButton);
+
+  toolbar.style.display = "flex";
+  toolbar.style.flexWrap = "wrap";
+  toolbar.style.gap = "1rem";
+  toolbar.style.justifyContent = "space-between";
+  toolbar.style.marginBottom = "1rem";
+  content.append(summary, nav);
+  toolbar.append(content, logoutButton);
+
+  root.replaceChildren(heading, toolbar, shell);
+  mountView(activeView);
+
+  function mountView(view: AppView): void {
+    if (activeView === view && unmountCurrentView) {
+      return;
+    }
+
+    unmountCurrentView?.();
+    activeView = view;
+    catalogButton.disabled = activeView === "catalog";
+    healthButton.disabled = activeView === "health";
+    unmountCurrentView = activeView === "catalog" ? mountCatalogManager(shell) : mountHealthDashboard(shell);
+  }
 }
 
 function serviceToFormState(service: ServiceEntry): FormState {
@@ -873,62 +1470,43 @@ function serviceToFormState(service: ServiceEntry): FormState {
   };
 }
 
-function appendCheckbox(
-  form: HTMLFormElement,
-  labelText: string,
-  checked: boolean,
-  onChange: (checked: boolean) => void,
-): void {
-  const input = document.createElement("input");
-  const label = document.createElement("label");
-
-  input.checked = checked;
-  input.type = "checkbox";
-  input.addEventListener("change", () => {
-    onChange(input.checked);
-  });
-
-  label.textContent = labelText;
-  form.append(input, document.createTextNode(" "), label, document.createElement("br"));
+function styleSection(section: HTMLElement): void {
+  section.style.border = "1px solid #d0d7de";
+  section.style.borderRadius = "0.5rem";
+  section.style.marginBottom = "1rem";
+  section.style.padding = "1rem";
 }
 
-function appendTextArea(
-  form: HTMLFormElement,
-  labelText: string,
-  value: string,
-  onChange: (value: string) => void,
-): void {
-  const label = document.createElement("label");
-  const textarea = document.createElement("textarea");
-
-  label.textContent = labelText;
-  textarea.rows = 4;
-  textarea.value = value;
-  textarea.addEventListener("input", () => {
-    onChange(textarea.value);
-  });
-
-  form.append(label, document.createElement("br"), textarea, document.createElement("br"));
+function styleStatusBadge(node: HTMLElement, status: HealthCheck["status"]): void {
+  switch (status) {
+    case "fail":
+      node.style.backgroundColor = "#fbeaea";
+      node.style.color = "#a40e26";
+      return;
+    case "ok":
+      node.style.backgroundColor = "#dafbe1";
+      node.style.color = "#116329";
+      return;
+    case "skip":
+      node.style.backgroundColor = "#ddf4ff";
+      node.style.color = "#0550ae";
+      return;
+  }
 }
 
-function appendTextInput(
-  form: HTMLFormElement,
-  labelText: string,
-  value: string,
-  onChange: (value: string) => void,
-  type = "text",
-): void {
-  const input = document.createElement("input");
-  const label = document.createElement("label");
+function styleTable(table: HTMLTableElement): void {
+  table.style.borderCollapse = "collapse";
+  table.style.width = "100%";
+}
 
-  input.type = type;
-  input.value = value;
-  input.addEventListener("input", () => {
-    onChange(input.value);
-  });
-
-  label.textContent = labelText;
-  form.append(label, document.createElement("br"), input, document.createElement("br"));
+function styleTableCell(cell: HTMLTableCellElement, header = false): void {
+  cell.style.border = "1px solid #d0d7de";
+  cell.style.padding = "0.5rem";
+  cell.style.textAlign = "left";
+  cell.style.verticalAlign = "top";
+  if (header) {
+    cell.style.backgroundColor = "#f6f8fa";
+  }
 }
 
 const root = document.getElementById("app");
