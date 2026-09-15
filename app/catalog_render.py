@@ -314,25 +314,36 @@ def _escape_map_pattern(value: str) -> str:
     # ("CN=alice,O=example"). Building the map key's `~` regex pattern
     # from a raw CN value needs two independent escaping passes:
     #
-    # 1. RFC 2253 value escaping: OpenSSL's DN printer prefixes a literal
-    #    comma or backslash *inside* an attribute value with an escape-
-    #    marker backslash (allow_cn: ["Doe, John"] renders as
+    # 1. RFC 2253 value escaping: OpenSSL's DN printer prefixes a small
+    #    set of characters -- `,` `+` `"` `\` `;` `<` `>` -- with their
+    #    own escape-marker backslash whenever they appear *inside* an
+    #    attribute value (allow_cn: ["Doe, John"] renders as
     #    "CN=Doe\,John" in $ssl_client_s_dn) -- the pattern must expect
     #    that extra backslash byte, not just the original character, or a
     #    legitimately allowlisted CN is rejected on every request.
     # 2. Plain PCRE metacharacter escaping, so a literal ".", "(", etc. in
-    #    the value doesn't act as a regex operator.
+    #    the value doesn't act as a regex operator -- independent of
+    #    whether RFC 2253 also escapes that same character (`+` is both).
     #
     # See _FILE_BACKSLASH_ATOM for why matching one escape-marker
     # backslash needs 4 literal backslash characters in the rendered
-    # file, not the 2 a bare `\\` PCRE atom would suggest.
+    # file, not the 2 a bare `\\` PCRE atom would suggest. A trailing/
+    # leading space in a CN value is also RFC 2253-escaped, but that's
+    # left undone here -- CNs aren't expected to have significant leading
+    # or trailing whitespace, and applying it would need the map key's
+    # start/end-of-value context this per-character pass doesn't have.
+    rfc2253_escaped = ',+";<>'
+    regex_metachars = ".*+?^$()[]{}|"
     out = []
     for c in value:
-        if c == ",":
-            out.append(_FILE_BACKSLASH_ATOM + ",")
-        elif c == "\\":
+        if c == "\\":
+            # Both RFC 2253-escaped (its own escape-marker backslash) and
+            # a regex metacharacter -- each half needs its own PCRE `\\`
+            # atom, so two file-level atoms are needed back to back.
             out.append(_FILE_BACKSLASH_ATOM * 2)
-        elif c in ".*+?^$()[]{}|":
+        elif c in rfc2253_escaped:
+            out.append(_FILE_BACKSLASH_ATOM + (f"\\{c}" if c in regex_metachars else c))
+        elif c in regex_metachars:
             out.append(f"\\{c}")
         else:
             out.append(c)

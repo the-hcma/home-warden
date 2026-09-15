@@ -119,6 +119,24 @@ def test_allow_cn_builds_map_block_and_if_gate(tmp_path: Path) -> None:
     _parse_ok(rendered, tmp_path)
 
 
+def test_allow_cn_map_renders_one_entry_per_cn(tmp_path: Path) -> None:
+    # Regression: every render test previously supplied exactly one
+    # allow_cn entry, so a regression truncating the loop (e.g. only ever
+    # emitting the first CN) would leave the whole suite green -- the
+    # only observable effect being that an operator whose CN is the
+    # second (or later) allowlist entry silently falls through to the
+    # map's `default 0;` and gets 403'd by the gate.
+    catalog = {
+        "services": [
+            _proxy_service(client_cert={"mode": "required", "ca_bundle": "/tmp/ca.pem", "allow_cn": ["alice", "bob"]})
+        ]
+    }
+    rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
+    assert "~(?:^|(?<!\\\\\\\\),)CN=alice(?:,|$) 1;" in rendered
+    assert "~(?:^|(?<!\\\\\\\\),)CN=bob(?:,|$) 1;" in rendered
+    _parse_ok(rendered, tmp_path)
+
+
 def test_allow_cn_pattern_escapes_regex_metacharacters(tmp_path: Path) -> None:
     catalog = {
         "services": [
@@ -130,25 +148,35 @@ def test_allow_cn_pattern_escapes_regex_metacharacters(tmp_path: Path) -> None:
     _parse_ok(rendered, tmp_path)
 
 
-def test_allow_cn_pattern_matches_rfc2253_escaped_comma_in_value(tmp_path: Path) -> None:
-    # Regression: OpenSSL's DN printer escapes a literal comma *inside* an
-    # attribute value with its own escape-marker backslash --
-    # allow_cn: ["Doe, John"] renders as "CN=Doe\,John" in
+@pytest.mark.parametrize(
+    ("cn", "dn_form"),
+    [
+        ("Doe, John", r"Doe\, John"),
+        ("Research+Dev", r"Research\+Dev"),
+        ('say "hi"', r"say \"hi\""),
+        ("semi;colon", r"semi\;colon"),
+        ("a<b>c", r"a\<b\>c"),
+        ("back\\slash", "back\\\\slash"),
+    ],
+)
+def test_allow_cn_pattern_matches_rfc2253_escaped_value(tmp_path: Path, cn: str, dn_form: str) -> None:
+    # Regression: OpenSSL's DN printer prefixes any of `,` `+` `"` `\` `;`
+    # `<` `>` inside an attribute value with its own escape-marker
+    # backslash -- allow_cn: ["Doe, John"] renders as "CN=Doe\,John" in
     # $ssl_client_s_dn, not "CN=Doe, John" -- so the compiled pattern must
     # expect that extra backslash byte, not just the catalog's original
-    # comma, or a legitimately allowlisted CN is 403'd on every request.
+    # character, or a legitimately allowlisted CN is 403'd on every
+    # request.
     catalog = {
-        "services": [
-            _proxy_service(client_cert={"mode": "required", "ca_bundle": "/tmp/ca.pem", "allow_cn": ["Doe, John"]})
-        ]
+        "services": [_proxy_service(client_cert={"mode": "required", "ca_bundle": "/tmp/ca.pem", "allow_cn": [cn]})]
     }
     rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
-    pattern_line = next(line for line in rendered.splitlines() if "CN=Doe" in line)
+    pattern_line = next(line for line in rendered.splitlines() if "CN=" in line and "map" not in line)
     pattern_text = pattern_line.strip().split(" 1;")[0].strip("'")
     assert pattern_text.startswith("~")
     compiled = re.compile(_nginx_unescape_token(pattern_text[1:]))
-    assert compiled.search(r"O=example,CN=Doe\, John") is not None
-    assert compiled.search("O=example,CN=Doe, John") is None
+    assert compiled.search(f"O=example,CN={dn_form}") is not None
+    assert compiled.search(f"O=example,CN={cn}") is None
     _parse_ok(rendered, tmp_path)
 
 
