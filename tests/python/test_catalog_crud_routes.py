@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -42,6 +43,18 @@ def _service(name: str, **overrides) -> dict:
     }
     service.update(overrides)
     return service
+
+
+def _configure_real_preview(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        if command[0] == "sudo":
+            return subprocess.CompletedProcess(command, 0, stdout="syntax ok", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="gixy ok", stderr="")
+
+    monkeypatch.setenv("SCRATCH_DIR", str(tmp_path / "scratch"))
+    monkeypatch.setattr("app.catalog_crud.certs_live_dir", lambda: tmp_path / "certs")
+    monkeypatch.setattr("app.catalog_crud.load_config", lambda path: HomeWardenConfig())
+    monkeypatch.setattr("app.catalog_crud.subprocess.run", fake_run)
 
 
 def make_client() -> TestClient:
@@ -213,6 +226,73 @@ def test_catalog_create_rejects_names_that_only_differ_by_whitespace(tmp_path: P
 
     assert response.status_code == 409
     assert [service["name"] for service in json.loads(catalog_path.read_text(encoding="utf-8"))["services"]] == ["one"]
+
+
+def test_catalog_create_preview_and_apply_allow_unrelated_service_when_duplicates_already_exist(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(
+        json.dumps(
+            {
+                "services": [
+                    _service("dup-a", server_name="shared.example.com"),
+                    _service("dup-b", server_name="shared.example.com"),
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    _configure_real_preview(monkeypatch, tmp_path)
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_crud_routes.services_json_path", return_value=catalog_path),
+    ):
+        preview_response = client.post("/catalog/preview", json={"action": "create", "service": _service("three")})
+        apply_response = client.post("/catalog/apply", json={"action": "create", "service": _service("three")})
+
+    assert preview_response.status_code == 200
+    assert apply_response.status_code == 200
+    persisted = json.loads(catalog_path.read_text(encoding="utf-8"))
+    assert [service["name"] for service in persisted["services"]] == ["dup-a", "dup-b", "three"]
+
+
+@pytest.mark.parametrize("name_to_delete", ["other", "dup-a"])
+def test_catalog_delete_allows_preexisting_duplicates_for_unrelated_and_duplicate_entry_deletes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    name_to_delete: str,
+) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(
+        json.dumps(
+            {
+                "services": [
+                    _service("dup-a", server_name="shared.example.com"),
+                    _service("dup-b", server_name="shared.example.com"),
+                    _service("other"),
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    _configure_real_preview(monkeypatch, tmp_path)
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_crud_routes.services_json_path", return_value=catalog_path),
+    ):
+        response = client.delete(f"/catalog/services/{name_to_delete}")
+
+    assert response.status_code == 200
+    persisted = json.loads(catalog_path.read_text(encoding="utf-8"))
+    assert [service["name"] for service in persisted["services"]] == [
+        service_name for service_name in ["dup-a", "dup-b", "other"] if service_name != name_to_delete
+    ]
 
 
 def test_catalog_apply_persists_the_mutation(tmp_path: Path) -> None:

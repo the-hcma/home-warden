@@ -29,6 +29,7 @@ GIXY_TIMEOUT_SECONDS = 15
 NGINX_PREVIEW_CATALOG_CONF_NAME = "catalog.conf"
 NGINX_PREVIEW_CONF_NAME = "nginx.conf"
 NGINX_PREVIEW_DIR_NAME = "web-ui-preview"
+NGINX_PREVIEW_CONF_PATH_FILE = Path("/usr/local/etc/home-warden-preview-conf-path")
 NGINX_TIMEOUT_SECONDS = 15
 NGINX_TEST_HELPER = Path("/usr/local/sbin/home-warden-nginx-test-candidate")
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -154,7 +155,6 @@ def render_preview(
     current_services_path: Path | None = None,
 ) -> PreviewResult:
     current_source = current_catalog if current_catalog is not None else load_catalog_file(current_services_path)
-    _validate_catalog_uniqueness(catalog)
 
     rendered_current = _render_catalog_text(current_source)
     rendered_candidate = _render_catalog_text(catalog)
@@ -304,8 +304,27 @@ def _required_string(service: dict, field: str) -> str:
     return value.strip()
 
 
+def _default_preview_conf_path() -> Path:
+    scratch_dir = os.environ.get("SCRATCH_DIR")
+    base_dir = Path(scratch_dir) if scratch_dir else Path.home() / "scratch" / "home-warden"
+    return base_dir / NGINX_PREVIEW_DIR_NAME / NGINX_PREVIEW_CONF_NAME
+
+
+def _installed_preview_conf_path() -> Path | None:
+    try:
+        configured_path = NGINX_PREVIEW_CONF_PATH_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not configured_path:
+        return None
+    preview_conf = Path(configured_path)
+    if not preview_conf.is_absolute():
+        return None
+    return preview_conf
+
+
 def _preview_full_conf_path() -> Path:
-    return _preview_runtime_dir() / NGINX_PREVIEW_CONF_NAME
+    return _installed_preview_conf_path() or _default_preview_conf_path()
 
 
 def _preview_catalog_conf_path() -> Path:
@@ -313,9 +332,7 @@ def _preview_catalog_conf_path() -> Path:
 
 
 def _preview_runtime_dir() -> Path:
-    scratch_dir = os.environ.get("SCRATCH_DIR")
-    base_dir = Path(scratch_dir) if scratch_dir else Path.home() / "scratch" / "home-warden"
-    return base_dir / NGINX_PREVIEW_DIR_NAME
+    return _preview_full_conf_path().parent
 
 
 @contextmanager

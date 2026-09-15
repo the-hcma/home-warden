@@ -39,6 +39,10 @@ readonly logrotate_dest="/etc/logrotate.d/home-warden"
 readonly preview_dir_name="web-ui-preview"
 readonly sudoers_template="${repo_dir}/etc/sudoers/home-warden-web-ui-nginx-test"
 readonly sudoers_dest="/etc/sudoers.d/home-warden-web-ui-nginx-test"
+readonly installed_host_guard_dir="/usr/local/libexec/home-warden"
+readonly installed_host_guard="${installed_host_guard_dir}/host-guard"
+readonly preview_conf_path_dir="/usr/local/etc"
+readonly preview_conf_path_dest="${preview_conf_path_dir}/home-warden-preview-conf-path"
 readonly home_warden_config_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/home-warden"
 readonly home_warden_config_path="${home_warden_config_dir}/config.toml"
 
@@ -469,7 +473,8 @@ install_preview_helper() {
   rendered="$(
     sed \
       -e "s|@@OWNER_HOME@@|${owner_home}|g" \
-      -e "s|@@PREVIEW_CONF@@|${preview_conf}|g" \
+      -e "s|@@HOST_GUARD_LIB@@|${installed_host_guard}|g" \
+      -e "s|@@PREVIEW_CONF_PATH_FILE@@|${preview_conf_path_dest}|g" \
       "${preview_helper_source}"
   )"
 
@@ -484,6 +489,31 @@ install_preview_helper() {
   tmp="$(mktemp)"
   printf '%s\n' "${rendered}" >"${tmp}"
   run sudo install -o root -g root -m 755 "${tmp}" "${preview_helper_dest}"
+  rm -f "${tmp}"
+}
+
+install_host_guard_library() {
+  if ((dry_run)); then
+    echo "DRY-RUN: would write ${installed_host_guard}"
+    return 0
+  fi
+
+  run sudo install -d -o root -g root -m 755 "${installed_host_guard_dir}"
+  run sudo install -o root -g root -m 644 "${script_dir}/lib/host-guard" "${installed_host_guard}"
+}
+
+install_preview_conf_path() {
+  local tmp
+
+  if ((dry_run)); then
+    echo "DRY-RUN: would write ${preview_conf_path_dest} -> ${preview_conf}"
+    return 0
+  fi
+
+  run sudo install -d -o root -g root -m 755 "${preview_conf_path_dir}"
+  tmp="$(mktemp)"
+  printf '%s\n' "${preview_conf}" >"${tmp}"
+  run sudo install -o root -g root -m 644 "${tmp}" "${preview_conf_path_dest}"
   rm -f "${tmp}"
 }
 
@@ -662,6 +692,8 @@ main() {
   expand_unit "${unit_template_dir}/home-warden-healthcheck.service" "${system_unit_dir}/home-warden-healthcheck.service"
   expand_unit "${unit_template_dir}/home-warden-healthcheck.timer" "${system_unit_dir}/home-warden-healthcheck.timer"
   expand_unit "${logrotate_template}" "${logrotate_dest}"
+  install_host_guard_library
+  install_preview_conf_path
   install_preview_helper
   install_sudoers
 

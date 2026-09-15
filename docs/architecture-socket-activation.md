@@ -82,6 +82,11 @@ even in test mode. Four different callers run `nginx -t` as root
 edit, and the web UI preview path's
 `sudo -n /usr/local/sbin/home-warden-nginx-test-candidate` helper) when they
 need to validate a config that would otherwise try to bind privileged ports.
+That preview helper reads its fixed candidate-conf path from the root-owned
+`/usr/local/etc/home-warden-preview-conf-path` marker and sources the same
+host-guard logic as the rest of home-warden, so the unprivileged API and the
+privileged validator stay pinned to one shared config path + designated-host
+decision.
 The first three hit the exact pid path the
 unprivileged service writes on every start — left root-owned, the next
 service start hits "permission denied" and crash-loops. `scripts/lib/nginx-pid`

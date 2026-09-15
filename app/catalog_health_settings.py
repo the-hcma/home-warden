@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+INSTALLED_HOST_GUARD = Path("/usr/local/libexec/home-warden/host-guard")
 
 
 def services_json_path() -> Path:
@@ -46,7 +47,9 @@ def enforce_host_guard(caller: str) -> bool:
     """
     if os.environ.get("HOME_WARDEN_SKIP_HOST_GUARD") == "1":
         return True
-    host_guard = REPO_ROOT / "scripts" / "lib" / "host-guard"
+    host_guard = (
+        INSTALLED_HOST_GUARD if INSTALLED_HOST_GUARD.is_file() else REPO_ROOT / "scripts" / "lib" / "host-guard"
+    )
     proc = subprocess.run(
         ["bash", "-c", f'source "{host_guard}" && hw_host_guard_enforce "{caller}"'],
         timeout=5,

@@ -14,6 +14,7 @@ from app.catalog_crud import (
     CatalogConflictError,
     CatalogValidationError,
     _preview_full_conf_path,
+    _run_gixy,
     _run_nginx_test,
     create_service,
     delete_service,
@@ -191,6 +192,20 @@ def test_render_preview_allows_preexisting_duplicates_in_stored_catalog(
     assert preview.can_apply is True
 
 
+def test_preview_full_conf_path_uses_installed_marker_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    installed_conf = tmp_path / "installed-scratch" / "web-ui-preview" / "nginx.conf"
+    marker_path = tmp_path / "home-warden-preview-conf-path"
+    marker_path.write_text(f"{installed_conf}\n", encoding="utf-8")
+
+    monkeypatch.setenv("SCRATCH_DIR", str(tmp_path / "different-scratch"))
+    monkeypatch.setattr("app.catalog_crud.NGINX_PREVIEW_CONF_PATH_FILE", marker_path)
+
+    assert _preview_full_conf_path() == installed_conf
+
+
 def test_render_preview_uses_the_fixed_preview_conf_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -218,6 +233,31 @@ def test_render_preview_uses_the_fixed_preview_conf_path(
     )
 
     assert preview.can_apply is True
+
+
+def test_render_preview_keeps_apply_enabled_when_gixy_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        if command[0] == "sudo":
+            return subprocess.CompletedProcess(command, 0, stdout="syntax ok", stderr="")
+        raise FileNotFoundError("uv")
+
+    monkeypatch.setenv("SCRATCH_DIR", str(tmp_path / "scratch"))
+    monkeypatch.setattr("app.catalog_crud.certs_live_dir", lambda: tmp_path / "certs")
+    monkeypatch.setattr("app.catalog_crud.load_config", lambda path: HomeWardenConfig())
+    monkeypatch.setattr("app.catalog_crud.subprocess.run", fake_run)
+
+    preview = render_preview(
+        {"services": [_proxy_service("candidate")]},
+        current_catalog={"services": [_proxy_service("current")]},
+        current_services_path=tmp_path / "services.json",
+    )
+
+    assert preview.can_apply is True
+    assert preview.gixy.status == "error"
+    assert "gixy unavailable" in preview.gixy.output
 
 
 def test_render_preview_wraps_candidate_web_ui_name_collisions_as_validation_errors(
@@ -260,6 +300,45 @@ def test_run_nginx_test_reports_missing_sudo_provisioning(monkeypatch: pytest.Mo
     assert result.ok is False
     assert result.status == "unavailable"
     assert "not provisioned" in result.output
+
+
+def test_run_nginx_test_reports_timeout_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(command[0], 15)
+
+    monkeypatch.setattr("app.catalog_crud.subprocess.run", fake_run)
+
+    result = _run_nginx_test()
+
+    assert result.ok is False
+    assert result.status == "failed"
+    assert "timed out" in result.output
+
+
+def test_run_gixy_reports_missing_binary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError("uv")
+
+    monkeypatch.setattr("app.catalog_crud.subprocess.run", fake_run)
+
+    result = _run_gixy(tmp_path / "candidate.conf")
+
+    assert result.status == "error"
+    assert result.exit_code is None
+    assert "gixy unavailable" in result.output
+
+
+def test_run_gixy_reports_unexpected_exit_code(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "app.catalog_crud.subprocess.run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 7, stdout="", stderr="gixy exploded"),
+    )
+
+    result = _run_gixy(tmp_path / "candidate.conf")
+
+    assert result.status == "error"
+    assert result.exit_code == 7
+    assert "gixy exploded" in result.output
 
 
 def test_update_service_deep_merges_without_dropping_hidden_fields() -> None:

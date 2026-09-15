@@ -263,6 +263,7 @@ function mountCatalogManager(root: HTMLElement): void {
   let actionsHost: HTMLDivElement | null = null;
   let previewHost: HTMLElement | null = null;
 
+  render();
   void refreshServices().finally(render);
 
   function invalidatePreview(): void {
@@ -308,7 +309,9 @@ function mountCatalogManager(root: HTMLElement): void {
         invalidatePreview();
         state.message = "Applied catalog change.";
       }
-      await refreshServices();
+      const refreshPromise = refreshServices();
+      render();
+      await refreshPromise;
     } catch (error: unknown) {
       state.error = error instanceof Error ? error.message : "Apply failed";
     } finally {
