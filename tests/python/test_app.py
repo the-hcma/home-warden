@@ -40,3 +40,17 @@ def test_static_mount_404s_on_missing_dist_file() -> None:
     client = make_client()
     resp = client.get("/static/dist/does-not-exist.js")
     assert resp.status_code == 404
+
+
+def test_static_mount_serves_a_committed_file() -> None:
+    # A 404 on a missing file (above) passes for *any* directory/prefix the
+    # mount happens to point at. Pin the positive case too: index.html is
+    # tracked, so this fails loudly if STATIC_DIR or the /static prefix ever
+    # drifts from what index.html's <script src> actually expects.
+    client = make_client()
+    resp = client.get("/static/index.html")
+    assert resp.status_code == 200
+    assert '<div id="app">' in resp.text
+
+    index_html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert '<script type="module" src="/static/dist/main.js">' in index_html
