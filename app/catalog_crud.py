@@ -101,7 +101,7 @@ def create_service(catalog: dict, service: dict) -> dict:
     _ensure_unique_identifiers(services, validated)
 
     updated_catalog = copy.deepcopy(catalog)
-    updated_catalog["services"] = [*services, validated]
+    updated_catalog["services"] = [*(copy.deepcopy(entry) for entry in services), validated]
     return updated_catalog
 
 

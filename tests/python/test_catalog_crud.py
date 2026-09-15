@@ -13,6 +13,7 @@ from app.catalog_crud import (
     NGINX_TEST_HELPER,
     CatalogConflictError,
     CatalogValidationError,
+    _preview_catalog_conf_path,
     _preview_full_conf_path,
     _run_gixy,
     _run_nginx_test,
@@ -217,6 +218,10 @@ def test_render_preview_uses_the_fixed_preview_conf_path(
             assert command == ["sudo", "-n", str(NGINX_TEST_HELPER)]
             assert _preview_full_conf_path() == expected_conf
             assert expected_conf.is_file()
+            catalog_conf_text = _preview_catalog_conf_path().read_text(encoding="utf-8")
+            assert "server_name candidate.example.com;" in catalog_conf_text
+            assert "server_name current.example.com;" not in catalog_conf_text
+            assert str(_preview_catalog_conf_path()) in expected_conf.read_text(encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="syntax ok", stderr="")
         assert command[-1] == str(expected_conf)
         return subprocess.CompletedProcess(command, 0, stdout="gixy ok", stderr="")
