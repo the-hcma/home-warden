@@ -94,6 +94,17 @@ def test_crl_renders_ssl_crl_directive(tmp_path: Path) -> None:
     _parse_ok(rendered, tmp_path)
 
 
+def test_client_cert_mode_required_maps_to_ssl_verify_client_on(tmp_path: Path) -> None:
+    # The schema's client_cert.mode is 'off'/'optional'/'required' (operator
+    # wording); nginx's ssl_verify_client only accepts on/off/optional --
+    # 'required' verbatim is an invalid value that fails `nginx -t`.
+    catalog = {"services": [_proxy_service(client_cert={"mode": "required", "ca_bundle": "/tmp/ca.pem"})]}
+    rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
+    assert "ssl_verify_client on;" in rendered
+    assert "ssl_verify_client required;" not in rendered
+    _parse_ok(rendered, tmp_path)
+
+
 def test_example_catalog_renders_and_parses(tmp_path: Path) -> None:
     catalog = json.loads(EXAMPLE_CATALOG_PATH.read_text())
     rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))

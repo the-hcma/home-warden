@@ -104,6 +104,14 @@ def render_catalog(catalog: dict, ctx: RenderContext) -> str:
     return crossplane.build(build_catalog_config(catalog, ctx), header=True) + "\n"
 
 
+# The catalog schema's client_cert.mode values ('off'/'optional'/'required',
+# see services.json.example's _notes) are operator-facing wording, not raw
+# nginx syntax: nginx's ssl_verify_client directive takes on/off/optional
+# (never the schema's 'required' verbatim, and 'optional_no_ca' is
+# deliberately never offered by the schema -- see #49).
+_SSL_VERIFY_CLIENT_MODES = {"required": "on", "optional": "optional"}
+
+
 def _allow_cidr_directives(allow_cidrs: list[str] | None) -> list[dict]:
     if not allow_cidrs:
         return []
@@ -174,7 +182,7 @@ def _client_cert_directives(service: dict) -> list[dict]:
     client_cert = service.get("client_cert")
     if not client_cert or client_cert.get("mode", "off") == "off":
         return []
-    mode = client_cert["mode"]
+    mode = _SSL_VERIFY_CLIENT_MODES[client_cert["mode"]]
     directives = [
         _directive("ssl_client_certificate", args=[client_cert["ca_bundle"]]),
         _directive("ssl_verify_client", args=[mode]),
