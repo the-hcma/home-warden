@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import copy
 import difflib
+import fcntl
 import json
 import os
 import subprocess
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -23,9 +26,12 @@ from app.home_warden_config import catalog_with_web_ui_service, config_path, loa
 
 GIXY_SKIPS = "proxy_buffering_off,proxy_pass_normalized"
 GIXY_TIMEOUT_SECONDS = 15
+NGINX_PREVIEW_CATALOG_CONF_NAME = "catalog.conf"
+NGINX_PREVIEW_CONF_NAME = "nginx.conf"
+NGINX_PREVIEW_DIR_NAME = "web-ui-preview"
 NGINX_TIMEOUT_SECONDS = 15
+NGINX_TEST_HELPER = Path("/usr/local/sbin/home-warden-nginx-test-candidate")
 REPO_ROOT = Path(__file__).resolve().parent.parent
-NGINX_TEST_HELPER = REPO_ROOT / "scripts/nginx-test-candidate"
 
 
 class CatalogConflictError(ValueError):
@@ -149,7 +155,6 @@ def render_preview(
 ) -> PreviewResult:
     current_source = current_catalog if current_catalog is not None else load_catalog_file(current_services_path)
     _validate_catalog_uniqueness(catalog)
-    _validate_catalog_uniqueness(current_source)
 
     rendered_current = _render_catalog_text(current_source)
     rendered_candidate = _render_catalog_text(catalog)
@@ -162,11 +167,9 @@ def render_preview(
         )
     )
 
-    workspace_root = (current_services_path or services_json_path()).parent
-    with tempfile.TemporaryDirectory(prefix=".catalog-preview-", dir=workspace_root) as work_dir_name:
-        work_dir = Path(work_dir_name)
-        full_conf = _write_full_nginx_conf(rendered_candidate, work_dir)
-        nginx_result = _run_nginx_test(full_conf)
+    with _preview_workspace():
+        full_conf = _write_full_nginx_conf(rendered_candidate)
+        nginx_result = _run_nginx_test()
         gixy_result = _run_gixy(full_conf)
 
     return PreviewResult(
@@ -197,9 +200,11 @@ def validate_service(service: dict) -> dict:
         raise CatalogValidationError(f"service entry must be an object, got {type(service).__name__}")
 
     candidate = copy.deepcopy(service)
-    name = _required_string(candidate, "name")
-    kind = _required_string(candidate, "kind")
-    _required_string(candidate, "server_name")
+    candidate["kind"] = _required_string(candidate, "kind")
+    candidate["name"] = _required_string(candidate, "name")
+    candidate["server_name"] = _required_string(candidate, "server_name")
+    kind = candidate["kind"]
+    name = candidate["name"]
 
     _optional_bool(candidate, "forward_host_header")
     _optional_bool(candidate, "gzip")
@@ -299,6 +304,34 @@ def _required_string(service: dict, field: str) -> str:
     return value.strip()
 
 
+def _preview_full_conf_path() -> Path:
+    return _preview_runtime_dir() / NGINX_PREVIEW_CONF_NAME
+
+
+def _preview_catalog_conf_path() -> Path:
+    return _preview_runtime_dir() / NGINX_PREVIEW_CATALOG_CONF_NAME
+
+
+def _preview_runtime_dir() -> Path:
+    scratch_dir = os.environ.get("SCRATCH_DIR")
+    base_dir = Path(scratch_dir) if scratch_dir else Path.home() / "scratch" / "home-warden"
+    return base_dir / NGINX_PREVIEW_DIR_NAME
+
+
+@contextmanager
+def _preview_workspace() -> Iterator[Path]:
+    preview_dir = _preview_runtime_dir()
+    preview_dir.mkdir(parents=True, exist_ok=True)
+
+    lock_path = preview_dir / ".lock"
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield preview_dir
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def _run_gixy(full_conf: Path) -> GixyResult:
     env = os.environ.copy()
     env["GIXY_SKIPS"] = GIXY_SKIPS
@@ -328,10 +361,10 @@ def _run_gixy(full_conf: Path) -> GixyResult:
     return GixyResult(exit_code=proc.returncode, output=output or "gixy failed", status="error")
 
 
-def _run_nginx_test(full_conf: Path) -> NginxTestResult:
+def _run_nginx_test() -> NginxTestResult:
     try:
         proc = subprocess.run(
-            ["sudo", "-n", str(NGINX_TEST_HELPER), str(full_conf)],
+            ["sudo", "-n", str(NGINX_TEST_HELPER)],
             capture_output=True,
             text=True,
             timeout=NGINX_TIMEOUT_SECONDS,
@@ -466,18 +499,19 @@ def _validate_static_service(service: dict, service_name: str) -> None:
         raise CatalogValidationError(f"service {service_name!r} static.listing_path must start with '/'")
 
 
-def _write_full_nginx_conf(rendered_candidate: str, work_dir: Path) -> Path:
-    rendered_path = work_dir / "catalog.conf"
-    full_conf = work_dir / "nginx.conf"
+def _write_full_nginx_conf(rendered_candidate: str) -> Path:
+    rendered_path = _preview_catalog_conf_path()
+    full_conf = _preview_full_conf_path()
 
-    rendered_path.write_text(rendered_candidate, encoding="utf-8")
-    full_conf.write_text(
+    _write_text_atomically(rendered_path, rendered_candidate)
+    _write_text_atomically(
+        full_conf,
         "\n".join(
             [
                 "include /etc/nginx/modules-enabled/*.conf;",
                 "worker_processes 1;",
-                f"error_log {work_dir / 'nginx-error.log'} warn;",
-                f"pid {work_dir / 'nginx.pid'};",
+                f"error_log {_preview_runtime_dir() / 'nginx-error.log'} warn;",
+                f"pid {_preview_runtime_dir() / 'nginx.pid'};",
                 "events {",
                 "    worker_connections 64;",
                 "}",
@@ -485,6 +519,22 @@ def _write_full_nginx_conf(rendered_candidate: str, work_dir: Path) -> Path:
                 "",
             ]
         ),
-        encoding="utf-8",
     )
     return full_conf
+
+
+def _write_text_atomically(path: Path, content: str) -> None:
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
+            temp_file.write(content)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        os.replace(temp_path, path)
+    except Exception:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise

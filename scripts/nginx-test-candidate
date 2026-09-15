@@ -1,19 +1,35 @@
 #!/usr/bin/env bash
 # Privileged nginx -t helper for web UI preview/apply validation.
 #
-# Usage:
-#   sudo ./scripts/nginx-test-candidate /absolute/path/to/nginx.conf
-#
-# Runs nginx -t as root against a generated candidate config, but keeps the
-# same designated-host guard as the rest of home-warden's mutating helpers.
+# Source template installed by scripts/setup-service as the root-owned
+# /usr/local/sbin/home-warden-nginx-test-candidate helper. The installed copy
+# bakes in a fixed preview config path and accepts no caller-controlled path.
 
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly script_dir
+readonly owner_home="@@OWNER_HOME@@"
+readonly pinned_host_file="${owner_home}/.config/home-warden-host"
+readonly pinned_machine_id_file="${owner_home}/.config/home-warden-machine-id"
+readonly preview_conf="@@PREVIEW_CONF@@"
 
 usage() {
-  echo "Usage: nginx-test-candidate /absolute/path/to/nginx.conf" >&2
+  echo "Usage: home-warden-nginx-test-candidate" >&2
+}
+
+current_hostname_short() {
+  hostname -s 2>/dev/null || hostname
+}
+
+current_machine_id() {
+  tr -d '[:space:]' </etc/machine-id 2>/dev/null || true
+}
+
+first_line() {
+  local -r path="$1"
+  local line=""
+  [[ -f "${path}" ]] || return 0
+  IFS= read -r line <"${path}" || true
+  printf '%s\n' "${line}"
 }
 
 if ((EUID != 0)); then
@@ -21,37 +37,31 @@ if ((EUID != 0)); then
   exit 2
 fi
 
-if [[ $# -ne 1 ]]; then
+if [[ $# -ne 0 ]]; then
   usage
   exit 2
 fi
 
-owner="${SUDO_USER:-${OWNER:-}}"
-if [[ -z "${owner}" ]]; then
-  echo "nginx-test-candidate: could not determine the invoking operator" >&2
-  exit 2
-fi
-readonly owner
-
-owner_home="$(getent passwd "${owner}" | cut -d: -f6 || true)"
-if [[ -z "${owner_home}" ]]; then
-  echo "nginx-test-candidate: could not resolve home directory for ${owner}" >&2
-  exit 2
-fi
-readonly owner_home
-
 export HOME="${owner_home}"
+if [[ "${HOME_WARDEN_SKIP_HOST_GUARD:-0}" != "1" ]]; then
+  pinned_host="$(first_line "${pinned_host_file}")"
+  pinned_machine_id="$(first_line "${pinned_machine_id_file}")"
+  readonly pinned_host
+  readonly pinned_machine_id
 
-# shellcheck source=scripts/lib/host-guard
-source "${script_dir}/lib/host-guard"
-if ! hw_host_guard_enforce "nginx-test-candidate"; then
-  exit 1
+  if [[ -z "${pinned_host}" && -z "${pinned_machine_id}" ]]; then
+    echo "nginx-test-candidate: refusing to run — home-warden has no designated host yet" >&2
+    exit 1
+  fi
+
+  if [[ "${pinned_host}" != "$(current_hostname_short)" && "${pinned_machine_id}" != "$(current_machine_id)" ]]; then
+    echo "nginx-test-candidate: refusing to run — this host ($(current_hostname_short)) is not the designated home-warden host" >&2
+    exit 1
+  fi
 fi
 
-candidate_conf="$1"
-readonly candidate_conf
-if [[ ! -f "${candidate_conf}" ]]; then
-  echo "nginx-test-candidate: conf not found: ${candidate_conf}" >&2
+if [[ ! -f "${preview_conf}" ]]; then
+  echo "nginx-test-candidate: conf not found: ${preview_conf}" >&2
   exit 2
 fi
 
@@ -65,4 +75,4 @@ if [[ -z "${nginx_bin}" ]]; then
 fi
 readonly nginx_bin
 
-exec "${nginx_bin}" -t -c "${candidate_conf}"
+exec "${nginx_bin}" -t -c "${preview_conf}"

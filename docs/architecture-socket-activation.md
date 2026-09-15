@@ -79,9 +79,10 @@ A related footgun: `nginx -t` still opens the conf's `pid` file for writing
 even in test mode. Four different callers run `nginx -t` as root
 (`setup-service`'s validation, `on-deploy`'s `sudo -n nginx -t`,
 `home-warden-reload.service`'s whole-process-as-root run on every config
-edit, and the web UI preview path's `sudo -n scripts/nginx-test-candidate`
-helper) when they need to validate a config that would otherwise try to
-bind privileged ports. The first three hit the exact pid path the
+edit, and the web UI preview path's
+`sudo -n /usr/local/sbin/home-warden-nginx-test-candidate` helper) when they
+need to validate a config that would otherwise try to bind privileged ports.
+The first three hit the exact pid path the
 unprivileged service writes on every start — left root-owned, the next
 service start hits "permission denied" and crash-loops. `scripts/lib/nginx-pid`
 repairs ownership after every such call; see the PR that fixed this live

@@ -168,6 +168,53 @@ def test_catalog_create_persists_the_new_service(tmp_path: Path) -> None:
     assert [service["name"] for service in persisted["services"]] == ["one", "two"]
 
 
+def test_catalog_create_strips_whitespace_before_persisting_and_lookup(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": [_service("one")]}), encoding="utf-8")
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_crud_routes.services_json_path", return_value=catalog_path),
+        patch("app.api.catalog_crud_routes.render_preview", return_value=_preview_result()),
+    ):
+        service = _service("two")
+        service["name"] = " two "
+        service["server_name"] = " two.example.com "
+        response = client.post(
+            "/catalog/services",
+            json={"service": service},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["service"]["name"] == "two"
+    assert response.json()["service"]["server_name"] == "two.example.com"
+    persisted = json.loads(catalog_path.read_text(encoding="utf-8"))
+    assert persisted["services"][1]["name"] == "two"
+    assert persisted["services"][1]["server_name"] == "two.example.com"
+
+
+def test_catalog_create_rejects_names_that_only_differ_by_whitespace(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": [_service("one")]}), encoding="utf-8")
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_crud_routes.services_json_path", return_value=catalog_path),
+    ):
+        service = _service("two")
+        service["name"] = " one "
+        service["server_name"] = "two.example.com"
+        response = client.post(
+            "/catalog/services",
+            json={"service": service},
+        )
+
+    assert response.status_code == 409
+    assert [service["name"] for service in json.loads(catalog_path.read_text(encoding="utf-8"))["services"]] == ["one"]
+
+
 def test_catalog_apply_persists_the_mutation(tmp_path: Path) -> None:
     catalog_path = tmp_path / "services.json"
     catalog_path.write_text(json.dumps({"services": [_service("one")]}), encoding="utf-8")
@@ -227,6 +274,26 @@ def test_catalog_preview_surfaces_reserved_web_ui_collisions_as_400(
     assert "reserved service name" in response.json()["detail"]
 
 
+def test_catalog_create_rejects_reserved_web_ui_collisions_without_persisting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": [_service("one")]}), encoding="utf-8")
+    monkeypatch.setattr("app.catalog_crud.load_config", lambda path: HomeWardenConfig(fqdn="warden.example.com"))
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_crud_routes.services_json_path", return_value=catalog_path),
+    ):
+        response = client.post("/catalog/services", json={"service": _service("home-warden-web-ui")})
+
+    assert response.status_code == 400
+    assert "reserved service name" in response.json()["detail"]
+    assert [service["name"] for service in json.loads(catalog_path.read_text(encoding="utf-8"))["services"]] == ["one"]
+
+
 def test_catalog_update_preserves_hidden_fields(tmp_path: Path) -> None:
     catalog_path = tmp_path / "services.json"
     catalog_path.write_text(
@@ -252,11 +319,20 @@ def test_catalog_update_preserves_hidden_fields(tmp_path: Path) -> None:
     ):
         response = client.put(
             "/catalog/services/one",
-            json={"service": {"server_name": "updated.example.com", "upstream": {"port": 9090}}},
+            json={
+                "service": {
+                    "name": " one-renamed ",
+                    "server_name": " updated.example.com ",
+                    "upstream": {"port": 9090},
+                }
+            },
         )
 
     assert response.status_code == 200
+    assert response.json()["service"]["name"] == "one-renamed"
+    assert response.json()["service"]["server_name"] == "updated.example.com"
     persisted = json.loads(catalog_path.read_text(encoding="utf-8"))["services"][0]
+    assert persisted["name"] == "one-renamed"
     assert persisted["server_name"] == "updated.example.com"
     assert persisted["upstream"]["host"] == "backend.example.internal"
     assert persisted["upstream"]["port"] == 9090

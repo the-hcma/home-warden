@@ -260,6 +260,8 @@ function mountCatalogManager(root: HTMLElement): void {
     previewRequest: null,
     services: [],
   };
+  let actionsHost: HTMLDivElement | null = null;
+  let previewHost: HTMLElement | null = null;
 
   void refreshServices().finally(render);
 
@@ -273,7 +275,7 @@ function mountCatalogManager(root: HTMLElement): void {
     invalidatePreview();
     if (hadPreview) {
       state.message = "Form changed — preview again before applying.";
-      render();
+      refreshCatalogChrome();
     }
   }
 
@@ -390,12 +392,42 @@ function mountCatalogManager(root: HTMLElement): void {
 
   function render(): void {
     const container = document.createElement("div");
-    const actions = document.createElement("div");
-    const heading = document.createElement("h2");
     const layout = document.createElement("div");
     const listSection = document.createElement("section");
     const editorSection = document.createElement("section");
-    const previewSection = document.createElement("section");
+    const actions = renderActions();
+    const previewSection = renderPreviewSection();
+
+    listSection.append(renderServiceList());
+    editorSection.append(renderServiceEditor());
+
+    layout.style.display = "grid";
+    layout.style.gap = "1.5rem";
+    layout.append(listSection, editorSection, previewSection);
+
+    actionsHost = actions;
+    previewHost = previewSection;
+    container.append(actions, layout);
+    root.replaceChildren(container);
+  }
+
+  function refreshCatalogChrome(): void {
+    const nextActions = renderActions();
+    const nextPreview = renderPreviewSection();
+
+    if (actionsHost) {
+      actionsHost.replaceWith(nextActions);
+    }
+    if (previewHost) {
+      previewHost.replaceWith(nextPreview);
+    }
+    actionsHost = nextActions;
+    previewHost = nextPreview;
+  }
+
+  function renderActions(): HTMLDivElement {
+    const actions = document.createElement("div");
+    const heading = document.createElement("h2");
 
     heading.textContent = "Service catalog";
     actions.append(heading);
@@ -419,16 +451,7 @@ function mountCatalogManager(root: HTMLElement): void {
       actions.append(errorNode);
     }
 
-    listSection.append(renderServiceList());
-    editorSection.append(renderServiceEditor());
-    previewSection.append(renderPreviewPane());
-
-    layout.style.display = "grid";
-    layout.style.gap = "1.5rem";
-    layout.append(listSection, editorSection, previewSection);
-
-    container.append(actions, layout);
-    root.replaceChildren(container);
+    return actions;
   }
 
   function renderPreviewBlock(title: string, content: string, status: string): HTMLElement {
@@ -482,6 +505,12 @@ function mountCatalogManager(root: HTMLElement): void {
       renderPreviewBlock("Rendered candidate config", state.preview.rendered, "rendered"),
     );
     return section;
+  }
+
+  function renderPreviewSection(): HTMLElement {
+    const previewSection = document.createElement("section");
+    previewSection.append(renderPreviewPane());
+    return previewSection;
   }
 
   function renderServiceEditor(): HTMLElement {

@@ -88,7 +88,8 @@ def create_catalog_service(payload: ServicePayloadRequest) -> dict[str, Any]:
         if not preview.can_apply:
             raise HTTPException(status_code=409, detail=_blocking_apply_detail(preview))
         persist_catalog(candidate_catalog, catalog_path)
-        created_service = get_service(candidate_catalog, str(payload.service.get("name", "")))
+        created_name = payload.service.get("name")
+        created_service = get_service(candidate_catalog, created_name.strip() if isinstance(created_name, str) else "")
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except CatalogNotFoundError as exc:
@@ -209,7 +210,8 @@ def update_catalog_service(name: str, payload: ServicePayloadRequest) -> dict[st
             raise HTTPException(status_code=409, detail=_blocking_apply_detail(preview))
         persist_catalog(candidate_catalog, catalog_path)
         updated_name = payload.service.get("name")
-        updated_service = get_service(candidate_catalog, updated_name if isinstance(updated_name, str) else name)
+        lookup_name = updated_name.strip() if isinstance(updated_name, str) else name
+        updated_service = get_service(candidate_catalog, lookup_name)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except CatalogNotFoundError as exc:
@@ -243,7 +245,7 @@ def _mutation_response(
         return response
 
     service_name = service.get("name") if service else None
-    target_name = service_name if isinstance(service_name, str) else name or ""
+    target_name = service_name.strip() if isinstance(service_name, str) else name or ""
     response["service"] = get_service(candidate_catalog, target_name)
     return response
 

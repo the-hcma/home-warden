@@ -1,3 +1,3 @@
 # Allow the unprivileged home-warden API process to run the read-only preview
 # validator as root without a password prompt. Installed by scripts/setup-service.
-@@OWNER@@ ALL=(root) NOPASSWD: @@REPO_DIR@@/scripts/nginx-test-candidate *
+@@OWNER@@ ALL=(root) NOPASSWD: @@PREVIEW_HELPER@@

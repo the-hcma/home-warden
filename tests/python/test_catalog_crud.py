@@ -10,8 +10,11 @@ from pathlib import Path
 import pytest
 
 from app.catalog_crud import (
+    NGINX_TEST_HELPER,
     CatalogConflictError,
     CatalogValidationError,
+    _preview_full_conf_path,
+    _run_nginx_test,
     create_service,
     delete_service,
     get_service,
@@ -53,6 +56,13 @@ def test_create_service_rejects_duplicate_server_name() -> None:
 
     with pytest.raises(CatalogConflictError):
         create_service(catalog, _proxy_service("two", server_name="one.example.com"))
+
+
+def test_create_service_rejects_duplicate_name_after_stripping_whitespace() -> None:
+    catalog = {"services": [_proxy_service("one")]}
+
+    with pytest.raises(CatalogConflictError):
+        create_service(catalog, _proxy_service(" one ", server_name="two.example.com"))
 
 
 def test_delete_service_removes_the_named_entry() -> None:
@@ -110,6 +120,7 @@ def test_render_preview_blocks_when_nginx_is_unavailable(monkeypatch: pytest.Mon
             raise FileNotFoundError("sudo")
         return subprocess.CompletedProcess(command, 0, stdout="gixy ok", stderr="")
 
+    monkeypatch.setenv("SCRATCH_DIR", str(tmp_path / "scratch"))
     monkeypatch.setattr("app.catalog_crud.certs_live_dir", lambda: tmp_path / "certs")
     monkeypatch.setattr("app.catalog_crud.load_config", lambda path: HomeWardenConfig(fqdn="warden.example.com"))
     monkeypatch.setattr("app.catalog_crud.subprocess.run", fake_run)
@@ -138,6 +149,7 @@ def test_render_preview_surfaces_gixy_findings_without_blocking_apply(
             return subprocess.CompletedProcess(command, 0, stdout="syntax ok", stderr="")
         return subprocess.CompletedProcess(command, 1, stdout="HIGH: suspicious header", stderr="")
 
+    monkeypatch.setenv("SCRATCH_DIR", str(tmp_path / "scratch"))
     monkeypatch.setattr("app.catalog_crud.certs_live_dir", lambda: tmp_path / "certs")
     monkeypatch.setattr("app.catalog_crud.load_config", lambda path: HomeWardenConfig())
     monkeypatch.setattr("app.catalog_crud.subprocess.run", fake_run)
@@ -158,7 +170,57 @@ def test_render_preview_surfaces_gixy_findings_without_blocking_apply(
     assert "+        server_name renamed.example.com;" in preview.diff
 
 
-def test_render_preview_wraps_web_ui_name_collisions_as_validation_errors(
+def test_render_preview_allows_preexisting_duplicates_in_stored_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setenv("SCRATCH_DIR", str(tmp_path / "scratch"))
+    monkeypatch.setattr("app.catalog_crud.certs_live_dir", lambda: tmp_path / "certs")
+    monkeypatch.setattr("app.catalog_crud.load_config", lambda path: HomeWardenConfig())
+    monkeypatch.setattr("app.catalog_crud.subprocess.run", fake_run)
+
+    preview = render_preview(
+        {"services": [_proxy_service("candidate-one"), _proxy_service("candidate-two")]},
+        current_catalog={"services": [_proxy_service("one"), _proxy_service("two", server_name="one.example.com")]},
+        current_services_path=tmp_path / "services.json",
+    )
+
+    assert preview.can_apply is True
+
+
+def test_render_preview_uses_the_fixed_preview_conf_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    expected_conf = tmp_path / "scratch" / "web-ui-preview" / "nginx.conf"
+
+    def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        if command[0] == "sudo":
+            assert command == ["sudo", "-n", str(NGINX_TEST_HELPER)]
+            assert _preview_full_conf_path() == expected_conf
+            assert expected_conf.is_file()
+            return subprocess.CompletedProcess(command, 0, stdout="syntax ok", stderr="")
+        assert command[-1] == str(expected_conf)
+        return subprocess.CompletedProcess(command, 0, stdout="gixy ok", stderr="")
+
+    monkeypatch.setenv("SCRATCH_DIR", str(tmp_path / "scratch"))
+    monkeypatch.setattr("app.catalog_crud.certs_live_dir", lambda: tmp_path / "certs")
+    monkeypatch.setattr("app.catalog_crud.load_config", lambda path: HomeWardenConfig())
+    monkeypatch.setattr("app.catalog_crud.subprocess.run", fake_run)
+
+    preview = render_preview(
+        {"services": [_proxy_service("candidate")]},
+        current_catalog={"services": [_proxy_service("current")]},
+        current_services_path=tmp_path / "caller-controlled" / "services.json",
+    )
+
+    assert preview.can_apply is True
+
+
+def test_render_preview_wraps_candidate_web_ui_name_collisions_as_validation_errors(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -166,10 +228,38 @@ def test_render_preview_wraps_web_ui_name_collisions_as_validation_errors(
 
     with pytest.raises(CatalogValidationError, match="reserved service name"):
         render_preview(
-            {"services": [_proxy_service("candidate")]},
-            current_catalog={"services": [_proxy_service("home-warden-web-ui")]},
+            {"services": [_proxy_service("home-warden-web-ui")]},
+            current_catalog={"services": [_proxy_service("candidate")]},
             current_services_path=tmp_path / "services.json",
         )
+
+
+def test_run_nginx_test_reports_failed_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.catalog_crud.subprocess.run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 1, stdout="", stderr="nginx: [emerg] broken"),
+    )
+
+    result = _run_nginx_test()
+
+    assert result.ok is False
+    assert result.status == "failed"
+    assert "nginx: [emerg] broken" in result.output
+
+
+def test_run_nginx_test_reports_missing_sudo_provisioning(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.catalog_crud.subprocess.run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 1, stdout="", stderr="sudo: a password is required"
+        ),
+    )
+
+    result = _run_nginx_test()
+
+    assert result.ok is False
+    assert result.status == "unavailable"
+    assert "not provisioned" in result.output
 
 
 def test_update_service_deep_merges_without_dropping_hidden_fields() -> None:
@@ -211,6 +301,14 @@ def test_update_service_preserves_omitted_optional_fields_and_clears_explicit_nu
 
     cleared = update_service(catalog, "one", {"allow_cidrs": None})
     assert "allow_cidrs" not in cleared["services"][0]
+
+
+def test_validate_service_strips_required_string_fields() -> None:
+    validated = validate_service(_proxy_service(" service ", kind=" proxy ", server_name=" service.example.com "))
+
+    assert validated["kind"] == "proxy"
+    assert validated["name"] == "service"
+    assert validated["server_name"] == "service.example.com"
 
 
 @pytest.mark.parametrize(
