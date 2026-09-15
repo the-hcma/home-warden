@@ -10,6 +10,7 @@ syntax check without needing a local nginx binary. See #54.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import crossplane
@@ -25,6 +26,26 @@ def _parse_ok(rendered: str, tmp_path: Path) -> None:
     conf_path.write_text(rendered)
     result = crossplane.parse(str(conf_path), combine=True)
     assert result["status"] == "ok", result.get("errors")
+
+
+def _listen_args_for_server_name(rendered: str, tmp_path: Path, server_name: str) -> list[str]:
+    """Return the `listen` directive's args for the server block whose
+    `server_name` matches, by walking the parsed config tree rather than
+    a substring search that could match a *different* server block's own
+    `listen`/`server_name` lines depending on rendering order."""
+    conf_path = tmp_path / "nginx.conf"
+    conf_path.write_text(rendered)
+    parsed = crossplane.parse(str(conf_path), combine=True)
+    for http in parsed["config"][0]["parsed"]:
+        if http["directive"] != "http":
+            continue
+        for server in http["block"]:
+            if server["directive"] != "server":
+                continue
+            directives = {d["directive"]: d["args"] for d in server["block"]}
+            if directives.get("server_name") == [server_name]:
+                return directives["listen"]
+    raise AssertionError(f"no server block found with server_name {server_name!r}")
 
 
 def _proxy_service(name: str = "svc", **overrides) -> dict:
@@ -61,7 +82,7 @@ def test_allow_cn_builds_map_block_and_if_gate(tmp_path: Path) -> None:
     }
     rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
     assert "map $ssl_client_s_dn $allow_0_svc_cn {" in rendered
-    assert "~(^|,)CN=alice(,|$) 1;" in rendered
+    assert "~(?:^|(?<!\\\\),)CN=alice(?:,|$) 1;" in rendered
     assert "if ($allow_0_svc_cn = 0) {" in rendered
     assert "return 403;" in rendered
     _parse_ok(rendered, tmp_path)
@@ -139,7 +160,28 @@ def test_allow_cn_pattern_matches_cn_anywhere_in_reversed_dn(tmp_path: Path) -> 
         ]
     }
     rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
-    assert "~(^|,)CN=alice(,|$) 1;" in rendered
+    assert "~(?:^|(?<!\\\\),)CN=alice(?:,|$) 1;" in rendered
+    _parse_ok(rendered, tmp_path)
+
+
+def test_allow_cn_pattern_rejects_rfc2253_escaped_comma_injection(tmp_path: Path) -> None:
+    # Regression: OpenSSL's RFC 2253 rendering escapes a comma *inside* an
+    # attribute value as "\,", so a subject like "/CN=evil/OU=x,CN=alice"
+    # prints as "OU=x\,CN=alice,CN=evil". Without excluding an
+    # escaped-backslash comma as a separator, the map pattern for "alice"
+    # would match that string even though the cert's real CN is "evil".
+    catalog = {
+        "services": [
+            _proxy_service(client_cert={"mode": "required", "ca_bundle": "/tmp/ca.pem", "allow_cn": ["alice"]})
+        ]
+    }
+    rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
+    pattern_line = next(line for line in rendered.splitlines() if "CN=alice" in line)
+    pattern_text = pattern_line.strip().split(" 1;")[0].strip("'")
+    assert pattern_text.startswith("~")
+    compiled = re.compile(pattern_text[1:])
+    assert compiled.search(r"OU=x\,CN=alice,CN=evil") is None
+    assert compiled.search("O=example,CN=alice") is not None
     _parse_ok(rendered, tmp_path)
 
 
@@ -202,6 +244,22 @@ def test_unrecognized_client_cert_mode_raises_value_error(tmp_path: Path) -> Non
         render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
 
 
+def test_allow_cn_with_optional_mode_raises_value_error(tmp_path: Path) -> None:
+    # Regression: the allow_cn gate 403s any request whose $ssl_client_s_dn
+    # doesn't match, including a cert-less one (the map's `default 0`
+    # catches an empty DN too). With mode: "optional" that silently
+    # upgrades the declared optionality to a de facto "required" -- nginx
+    # itself would accept the anonymous request past ssl_verify_client,
+    # but the gate still rejects it.
+    catalog = {
+        "services": [
+            _proxy_service(client_cert={"mode": "optional", "ca_bundle": "/tmp/ca.pem", "allow_cn": ["alice"]})
+        ]
+    }
+    with pytest.raises(ValueError, match="allow_cn requires mode: 'required'"):
+        render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
+
+
 def test_example_catalog_renders_and_parses(tmp_path: Path) -> None:
     catalog = json.loads(EXAMPLE_CATALOG_PATH.read_text())
     rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
@@ -211,9 +269,13 @@ def test_example_catalog_renders_and_parses(tmp_path: Path) -> None:
 def test_default_server_flag_only_on_first_service(tmp_path: Path) -> None:
     catalog = {"services": [_proxy_service(name="a"), _proxy_service(name="b")]}
     rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
-    listen_lines = [line for line in rendered.splitlines() if line.strip().startswith("listen ")]
-    assert sum(1 for line in listen_lines if line.strip() == "listen 443 ssl default_server;") == 1
-    assert sum(1 for line in listen_lines if line.strip() == "listen 443 ssl;") == 1
+    # Pin the flag to the specific server block that should own it, not
+    # just a count of "listen ..." lines: a bug that moves the flag to a
+    # different service (e.g. is_default_server=(i == len(services) - 1))
+    # would keep a plain "exactly one default_server" count green while
+    # silently changing which vhost nginx falls back to for TLS SNI.
+    assert _listen_args_for_server_name(rendered, tmp_path, "a.example.com") == ["443", "ssl", "default_server"]
+    assert _listen_args_for_server_name(rendered, tmp_path, "b.example.com") == ["443", "ssl"]
     _parse_ok(rendered, tmp_path)
 
 

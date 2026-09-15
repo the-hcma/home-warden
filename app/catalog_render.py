@@ -159,8 +159,20 @@ def _build_allow_cn_map(service: dict, index: int) -> dict | None:
         # the pattern at the string start (`^CN=...`) misses any subject
         # where CN isn't emitted first. Match CN as any comma-delimited
         # RDN instead: preceded by start-of-string or a comma, followed by
-        # a comma or end-of-string.
-        map_block.append(_directive(f"~(^|,)CN={_escape_map_pattern(cn)}(,|$)", args=["1"]))
+        # a comma or end-of-string. The `(?<!\\)` negative lookbehind on
+        # the leading comma rejects a comma that RFC 2253 escaped as part
+        # of a *value* (e.g. subject "/CN=evil/OU=x,CN=alice" prints as
+        # "OU=x\,CN=alice,CN=evil") -- without it, that escaped comma would
+        # read as an RDN separator and let a cert whose real CN is "evil"
+        # match the "alice" allowlist entry.
+        #
+        # This still can't distinguish a genuine "CN=alice" RDN from a
+        # second, duplicate "CN=alice" RDN elsewhere in the same subject
+        # (multiple CN attributes are legal in an X.509 name) -- that's a
+        # CA issuance-policy concern (home-warden#49's tooling doesn't
+        # exist yet to enforce single-CN subjects), not something a
+        # regex over the flattened DN string can fully close.
+        map_block.append(_directive(f"~(?:^|(?<!\\\\),)CN={_escape_map_pattern(cn)}(?:,|$)", args=["1"]))
     return _directive("map", args=["$ssl_client_s_dn", f"${_allow_cn_map_name(service, index)}"], block=map_block)
 
 
@@ -240,6 +252,23 @@ def _client_cert_directives(service: dict) -> list[dict]:
         return []
     if mode not in _SSL_VERIFY_CLIENT_MODES:
         raise ValueError(f"unsupported client_cert.mode {mode!r} for service {service.get('name', '<unnamed>')!r}")
+    if client_cert.get("allow_cn") and mode != "required":
+        # The server-level allow_cn gate (`_allow_cn_gate_directives`) 403s
+        # any request whose $ssl_client_s_dn doesn't match the allowlist --
+        # including a request with no client cert at all, since the map's
+        # `default 0` catches an empty $ssl_client_s_dn too. With
+        # mode: "optional", that silently upgrades the declared optionality
+        # to a de facto "required": nginx accepts an anonymous request past
+        # ssl_verify_client, but the gate still rejects it. There's no
+        # signal in the rendered config that the two disagree, so fail
+        # loud here rather than let the deployed behavior surprise an
+        # operator who genuinely wanted "verify a cert if presented, but
+        # anonymous access is still fine for anyone not on the allowlist".
+        raise ValueError(
+            "client_cert.allow_cn requires mode: 'required' for service "
+            f"{service.get('name', '<unnamed>')!r} -- with mode: 'optional', the CN gate would still "
+            "403 every cert-less request, silently upgrading 'optional' to 'required'"
+        )
     directives = [
         _directive("ssl_client_certificate", args=[client_cert["ca_bundle"]]),
         _directive("ssl_verify_client", args=[_SSL_VERIFY_CLIENT_MODES[mode]]),
