@@ -104,6 +104,11 @@ def test_allow_cn_builds_map_block_and_if_gate(tmp_path: Path) -> None:
     }
     rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
     assert "map $ssl_client_s_dn $allow_0_svc_cn {" in rendered
+    # The map's fallback entry is what makes the gate fail *closed* -- a
+    # DN matching no allowlist entry (including a cert-less request's
+    # empty $ssl_client_s_dn) must map to 0, not 1, or the allowlist
+    # silently becomes a no-op that accepts every cert the CA signed.
+    assert "default 0;" in rendered
     # 4 literal backslash chars in the rendered file: nginx's config-file
     # lexer collapses a `\\` pair to a single backslash even in this
     # unquoted token, so the file needs twice as many as the pattern
@@ -122,6 +127,28 @@ def test_allow_cn_pattern_escapes_regex_metacharacters(tmp_path: Path) -> None:
     }
     rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
     assert r"bob \(admin\)" in rendered
+    _parse_ok(rendered, tmp_path)
+
+
+def test_allow_cn_pattern_matches_rfc2253_escaped_comma_in_value(tmp_path: Path) -> None:
+    # Regression: OpenSSL's DN printer escapes a literal comma *inside* an
+    # attribute value with its own escape-marker backslash --
+    # allow_cn: ["Doe, John"] renders as "CN=Doe\,John" in
+    # $ssl_client_s_dn, not "CN=Doe, John" -- so the compiled pattern must
+    # expect that extra backslash byte, not just the catalog's original
+    # comma, or a legitimately allowlisted CN is 403'd on every request.
+    catalog = {
+        "services": [
+            _proxy_service(client_cert={"mode": "required", "ca_bundle": "/tmp/ca.pem", "allow_cn": ["Doe, John"]})
+        ]
+    }
+    rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
+    pattern_line = next(line for line in rendered.splitlines() if "CN=Doe" in line)
+    pattern_text = pattern_line.strip().split(" 1;")[0].strip("'")
+    assert pattern_text.startswith("~")
+    compiled = re.compile(_nginx_unescape_token(pattern_text[1:]))
+    assert compiled.search(r"O=example,CN=Doe\, John") is not None
+    assert compiled.search("O=example,CN=Doe, John") is None
     _parse_ok(rendered, tmp_path)
 
 
@@ -252,6 +279,18 @@ def test_client_cert_material_without_mode_raises_value_error(tmp_path: Path) ->
     # 'optional'/'required' mode used to be silently dropped -- no
     # ssl_verify_client emitted at all, a fail-open vhost with no warning.
     catalog = {"services": [_proxy_service(client_cert={"ca_bundle": "/tmp/ca.pem"})]}
+    with pytest.raises(ValueError, match="client_cert.mode"):
+        render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
+
+
+def test_verify_depth_without_mode_raises_value_error(tmp_path: Path) -> None:
+    # Regression: verify_depth was missing from the fail-loud material
+    # check's key tuple, so {"client_cert": {"verify_depth": 2}} (mode
+    # defaulting to "off") silently rendered no ssl_verify_client and no
+    # ssl_verify_depth at all -- the same silent-drop class
+    # test_client_cert_material_without_mode_raises_value_error closes for
+    # ca_bundle/crl/allow_cn, but verify_depth alone slipped through it.
+    catalog = {"services": [_proxy_service(client_cert={"verify_depth": 2})]}
     with pytest.raises(ValueError, match="client_cert.mode"):
         render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
 

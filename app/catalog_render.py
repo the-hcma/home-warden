@@ -33,9 +33,12 @@ resolves each:
   the catalog + this module's fixed template describe -- no historical
   cruft carries over, and that's a deliberate, documented property of
   catalog-driven generation (not an accident to review away later).
-- Security validation (#50): scripts/render-catalog's own validate step
-  runs scripts/nginx-security-lint against its rendered output, in
-  addition to `nginx -t` -- see that script's docstring.
+- Security validation (#50): `.github/ci/catalog-render-validate` renders
+  a CI-only fixture catalog, then runs both real `nginx -t` and
+  `scripts/nginx-security-lint`/Gixy-Next against the output -- see that
+  script. `scripts/render-catalog` itself is a bare rendering wrapper with
+  no validation step of its own; a local `./scripts/render-catalog
+  --output ...` run is not, by itself, security-linted.
 """
 
 from __future__ import annotations
@@ -173,16 +176,12 @@ def _build_allow_cn_map(service: dict, index: int) -> dict | None:
         # exist yet to enforce single-CN subjects), not something a
         # regex over the flattened DN string can fully close.
         #
-        # Backslash count: nginx's config-file lexer (ngx_conf_read_token)
-        # collapses a literal `\\` pair to a single backslash *even in
-        # unquoted tokens* (this map key isn't quoted -- it has no
-        # whitespace/braces/semicolons for crossplane's builder to quote
-        # it over), before the argument ever reaches pcre2_compile(). To
-        # have PCRE see the two backslash characters `\\` it needs for a
-        # literal-backslash lookbehind, the rendered *file* must contain
-        # four backslash characters here, i.e. this Python string needs
-        # two real backslashes (`\\` written twice) per escaped position.
-        map_block.append(_directive(f"~(?:^|(?<!\\\\\\\\),)CN={_escape_map_pattern(cn)}(?:,|$)", args=["1"]))
+        # See _FILE_BACKSLASH_ATOM for why this lookbehind needs 4 literal
+        # backslash characters in the rendered file, not the 2 a bare
+        # `(?<!\\)` PCRE atom would suggest.
+        map_block.append(
+            _directive(f"~(?:^|(?<!{_FILE_BACKSLASH_ATOM}),)CN={_escape_map_pattern(cn)}(?:,|$)", args=["1"])
+        )
     return _directive("map", args=["$ssl_client_s_dn", f"${_allow_cn_map_name(service, index)}"], block=map_block)
 
 
@@ -252,12 +251,13 @@ def _client_cert_directives(service: dict) -> list[dict]:
     # `mode` key, or a misspelled `client_cert`/`clientCert` outer key)
     # rather than an intentional staged-mTLS state, so fail loud instead of
     # silently rendering a public vhost with no client-cert gate at all.
-    has_cert_material = any(client_cert.get(k) for k in ("ca_bundle", "crl", "allow_cn"))
+    has_cert_material = any(client_cert.get(k) for k in ("ca_bundle", "crl", "allow_cn", "verify_depth"))
     if mode == "off":
         if has_cert_material:
             raise ValueError(
-                "client_cert.mode is 'off' (or missing) but ca_bundle/crl/allow_cn is set for service "
-                f"{service.get('name', '<unnamed>')!r} -- set mode to 'optional' or 'required', or drop them"
+                "client_cert.mode is 'off' (or missing) but ca_bundle/crl/allow_cn/verify_depth is set for "
+                f"service {service.get('name', '<unnamed>')!r} -- set mode to 'optional' or 'required', or drop "
+                "them"
             )
         return []
     if mode not in _SSL_VERIFY_CLIENT_MODES:
@@ -297,11 +297,46 @@ def _directive(name: str, *, args: list[str] | None = None, block: list[dict] | 
     return stmt
 
 
+# nginx's config-file lexer (ngx_conf_read_token) collapses a literal
+# "\\" (backslash-backslash) pair down to a single backslash character in
+# *every* directive argument -- including an unquoted regex/map key like
+# the allow_cn patterns below -- before the argument reaches
+# pcre2_compile(). A backslash followed by anything else (a regex
+# metacharacter, a digit, ...) is left completely alone. So a rendered
+# file needs 4 literal backslash characters, not 2, for pcre2_compile()
+# to ultimately see the 2-character `\\` atom that matches one literal
+# backslash in the *subject* string being matched against.
+_FILE_BACKSLASH_ATOM = "\\" * 4
+
+
 def _escape_map_pattern(value: str) -> str:
     # $ssl_client_s_dn's RFC2253-ish DN string is comma-separated
-    # ("CN=alice,O=example") -- a CN value containing a regex metacharacter
-    # would otherwise corrupt the map's `~` regex pattern.
-    return "".join(f"\\{c}" if c in ".*+?^$()[]{}|\\" else c for c in value)
+    # ("CN=alice,O=example"). Building the map key's `~` regex pattern
+    # from a raw CN value needs two independent escaping passes:
+    #
+    # 1. RFC 2253 value escaping: OpenSSL's DN printer prefixes a literal
+    #    comma or backslash *inside* an attribute value with an escape-
+    #    marker backslash (allow_cn: ["Doe, John"] renders as
+    #    "CN=Doe\,John" in $ssl_client_s_dn) -- the pattern must expect
+    #    that extra backslash byte, not just the original character, or a
+    #    legitimately allowlisted CN is rejected on every request.
+    # 2. Plain PCRE metacharacter escaping, so a literal ".", "(", etc. in
+    #    the value doesn't act as a regex operator.
+    #
+    # See _FILE_BACKSLASH_ATOM for why matching one escape-marker
+    # backslash needs 4 literal backslash characters in the rendered
+    # file, not the 2 a bare `\\` PCRE atom would suggest.
+    out = []
+    for c in value:
+        if c == ",":
+            out.append(_FILE_BACKSLASH_ATOM + ",")
+        elif c == "\\":
+            out.append(_FILE_BACKSLASH_ATOM * 2)
+        elif c in ".*+?^$()[]{}|":
+            out.append(f"\\{c}")
+        else:
+            out.append(c)
+    return "".join(out)
 
 
 def _proxy_location_directives(service: dict, ctx: RenderContext) -> list[dict]:
