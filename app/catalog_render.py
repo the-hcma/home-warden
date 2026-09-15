@@ -172,7 +172,17 @@ def _build_allow_cn_map(service: dict, index: int) -> dict | None:
         # CA issuance-policy concern (home-warden#49's tooling doesn't
         # exist yet to enforce single-CN subjects), not something a
         # regex over the flattened DN string can fully close.
-        map_block.append(_directive(f"~(?:^|(?<!\\\\),)CN={_escape_map_pattern(cn)}(?:,|$)", args=["1"]))
+        #
+        # Backslash count: nginx's config-file lexer (ngx_conf_read_token)
+        # collapses a literal `\\` pair to a single backslash *even in
+        # unquoted tokens* (this map key isn't quoted -- it has no
+        # whitespace/braces/semicolons for crossplane's builder to quote
+        # it over), before the argument ever reaches pcre2_compile(). To
+        # have PCRE see the two backslash characters `\\` it needs for a
+        # literal-backslash lookbehind, the rendered *file* must contain
+        # four backslash characters here, i.e. this Python string needs
+        # two real backslashes (`\\` written twice) per escaped position.
+        map_block.append(_directive(f"~(?:^|(?<!\\\\\\\\),)CN={_escape_map_pattern(cn)}(?:,|$)", args=["1"]))
     return _directive("map", args=["$ssl_client_s_dn", f"${_allow_cn_map_name(service, index)}"], block=map_block)
 
 

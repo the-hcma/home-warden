@@ -21,6 +21,28 @@ from app.catalog_render import RenderContext, build_catalog_config, render_catal
 EXAMPLE_CATALOG_PATH = Path(__file__).resolve().parent.parent.parent / "services.json.example"
 
 
+def _nginx_unescape_token(text: str) -> str:
+    """Collapse the escape sequences nginx's config-file lexer
+    (ngx_conf_read_token) recognizes in a bare (unquoted) token --
+    `\\\\` -> `\\`, `\\"` -> `"`, `\\'` -> `'`, `\\t`/`\\r`/`\\n` -> the
+    corresponding control character -- leaving every other `\\X` sequence
+    untouched. nginx applies this *before* handing a regex argument to
+    pcre2_compile(), so tests that assert against Python's `re` module
+    (which has no such collapsing step) must replicate it first or they
+    validate a different string than the one nginx actually compiles."""
+    out: list[str] = []
+    i = 0
+    replacements = {"\\": "\\", '"': '"', "'": "'", "t": "\t", "r": "\r", "n": "\n"}
+    while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text) and text[i + 1] in replacements:
+            out.append(replacements[text[i + 1]])
+            i += 2
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
 def _parse_ok(rendered: str, tmp_path: Path) -> None:
     conf_path = tmp_path / "nginx.conf"
     conf_path.write_text(rendered)
@@ -82,7 +104,11 @@ def test_allow_cn_builds_map_block_and_if_gate(tmp_path: Path) -> None:
     }
     rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
     assert "map $ssl_client_s_dn $allow_0_svc_cn {" in rendered
-    assert "~(?:^|(?<!\\\\),)CN=alice(?:,|$) 1;" in rendered
+    # 4 literal backslash chars in the rendered file: nginx's config-file
+    # lexer collapses a `\\` pair to a single backslash even in this
+    # unquoted token, so the file needs twice as many as the pattern
+    # actually wants pcre2_compile() to see. See _nginx_unescape_token.
+    assert "~(?:^|(?<!\\\\\\\\),)CN=alice(?:,|$) 1;" in rendered
     assert "if ($allow_0_svc_cn = 0) {" in rendered
     assert "return 403;" in rendered
     _parse_ok(rendered, tmp_path)
@@ -160,7 +186,7 @@ def test_allow_cn_pattern_matches_cn_anywhere_in_reversed_dn(tmp_path: Path) -> 
         ]
     }
     rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
-    assert "~(?:^|(?<!\\\\),)CN=alice(?:,|$) 1;" in rendered
+    assert "~(?:^|(?<!\\\\\\\\),)CN=alice(?:,|$) 1;" in rendered
     _parse_ok(rendered, tmp_path)
 
 
@@ -179,7 +205,11 @@ def test_allow_cn_pattern_rejects_rfc2253_escaped_comma_injection(tmp_path: Path
     pattern_line = next(line for line in rendered.splitlines() if "CN=alice" in line)
     pattern_text = pattern_line.strip().split(" 1;")[0].strip("'")
     assert pattern_text.startswith("~")
-    compiled = re.compile(pattern_text[1:])
+    # Mirror nginx's own lexer collapsing (see _nginx_unescape_token) before
+    # compiling with Python's `re` -- `re.compile` has no such step, so
+    # comparing the raw file text against a real backslash-lookbehind
+    # would validate a different pattern than the one nginx actually runs.
+    compiled = re.compile(_nginx_unescape_token(pattern_text[1:]))
     assert compiled.search(r"OU=x\,CN=alice,CN=evil") is None
     assert compiled.search("O=example,CN=alice") is not None
     _parse_ok(rendered, tmp_path)
