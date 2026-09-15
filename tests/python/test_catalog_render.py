@@ -290,6 +290,21 @@ def test_extra_location_blocks_raises_value_error(tmp_path: Path) -> None:
     _parse_ok(rendered, tmp_path)
 
 
+def test_verify_depth_zero_renders_ssl_verify_depth_directive(tmp_path: Path) -> None:
+    # Companion to the "without mode" regression tests below: pins that
+    # verify_depth: 0 is treated as present (not absent) all the way
+    # through to rendering, not just at the fail-loud material check --
+    # a truthiness-based emission (`if client_cert.get("verify_depth"):`)
+    # would drop ssl_verify_depth for this legitimate value just as
+    # silently as the fail-loud check would if it used truthiness too.
+    catalog = {
+        "services": [_proxy_service(client_cert={"mode": "required", "ca_bundle": "/tmp/ca.pem", "verify_depth": 0})]
+    }
+    rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
+    assert "ssl_verify_depth 0;" in rendered
+    _parse_ok(rendered, tmp_path)
+
+
 def test_client_cert_mode_required_maps_to_ssl_verify_client_on(tmp_path: Path) -> None:
     # The schema's client_cert.mode is 'off'/'optional'/'required' (operator
     # wording); nginx's ssl_verify_client only accepts on/off/optional --
@@ -319,6 +334,18 @@ def test_verify_depth_without_mode_raises_value_error(tmp_path: Path) -> None:
     # test_client_cert_material_without_mode_raises_value_error closes for
     # ca_bundle/crl/allow_cn, but verify_depth alone slipped through it.
     catalog = {"services": [_proxy_service(client_cert={"verify_depth": 2})]}
+    with pytest.raises(ValueError, match="client_cert.mode"):
+        render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
+
+
+def test_verify_depth_zero_without_mode_raises_value_error(tmp_path: Path) -> None:
+    # Regression: the fail-loud material check used truthiness
+    # (any(client_cert.get(k) for k in (...))), so verify_depth: 0 --
+    # a legitimate ssl_verify_depth value (only the leaf cert accepted,
+    # no intermediate chain) -- evaluated as falsy and was treated as if
+    # nothing were set, silently rendering neither ssl_verify_client nor
+    # ssl_verify_depth instead of raising like the nonzero case above.
+    catalog = {"services": [_proxy_service(client_cert={"verify_depth": 0})]}
     with pytest.raises(ValueError, match="client_cert.mode"):
         render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
 

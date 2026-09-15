@@ -272,7 +272,15 @@ def _client_cert_directives(service: dict) -> list[dict]:
     # `mode` key, or a misspelled `client_cert`/`clientCert` outer key)
     # rather than an intentional staged-mTLS state, so fail loud instead of
     # silently rendering a public vhost with no client-cert gate at all.
-    has_cert_material = any(client_cert.get(k) for k in ("ca_bundle", "crl", "allow_cn", "verify_depth"))
+    # verify_depth is checked for presence (`is not None`), not truthiness:
+    # 0 is a legitimate ssl_verify_depth value (only the leaf certificate is
+    # accepted, no intermediate chain), so a truthy-only check would treat
+    # {"client_cert": {"verify_depth": 0}} as if nothing were set, silently
+    # dropping the directive instead of raising for mode: "off" (the same
+    # silent-drop class of bug this check exists to prevent).
+    has_cert_material = client_cert.get("verify_depth") is not None or any(
+        client_cert.get(k) for k in ("ca_bundle", "crl", "allow_cn")
+    )
     if mode == "off":
         if has_cert_material:
             raise ValueError(
