@@ -70,6 +70,12 @@ if [[ ! -f "${conf_path}" ]]; then
   exit 2
 fi
 
+# Resolve to an absolute path *before* the `cd "${repo_dir}"` below -- a
+# relative HOME_NGINX_CONF must stay anchored to the caller's cwd (e.g.
+# running from thehcma/home's checkout with HOME_NGINX_CONF=nginx/server/
+# nginx.conf), not silently re-resolve against this repo's root afterward.
+conf_path="$(cd "$(dirname "${conf_path}")" && pwd)/$(basename "${conf_path}")"
+
 if ! command -v uv >/dev/null 2>&1; then
   echo "nginx-security-lint: uv not found — install uv, then 'uv sync --group lint'" >&2
   exit 2
