@@ -60,9 +60,9 @@ def test_allow_cn_builds_map_block_and_if_gate(tmp_path: Path) -> None:
         ]
     }
     rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
-    assert "map $ssl_client_s_dn $allow_svc_cn {" in rendered
-    assert "~^CN=alice(,|$) 1;" in rendered
-    assert "if ($allow_svc_cn = 0) {" in rendered
+    assert "map $ssl_client_s_dn $allow_0_svc_cn {" in rendered
+    assert "~(^|,)CN=alice(,|$) 1;" in rendered
+    assert "if ($allow_0_svc_cn = 0) {" in rendered
     assert "return 403;" in rendered
     _parse_ok(rendered, tmp_path)
 
@@ -94,9 +94,52 @@ def test_allow_cn_gate_applies_to_static_service(tmp_path: Path) -> None:
         ]
     }
     rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
-    assert "map $ssl_client_s_dn $allow_static_mtls_cn {" in rendered
-    assert "if ($allow_static_mtls_cn = 0) {" in rendered
+    assert "map $ssl_client_s_dn $allow_0_static_mtls_cn {" in rendered
+    assert "if ($allow_0_static_mtls_cn = 0) {" in rendered
     assert "return 403;" in rendered
+    _parse_ok(rendered, tmp_path)
+
+
+def test_allow_cn_map_names_are_unique_for_colliding_sanitized_names(tmp_path: Path) -> None:
+    # Regression: _safe_ident collapses non-alphanumerics to "_", so
+    # "web-app" and "web.app" used to sanitize to the same map variable
+    # name, redeclaring the same nginx map twice.
+    catalog = {
+        "services": [
+            {
+                "name": "web-app",
+                "server_name": "web-app.example.com",
+                "kind": "proxy",
+                "upstream": {"host": "backend.internal", "port": 8080},
+                "client_cert": {"mode": "required", "ca_bundle": "/tmp/ca.pem", "allow_cn": ["alice"]},
+            },
+            {
+                "name": "web.app",
+                "server_name": "web-app-2.example.com",
+                "kind": "proxy",
+                "upstream": {"host": "backend2.internal", "port": 8080},
+                "client_cert": {"mode": "required", "ca_bundle": "/tmp/ca.pem", "allow_cn": ["bob"]},
+            },
+        ]
+    }
+    rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
+    assert "map $ssl_client_s_dn $allow_0_web_app_cn {" in rendered
+    assert "map $ssl_client_s_dn $allow_1_web_app_cn {" in rendered
+    _parse_ok(rendered, tmp_path)
+
+
+def test_allow_cn_pattern_matches_cn_anywhere_in_reversed_dn(tmp_path: Path) -> None:
+    # $ssl_client_s_dn prints RDNs in reverse subject order, so a
+    # cert built CN-first (subject "CN=alice,O=example") renders as
+    # "O=example,CN=alice" -- CN is not first. The map pattern must match
+    # CN as any RDN, not only one anchored at the string start.
+    catalog = {
+        "services": [
+            _proxy_service(client_cert={"mode": "required", "ca_bundle": "/tmp/ca.pem", "allow_cn": ["alice"]})
+        ]
+    }
+    rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
+    assert "~(^|,)CN=alice(,|$) 1;" in rendered
     _parse_ok(rendered, tmp_path)
 
 
@@ -129,6 +172,34 @@ def test_client_cert_mode_required_maps_to_ssl_verify_client_on(tmp_path: Path) 
     assert "ssl_verify_client on;" in rendered
     assert "ssl_verify_client required;" not in rendered
     _parse_ok(rendered, tmp_path)
+
+
+def test_client_cert_material_without_mode_raises_value_error(tmp_path: Path) -> None:
+    # Regression: mode defaults to "off" when omitted (services.json.example
+    # note 14), so ca_bundle/crl/allow_cn declared without an explicit
+    # 'optional'/'required' mode used to be silently dropped -- no
+    # ssl_verify_client emitted at all, a fail-open vhost with no warning.
+    catalog = {"services": [_proxy_service(client_cert={"ca_bundle": "/tmp/ca.pem"})]}
+    with pytest.raises(ValueError, match="client_cert.mode"):
+        render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
+
+
+def test_allow_cn_without_verification_mode_raises_value_error(tmp_path: Path) -> None:
+    # Regression: the allow_cn map + if-gate used to be emitted regardless
+    # of client_cert.mode, so a service with only "allow_cn" set (mode
+    # defaulting to off) rendered a gate that always evaluated false --
+    # $ssl_client_s_dn is empty without mTLS verification -- 403ing every
+    # request to a vhost that looked, from the catalog, like it had no
+    # access restriction at all.
+    catalog = {"services": [_proxy_service(client_cert={"allow_cn": ["alice"]})]}
+    with pytest.raises(ValueError, match="client_cert.mode"):
+        render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
+
+
+def test_unrecognized_client_cert_mode_raises_value_error(tmp_path: Path) -> None:
+    catalog = {"services": [_proxy_service(client_cert={"mode": "optional_no_ca", "ca_bundle": "/tmp/ca.pem"})]}
+    with pytest.raises(ValueError, match="optional_no_ca"):
+        render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
 
 
 def test_example_catalog_renders_and_parses(tmp_path: Path) -> None:
@@ -202,7 +273,8 @@ def test_static_service_gets_exact_match_root_before_general_location(tmp_path: 
     }
     rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
     exact_idx = rendered.index("location = / {")
-    general_root_idx = rendered.index("root /srv/example;", exact_idx + 1)
+    exact_block_end = rendered.index("try_files /index.html =404;", exact_idx)
+    general_root_idx = rendered.index("root /srv/example;", exact_block_end)
     listing_idx = rendered.index("location /listing/ {")
     assert exact_idx < general_root_idx < listing_idx
     assert "try_files /index.html =404;" in rendered

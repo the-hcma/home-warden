@@ -83,12 +83,12 @@ def build_catalog_config(catalog: dict, ctx: RenderContext) -> list[dict]:
     http_block: list[dict] = []
     if ctx.server_tokens_off:
         http_block.append(_directive("server_tokens", args=["off"]))
-    for service in services:
-        allow_cn_map = _build_allow_cn_map(service)
+    for i, service in enumerate(services):
+        allow_cn_map = _build_allow_cn_map(service, i)
         if allow_cn_map is not None:
             http_block.append(allow_cn_map)
     for i, service in enumerate(services):
-        http_block.append(_build_server_block(service, ctx, is_default_server=(i == 0)))
+        http_block.append(_build_server_block(service, ctx, index=i, is_default_server=(i == 0)))
 
     payload = [_directive("http", block=http_block)]
     if streams:
@@ -121,7 +121,7 @@ def _allow_cidr_directives(allow_cidrs: list[str] | None) -> list[dict]:
     return directives
 
 
-def _allow_cn_gate_directives(service: dict) -> list[dict]:
+def _allow_cn_gate_directives(service: dict, index: int) -> list[dict]:
     allow_cn = (service.get("client_cert") or {}).get("allow_cn")
     if not allow_cn:
         return []
@@ -132,25 +132,39 @@ def _allow_cn_gate_directives(service: dict) -> list[dict]:
     # every kind (not just proxy, where a location-scoped `if` would also
     # work) -- keeping enforcement kind-agnostic instead of only wiring it
     # into one location handler.
-    map_var = f"${_allow_cn_map_name(service)}"
+    map_var = f"${_allow_cn_map_name(service, index)}"
     return [_directive("if", args=[map_var, "=", "0"], block=[_directive("return", args=["403"])])]
 
 
-def _allow_cn_map_name(service: dict) -> str:
-    return f"allow_{_safe_ident(service.get('name', 'service'))}_cn"
+def _allow_cn_map_name(service: dict, index: int) -> str:
+    # Prefixing with the service's position in the catalog guarantees
+    # uniqueness regardless of name collisions after sanitization
+    # (`_safe_ident` collapses every non-alphanumeric character to `_`, so
+    # e.g. "web-app" and "web.app", or two services that both omit `name`,
+    # would otherwise sanitize to the same identifier and redeclare the
+    # same nginx map variable -- either a config the assembled nginx
+    # rejects outright, or a silent CN-allowlist mixup between vhosts).
+    return f"allow_{index}_{_safe_ident(service.get('name', 'service'))}_cn"
 
 
-def _build_allow_cn_map(service: dict) -> dict | None:
+def _build_allow_cn_map(service: dict, index: int) -> dict | None:
     allow_cn = (service.get("client_cert") or {}).get("allow_cn")
     if not allow_cn:
         return None
     map_block = [_directive("default", args=["0"])]
     for cn in allow_cn:
-        map_block.append(_directive(f"~^CN={_escape_map_pattern(cn)}(,|$)", args=["1"]))
-    return _directive("map", args=["$ssl_client_s_dn", f"${_allow_cn_map_name(service)}"], block=map_block)
+        # $ssl_client_s_dn is RFC 2253 form with RDNs printed in *reverse*
+        # of the certificate subject's order (OpenSSL's XN_FLAG_DN_REV),
+        # so CN is not reliably the first (or last) attribute -- anchoring
+        # the pattern at the string start (`^CN=...`) misses any subject
+        # where CN isn't emitted first. Match CN as any comma-delimited
+        # RDN instead: preceded by start-of-string or a comma, followed by
+        # a comma or end-of-string.
+        map_block.append(_directive(f"~(^|,)CN={_escape_map_pattern(cn)}(,|$)", args=["1"]))
+    return _directive("map", args=["$ssl_client_s_dn", f"${_allow_cn_map_name(service, index)}"], block=map_block)
 
 
-def _build_server_block(service: dict, ctx: RenderContext, *, is_default_server: bool = False) -> dict:
+def _build_server_block(service: dict, ctx: RenderContext, *, index: int, is_default_server: bool = False) -> dict:
     # static's content is a set of sibling server-level location/root
     # blocks (an exact-match "/", the general root, an optional listing
     # location); proxy's content is a single `location / { proxy_pass ...; }`.
@@ -184,7 +198,7 @@ def _build_server_block(service: dict, ctx: RenderContext, *, is_default_server:
         _directive("client_max_body_size", args=[ctx.client_max_body_size]),
         *_allow_cidr_directives(service.get("allow_cidrs")),
         *_client_cert_directives(service),
-        *_allow_cn_gate_directives(service),
+        *_allow_cn_gate_directives(service, index),
     ]
     if service.get("gzip") is False:
         block.append(_directive("gzip", args=["off"]))
@@ -206,12 +220,29 @@ def _build_stream_server_block(stream: dict) -> dict:
 
 def _client_cert_directives(service: dict) -> list[dict]:
     client_cert = service.get("client_cert")
-    if not client_cert or client_cert.get("mode", "off") == "off":
+    if not client_cert:
         return []
-    mode = _SSL_VERIFY_CLIENT_MODES[client_cert["mode"]]
+    mode = client_cert.get("mode", "off")
+    # ca_bundle/crl/allow_cn only ever do anything once ssl_verify_client is
+    # emitted -- declaring any of them while mode is "off" (explicitly, or
+    # by omission, since "off" is the documented default) is never a valid
+    # configuration and is a strong signal of a typo (a missing/mis-cased
+    # `mode` key, or a misspelled `client_cert`/`clientCert` outer key)
+    # rather than an intentional staged-mTLS state, so fail loud instead of
+    # silently rendering a public vhost with no client-cert gate at all.
+    has_cert_material = any(client_cert.get(k) for k in ("ca_bundle", "crl", "allow_cn"))
+    if mode == "off":
+        if has_cert_material:
+            raise ValueError(
+                "client_cert.mode is 'off' (or missing) but ca_bundle/crl/allow_cn is set for service "
+                f"{service.get('name', '<unnamed>')!r} -- set mode to 'optional' or 'required', or drop them"
+            )
+        return []
+    if mode not in _SSL_VERIFY_CLIENT_MODES:
+        raise ValueError(f"unsupported client_cert.mode {mode!r} for service {service.get('name', '<unnamed>')!r}")
     directives = [
         _directive("ssl_client_certificate", args=[client_cert["ca_bundle"]]),
-        _directive("ssl_verify_client", args=[mode]),
+        _directive("ssl_verify_client", args=[_SSL_VERIFY_CLIENT_MODES[mode]]),
     ]
     if client_cert.get("verify_depth") is not None:
         directives.append(_directive("ssl_verify_depth", args=[str(client_cert["verify_depth"])]))
