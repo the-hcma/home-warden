@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Run Gixy-Next (https://gixy.io) static security analysis against an nginx
+# config. Complements `nginx -t`: syntax-valid configs can still disclose the
+# server version, leak headers, or expose an SSRF via an unescaped proxy_pass
+# variable — Gixy-Next catches that class of finding, nginx -t does not.
+#
+# Env:
+#   HOME_NGINX_CONF  path to the nginx.conf to lint; default: this repo's own
+#                     nginx/nginx.conf (a CI-only syntax fixture — see
+#                     docs/architecture-socket-activation.md). Point this at
+#                     thehcma/home's nginx/server/nginx.conf to lint the
+#                     actually-served config on the service host.
+#   GIXY_LEVEL       minimum severity to report (LOW, MEDIUM, or HIGH,
+#                     matching gixy's -l/-ll/-lll); default: LOW (report
+#                     everything).
+#
+# Requires the `lint` uv dependency group (`uv sync --group lint`); this
+# script invokes it automatically via `uv run --group lint`.
+#
+# Usage:
+#   ./scripts/nginx-security-lint
+#   ./scripts/nginx-security-lint --verbose
+#   HOME_NGINX_CONF=/path/to/nginx.conf ./scripts/nginx-security-lint
+#
+# Exit:
+#   0 — no findings at or above GIXY_LEVEL
+#   1 — findings reported (fail-closed by design: see the Gixy-Next severity
+#       decision in AGENTS.md — this blocks CI/pre-pr-checks like a failed
+#       nginx -t, it is not advisory-only)
+#   2 — usage / missing conf / missing uv
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly script_dir
+repo_dir="$(cd "${script_dir}/.." && pwd)"
+readonly repo_dir
+
+verbose=0
+
+usage() {
+  cat <<'EOF'
+Usage: nginx-security-lint [--verbose] [-h|--help]
+
+Run Gixy-Next against HOME_NGINX_CONF (default: this repo's nginx/nginx.conf).
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -v | --verbose) verbose=1 ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+conf_path="${HOME_NGINX_CONF:-${repo_dir}/nginx/nginx.conf}"
+level="${GIXY_LEVEL:-LOW}"
+
+if [[ ! -f "${conf_path}" ]]; then
+  echo "nginx-security-lint: conf not found: ${conf_path}" >&2
+  exit 2
+fi
+
+# Resolve to an absolute path *before* the `cd "${repo_dir}"` below -- a
+# relative HOME_NGINX_CONF must stay anchored to the caller's cwd (e.g.
+# running from thehcma/home's checkout with HOME_NGINX_CONF=nginx/server/
+# nginx.conf), not silently re-resolve against this repo's root afterward.
+conf_path="$(cd "$(dirname "${conf_path}")" && pwd)/$(basename "${conf_path}")"
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "nginx-security-lint: uv not found — install uv, then 'uv sync --group lint'" >&2
+  exit 2
+fi
+
+level_flag=""
+case "${level}" in
+  LOW) level_flag="-l" ;;
+  MEDIUM) level_flag="-ll" ;;
+  HIGH) level_flag="-lll" ;;
+  *)
+    echo "nginx-security-lint: invalid GIXY_LEVEL '${level}' (want LOW, MEDIUM, or HIGH)" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "${verbose}" -eq 1 ]]; then
+  echo "nginx-security-lint: uv run --group lint gixy ${level_flag} ${conf_path}" >&2
+fi
+
+cd "${repo_dir}"
+exec uv run --group lint gixy "${level_flag}" "${conf_path}"
