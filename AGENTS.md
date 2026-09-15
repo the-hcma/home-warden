@@ -191,6 +191,41 @@ device-manager machinery here).
 
 ---
 
+## Nginx Security Lint (Gixy-Next)
+
+[Gixy-Next](https://gixy.io) (PyPI: `Gixy-Next`, the maintained fork of
+Yandex's unmaintained `gixy`) statically analyzes nginx config for security
+misconfigurations (SSRF via unescaped `proxy_pass` variables, `server_tokens`
+version disclosure, ReDoS-prone regexes, `add_header`/`Content-Type`
+footguns, …) that `nginx -t` does not catch — `nginx -t` only validates
+syntax. See [#50](https://github.com/the-hcma/home-warden/issues/50).
+
+- **Dependency**: pinned in a dedicated `lint` uv dependency group (not
+  `dev`) — it's an nginx-specific static analyzer, not part of this repo's
+  general Python lint/format/type-check chain. `uv sync --group lint`
+  installs it (in addition to the default `dev` group).
+- **Entry point**: `scripts/nginx-security-lint` — shells out to
+  `uv run --group lint gixy`, defaulting to this repo's own
+  `nginx/nginx.conf` (the CI-only syntax fixture). Point `HOME_NGINX_CONF`
+  at `thehcma/home`'s `nginx/server/nginx.conf` to lint the actually-served
+  config on the service host.
+- **Severity handling: fail-closed.** Unlike an advisory-only lint, a
+  Gixy-Next finding at or above `GIXY_LEVEL` (default `LOW`, i.e. every
+  finding) **blocks** — the same way a failed `nginx -t` blocks
+  `scripts/setup-service`/`scripts/nginx-test-and-reload` and CI. This was
+  a deliberate choice made once the ruleset's false-positive rate against
+  this repo's actual conf was known to be zero (the two findings it did
+  raise here — `server_tokens` disclosure, `add_header Content-Type`
+  instead of `default_type` — were real, fixed outright, not suppressed).
+  Revisit to advisory-only if a future finding on the real served config
+  turns out to be a persistent false positive with no clean fix.
+- **CI wiring**: `.github/ci/nginx-security-lint`, run as its own
+  `nginx-security-lint` job in `.github/workflows/ci.yml` (parallel to
+  `python-static`/`python-test`, not folded into either — it has its own
+  uv dependency group and a materially different failure mode).
+
+---
+
 ## Development
 
 ```bash
@@ -243,6 +278,7 @@ CI lives in `.github/workflows/ci.yml`:
 - Secret scan (`.github/ci/secret-scan`)
 - Validate (required files + optional `nginx -t`)
 - Python (`.github/ci/python-static` [ruff + pyright] + `.github/ci/pytest`, via `uv`)
+- Nginx security lint (`.github/ci/nginx-security-lint` — Gixy-Next, see above)
 
 No PR may be merged with a failing CI check.
 
@@ -255,6 +291,8 @@ No PR may be merged with a failing CI check.
       --check app config tests scripts`, `uv run pytest`, and `uv run
       pyright` pass on changed Python
 - [ ] `nginx -t` when config changed (local nginx 1.28.x preferred)
+- [ ] `./scripts/nginx-security-lint` clean when `nginx/nginx.conf` (or
+      `HOME_NGINX_CONF`) changed
 - [ ] No certs, keys, or secrets in the diff
 - [ ] Commit message follows Conventional Commits
 - [ ] Unit templates keep `@@REPO_DIR@@` / `@@OWNER@@` placeholders until setup expands them

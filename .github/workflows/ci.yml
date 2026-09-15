@@ -156,6 +156,20 @@ jobs:
       - name: Pytest
         run: bash .github/ci/pytest
 
+  nginx-security-lint:
+    name: Gixy-Next nginx security lint
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: latest
+      - name: Gixy-Next nginx security lint
+        run: bash .github/ci/nginx-security-lint
+
   secret-scan:
     name: Secret Scan
     needs: guard
