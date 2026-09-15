@@ -433,6 +433,38 @@ def test_ipv4_upstream_host_is_not_bracketed(tmp_path: Path) -> None:
     assert "[10.0.0.5]" not in rendered
 
 
+def test_non_root_upstream_path_is_preserved_in_proxy_pass(tmp_path: Path) -> None:
+    # Regression: every other proxy fixture in this suite uses the
+    # upstream's default path ("/"), so a bug dropping or mangling a
+    # catalog-declared non-root path would leave the suite green while
+    # silently routing every request to the backend's root instead of
+    # the operator's intended sub-path.
+    catalog = {
+        "services": [
+            _proxy_service(upstream={"scheme": "http", "host": "backend.internal", "port": 8080, "path": "/api/v1"})
+        ]
+    }
+    rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
+    assert "proxy_pass http://backend.internal:8080/api/v1;" in rendered
+    _parse_ok(rendered, tmp_path)
+
+
+def test_render_context_ssl_protocols_and_client_max_body_size_are_applied(tmp_path: Path) -> None:
+    # Regression: every other render test in this suite uses the default
+    # RenderContext, so a bug ignoring caller-supplied ssl_protocols or
+    # client_max_body_size (e.g. hardcoding the module defaults) would
+    # leave the whole suite green while silently overriding an operator's
+    # explicit configuration.
+    catalog = {"services": [_proxy_service()]}
+    rendered = render_catalog(
+        catalog,
+        RenderContext(certs_live_dir=tmp_path, ssl_protocols="TLSv1.3", client_max_body_size="25m"),
+    )
+    assert "ssl_protocols TLSv1.3;" in rendered
+    assert "client_max_body_size 25m;" in rendered
+    _parse_ok(rendered, tmp_path)
+
+
 def test_static_service_gets_exact_match_root_before_general_location(tmp_path: Path) -> None:
     catalog = {
         "services": [
