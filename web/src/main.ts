@@ -13,7 +13,16 @@ const appPath = "/";
 const loginPath = "/login";
 
 function mountAppShell(root: HTMLElement): void {
-  void renderAppShell(root);
+  renderAppShell(root).catch((error: unknown) => {
+    // readSession()/logout() throw on a 500/503 or a dropped connection --
+    // without this catch the rejection was silently swallowed, leaving the
+    // operator staring at an empty #app with no message and no redirect.
+    console.error("home-warden: failed to render app shell", error);
+    const message = error instanceof Error ? error.message : "Failed to load session";
+    const errorNode = document.createElement("p");
+    errorNode.textContent = message;
+    root.replaceChildren(errorNode);
+  });
 }
 
 function mountLoginForm(root: HTMLElement): void {
@@ -108,10 +117,16 @@ async function login(username: string, password: string): Promise<void> {
 }
 
 async function logout(): Promise<void> {
-  await fetch("/auth/logout", {
+  const response = await fetch("/auth/logout", {
     credentials: "same-origin",
     method: "POST",
   });
+  if (!response.ok) {
+    // Don't navigate to /login on a failed logout -- the session cookie is
+    // still valid server-side, so /login would just 303 straight back to
+    // "/" with no indication anything went wrong.
+    throw new Error(await errorMessage(response));
+  }
   window.location.assign(loginPath);
 }
 
@@ -125,13 +140,25 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
   const heading = document.createElement("h1");
   const logoutButton = document.createElement("button");
   const summary = document.createElement("p");
+  let logoutErrorNode: HTMLParagraphElement | null = null;
 
   heading.textContent = "home-warden";
   logoutButton.textContent = "Log out";
   logoutButton.type = "button";
   summary.textContent = `Signed in as ${session.username}.`;
   logoutButton.addEventListener("click", () => {
-    void logout();
+    logoutButton.disabled = true;
+    logout()
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : "Log out failed";
+        logoutErrorNode?.remove();
+        logoutErrorNode = document.createElement("p");
+        logoutErrorNode.textContent = message;
+        root.append(logoutErrorNode);
+      })
+      .finally(() => {
+        logoutButton.disabled = false;
+      });
   });
 
   root.replaceChildren(heading, summary, logoutButton);

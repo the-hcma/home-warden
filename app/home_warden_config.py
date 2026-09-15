@@ -51,7 +51,7 @@ def load_config(path: Path | None = None) -> HomeWardenConfig:
     try:
         with resolved_path.open("rb") as config_file:
             data = tomllib.load(config_file)
-    except (OSError, tomllib.TOMLDecodeError):
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
         return HomeWardenConfig()
     if not isinstance(data, dict):
         return HomeWardenConfig()

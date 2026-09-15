@@ -64,6 +64,18 @@ def test_protected_route_succeeds_with_valid_session_cookie() -> None:
     assert session.json() == {"authenticated": True, "username": "alice"}
 
 
+def test_login_backend_runtime_error_returns_503() -> None:
+    def _unavailable(username: str, password: str) -> bool:
+        raise RuntimeError("python-pam is unavailable")
+
+    client = TestClient(
+        create_app(authenticate_user=_unavailable, session_secret="test-session-secret"),
+        base_url="https://testserver",
+    )
+    resp = client.post("/auth/login", json={"username": "alice", "password": "irrelevant"})
+    assert resp.status_code == HTTPStatus.SERVICE_UNAVAILABLE
+
+
 def test_successful_login_sets_session_cookie() -> None:
     client = make_client()
     resp = client.post("/auth/login", json={"username": "alice", "password": "correct horse battery staple"})

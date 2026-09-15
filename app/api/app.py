@@ -13,7 +13,7 @@ from collections.abc import Callable
 from http import HTTPStatus
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
@@ -26,6 +26,7 @@ from app.home_warden_auth import (
     authenticate_with_pam,
     ensure_session_secret,
     get_session_username,
+    require_session,
 )
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -47,7 +48,11 @@ def create_app(
     )
     app.state.authenticate_user = authenticate_user or authenticate_with_pam
     app.include_router(auth_router)
-    app.include_router(catalog_health_router)
+    # #68's self-catalog vhost proxies every path on the configured FQDN to
+    # this app, so a route that used to only matter on a trusted loopback
+    # call (health/cert/DNS details, incl. exception text) must not be
+    # reachable by an unauthenticated visitor once that vhost exists.
+    app.include_router(catalog_health_router, dependencies=[Depends(require_session)])
     # dist/ (esbuild output, web/build.mjs) is gitignored -- StaticFiles is
     # instantiated lazily via a mount so a missing dist/ at import time (e.g.
     # `web/` build never run) doesn't crash app startup, only 404s /static/.

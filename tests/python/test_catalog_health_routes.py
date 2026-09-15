@@ -13,7 +13,25 @@ from app.catalog_checks import CheckResult
 
 
 def make_client() -> TestClient:
-    return TestClient(create_app(session_secret="test-session-secret"), base_url="https://testserver")
+    def _allow_all(username: str, password: str) -> bool:
+        return True
+
+    client = TestClient(
+        create_app(authenticate_user=_allow_all, session_secret="test-session-secret"),
+        base_url="https://testserver",
+    )
+    # /health/catalog is proxied on #68's self-catalog vhost like any other
+    # route, so it now requires a session the same as / -- log in once here
+    # so every test below stays focused on the health-check logic itself.
+    login = client.post("/auth/login", json={"username": "tester", "password": "irrelevant"})
+    assert login.status_code == 200
+    return client
+
+
+def test_health_catalog_requires_session() -> None:
+    client = TestClient(create_app(session_secret="test-session-secret"), base_url="https://testserver")
+    resp = client.get("/health/catalog")
+    assert resp.status_code == 401
 
 
 def test_health_catalog_host_guard_refused() -> None:

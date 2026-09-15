@@ -6,11 +6,11 @@ from collections.abc import Callable
 from http import HTTPStatus
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
 
-from app.home_warden_auth import get_session_username
+from app.home_warden_auth import get_session_username, require_session
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -24,10 +24,7 @@ router = APIRouter(tags=["auth"])
 
 
 @router.get("/auth/session")
-def get_session(request: Request) -> dict[str, str | bool]:
-    username = get_session_username(request)
-    if username is None:
-        raise HTTPException(status_code=HTTPStatus.UNAUTHORIZED, detail="authentication required")
+def get_session(username: str = Depends(require_session)) -> dict[str, str | bool]:
     return {"authenticated": True, "username": username}
 
 

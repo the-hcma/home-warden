@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import secrets
+from http import HTTPStatus
 from pathlib import Path
 
+from fastapi import HTTPException
 from starlette.requests import Request
 
 from app.home_warden_config import config_path
@@ -36,8 +39,22 @@ def ensure_session_secret(path: Path | None = None) -> str:
     secret = secrets.token_urlsafe(48)
     try:
         resolved_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        resolved_path.write_text(f"{secret}\n", encoding="utf-8")
-        resolved_path.chmod(0o600)
+        # O_EXCL + mode=0o600 on open (not write-then-chmod) so the key is
+        # never briefly world-readable under the process umask, and so a
+        # concurrent writer loses the race cleanly (FileExistsError) instead
+        # of silently truncating the other's secret.
+        fd = os.open(resolved_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            os.write(fd, f"{secret}\n".encode("utf-8"))
+        finally:
+            os.close(fd)
+    except FileExistsError:
+        # Another process won the race and already wrote a secret -- use it
+        # rather than keep our own, so every process signs with the same key.
+        try:
+            return resolved_path.read_text(encoding="utf-8").strip() or secret
+        except OSError:
+            return secret
     except OSError:
         return secret
     return secret
@@ -48,6 +65,20 @@ def get_session_username(request: Request) -> str | None:
     if isinstance(username, str) and username:
         return username
     return None
+
+
+def require_session(request: Request) -> str:
+    """FastAPI dependency: 401s any route that isn't `/`/`/login` unless a
+    valid session cookie is present. Needed because #68's self-catalog vhost
+    (build_web_ui_catalog_service) proxies *every* path on the configured
+    FQDN to this app -- without this, routes like /health/catalog would be
+    reachable by anyone who can resolve that hostname, not just an
+    authenticated operator.
+    """
+    username = get_session_username(request)
+    if username is None:
+        raise HTTPException(status_code=HTTPStatus.UNAUTHORIZED, detail="authentication required")
+    return username
 
 
 def session_secret_path(path: Path | None = None) -> Path:
