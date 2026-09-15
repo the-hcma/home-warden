@@ -23,6 +23,7 @@ from pathlib import Path
 from app.catalog_checks import load_catalog
 from app.catalog_health_settings import certs_live_dir, services_json_path
 from app.catalog_render import DEFAULT_CLIENT_MAX_BODY_SIZE, DEFAULT_SSL_PROTOCOLS, RenderContext, render_catalog
+from app.home_warden_config import HomeWardenConfig, build_web_ui_catalog_service, config_path, load_config
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -43,9 +44,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_arg_parser().parse_args()
+    config_file_path = config_path()
+    config = load_config(config_file_path)
 
     try:
-        catalog = load_catalog(args.services_json)
+        catalog = _catalog_with_web_ui_service(load_catalog(args.services_json), config)
         ctx = RenderContext(
             certs_live_dir=args.certs_live_dir,
             client_max_body_size=args.client_max_body_size,
@@ -68,11 +71,28 @@ def main() -> int:
         print(f"render-catalog: malformed catalog: {e!r}", file=sys.stderr)
         return 2
 
+    if config_file_path.is_file() and not config.fqdn:
+        print(
+            f"render-catalog: web UI disabled: set fqdn in {config_file_path} to enable it",
+            file=sys.stderr,
+        )
+
     if args.output:
         args.output.write_text(rendered)
     else:
         print(rendered, end="")
     return 0
+
+
+def _catalog_with_web_ui_service(catalog: dict, config: HomeWardenConfig) -> dict:
+    web_ui_service = build_web_ui_catalog_service(config)
+    if web_ui_service is None:
+        return catalog
+    merged_catalog = dict(catalog)
+    services = list(catalog.get("services") or [])
+    services.append(web_ui_service)
+    merged_catalog["services"] = services
+    return merged_catalog
 
 
 if __name__ == "__main__":

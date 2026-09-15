@@ -45,13 +45,48 @@ def test_cli_malformed_catalog_exits_2_no_traceback(tmp_path: Path, monkeypatch,
     assert "Traceback" not in err
 
 
+def test_cli_prints_disabled_message_when_config_exists_without_fqdn(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    services_json = tmp_path / "services.json"
+    services_json.write_text(
+        '{"services": [{"name": "s", "server_name": "s.example.com", "kind": "proxy", '
+        '"upstream": {"host": "backend.internal", "port": 8080}}]}'
+    )
+    config_dir = tmp_path / "xdg"
+    config_file = config_dir / "home-warden" / "config.toml"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text('fqdn = ""\n')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_dir))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "render-catalog",
+            "--services-json",
+            str(services_json),
+            "--certs-live-dir",
+            str(tmp_path / "certs"),
+        ],
+    )
+    assert main() == 0
+    assert f"set fqdn in {config_file} to enable it" in capsys.readouterr().err
+
+
 def test_cli_renders_to_output_file(tmp_path: Path, monkeypatch) -> None:
     services_json = tmp_path / "services.json"
     services_json.write_text(
         '{"services": [{"name": "s", "server_name": "s.example.com", "kind": "proxy", '
         '"upstream": {"host": "backend.internal", "port": 8080}}]}'
     )
+    config_dir = tmp_path / "xdg"
+    config_file = config_dir / "home-warden" / "config.toml"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text('fqdn = "warden.example.com"\n')
     output = tmp_path / "rendered.conf"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_dir))
     monkeypatch.setattr(
         sys,
         "argv",
@@ -69,6 +104,8 @@ def test_cli_renders_to_output_file(tmp_path: Path, monkeypatch) -> None:
     rendered = output.read_text()
     assert "server_name s.example.com;" in rendered
     assert "proxy_pass http://backend.internal:8080/;" in rendered
+    assert "server_name warden.example.com;" in rendered
+    assert "proxy_pass http://127.0.0.1:8090/;" in rendered
 
 
 def test_cli_prints_to_stdout_by_default(tmp_path: Path, monkeypatch, capsys) -> None:

@@ -28,6 +28,9 @@ dependencies = [
     "crossplane>=0.5.8",
     "cryptography>=50.0.1",
     "fastapi>=0.141.1",
+    "itsdangerous>=2.2.0",
+    "python-pam>=2.0.2",
+    "six>=1.17.0",
     "uvicorn[standard]>=0.52.4",
 ]
 
