@@ -184,10 +184,14 @@ jobs:
       - name: Install nginx
         env:
           DEBIAN_FRONTEND: noninteractive
+        # nginx-full (not the bare nginx metapackage) -- Debian/Ubuntu's
+        # default nginx build omits the stream module, and the fixture
+        # catalog below includes a streams entry (nginx -t fails with
+        # "unknown directive stream" against the plain nginx package).
         run: |
           set -euo pipefail
           sudo timeout 20 apt-get update -qq
-          sudo timeout 30 apt-get install -y -qq -o DPkg::Lock::Timeout=30 nginx
+          sudo timeout 30 apt-get install -y -qq -o DPkg::Lock::Timeout=30 nginx-full
       - name: Render catalog fixture + nginx -t + Gixy-Next
         run: bash .github/ci/catalog-render-validate
 
