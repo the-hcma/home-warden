@@ -223,6 +223,52 @@ syntax. See [#50](https://github.com/the-hcma/home-warden/issues/50).
   `nginx-security-lint` job in `.github/workflows/ci.yml` (parallel to
   `python-static`/`python-test`, not folded into either — it has its own
   uv dependency group and a materially different failure mode).
+- **`GIXY_SKIPS`**: comma-separated Gixy-Next test names to pass through
+  to `--skips`, for a narrow, *documented* exception only — not a way to
+  silence a finding without a reason. Empty by default (this repo's own
+  `nginx/nginx.conf` fixture runs with zero skips, zero findings). The one
+  place this repo does set it is `.github/ci/catalog-render-validate` (see
+  the Service Catalog Renderer section below), which accepts exactly two
+  findings against the renderer's realistic output: `proxy_buffering_off`
+  (inherent to websocket support — a persistent connection can't be
+  buffered) and `proxy_pass_normalized` (every `proxy_pass` the renderer
+  emits has a fixed, catalog-declared path behind a whole-vhost
+  `location /` — the schema's documented behavior, not an accident).
+
+---
+
+## Service Catalog Renderer
+
+`app/catalog_render.py` (CLI: `render-catalog`, wrapper:
+`scripts/render-catalog`) renders a `services.json` catalog into nginx
+config via [crossplane](https://github.com/nginxinc/crossplane), so the
+catalog — not hand-edited nginx — is the source of truth for served
+vhosts. See [#54](https://github.com/the-hcma/home-warden/issues/54).
+
+- **Scope**: emits only `http {}` (maps + one `server` per proxy/static
+  service) and, when the catalog has any, `stream {}` — not a full
+  standalone `nginx.conf`. `worker_processes`/`events`/`pid`/`error_log`
+  live in the served config's own skeleton (outside this repo), which
+  `include`s the rendered output.
+- **Shared template settings** (`RenderContext`: `client_max_body_size`,
+  `server_tokens_off`, `ssl_protocols`) are deliberately *not* part of the
+  catalog schema — a catalog entry describes what to serve, `RenderContext`
+  describes how every vhost is secured/tuned. `server_tokens_off` defaults
+  to `True` (the Gixy-Next `version_disclosure` fix from the Nginx
+  Security Lint section above, applied once at the `http` level here).
+- **`default_server`**: the first service in the catalog gets
+  `listen 443 ssl default_server;` — with multiple https vhosts and no
+  explicit default, nginx silently falls back to definition order anyway;
+  this makes that choice an explicit, documented renderer property
+  instead of an accident of catalog ordering (also resolves Gixy-Next's
+  `default_server_flag`).
+- **Validation**: `.github/ci/catalog-render-validate` renders a
+  dedicated CI-only fixture catalog (not `services.json.example`, whose
+  paths are intentionally fake per `.cursor/rules/no-private-infra.mdc`)
+  with real generated self-signed certs/CA/CRL, wraps it in a minimal
+  skeleton, and runs both `nginx -t` and `scripts/nginx-security-lint`
+  (with the two `GIXY_SKIPS` above) against the assembled config. Wired as
+  its own `catalog-render-validate` CI job.
 
 ---
 
@@ -279,6 +325,8 @@ CI lives in `.github/workflows/ci.yml`:
 - Validate (required files + optional `nginx -t`)
 - Python (`.github/ci/python-static` [ruff + pyright] + `.github/ci/pytest`, via `uv`)
 - Nginx security lint (`.github/ci/nginx-security-lint` — Gixy-Next, see above)
+- Catalog render validate (`.github/ci/catalog-render-validate` — renders a
+  fixture catalog, runs `nginx -t` + Gixy-Next against it, see above)
 
 No PR may be merged with a failing CI check.
 
@@ -293,6 +341,8 @@ No PR may be merged with a failing CI check.
 - [ ] `nginx -t` when config changed (local nginx 1.28.x preferred)
 - [ ] `./scripts/nginx-security-lint` clean when `nginx/nginx.conf` (or
       `HOME_NGINX_CONF`) changed
+- [ ] `uv run render-catalog` output still round-trips through
+      `crossplane.parse()` clean when `app/catalog_render.py` changed
 - [ ] No certs, keys, or secrets in the diff
 - [ ] Commit message follows Conventional Commits
 - [ ] Unit templates keep `@@REPO_DIR@@` / `@@OWNER@@` placeholders until setup expands them

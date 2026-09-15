@@ -25,6 +25,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
+    "crossplane>=0.5.8",
     "cryptography>=50.0.1",
     "fastapi>=0.141.1",
     "uvicorn[standard]>=0.52.4",
@@ -32,6 +33,7 @@ dependencies = [
 
 [project.scripts]
 catalog-health-check = "app.catalog_health_cli:main"
+render-catalog = "app.catalog_render_cli:main"
 
 [project.urls]
 Homepage = "https://github.com/the-hcma/home-warden"

@@ -170,6 +170,27 @@ jobs:
       - name: Gixy-Next nginx security lint
         run: bash .github/ci/nginx-security-lint
 
+  catalog-render-validate:
+    name: Catalog render validate
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: latest
+      - name: Install nginx
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          sudo timeout 20 apt-get update -qq
+          sudo timeout 30 apt-get install -y -qq -o DPkg::Lock::Timeout=30 nginx
+      - name: Render catalog fixture + nginx -t + Gixy-Next
+        run: bash .github/ci/catalog-render-validate
+
   secret-scan:
     name: Secret Scan
     needs: guard
