@@ -151,7 +151,7 @@ events {
 include ${rendered};
 EOF
 
-nginx -t -c "${full_conf}"
+sudo nginx -t -c "${full_conf}"
 # proxy_buffering_off: inherent to websocket support (a persistent
 # connection can't be buffered) -- not a footgun in this catalog's use.
 # proxy_pass_normalized: every proxy_pass this renderer emits has a fixed,
