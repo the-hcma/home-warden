@@ -464,6 +464,26 @@ def test_hostname_stream_upstream_is_not_bracketed(tmp_path: Path) -> None:
     _parse_ok(rendered, tmp_path)
 
 
+def test_multiple_streams_all_render(tmp_path: Path) -> None:
+    # Regression: every stream fixture in this suite (until now) declared
+    # exactly one stream, so a bug truncating the streams list comprehension
+    # to its first entry would leave the whole suite green while every
+    # catalog with more than one stream service silently lost all but the
+    # first from the rendered config.
+    catalog = {
+        "streams": [
+            {"name": "mqtt", "listen_port": 1883, "upstream": {"host": "mqtt.internal", "port": 1883}},
+            {"name": "syslog", "listen_port": 514, "upstream": {"host": "syslog.internal", "port": 5140}},
+        ],
+    }
+    rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
+    assert "proxy_pass mqtt.internal:1883;" in rendered
+    assert "proxy_pass syslog.internal:5140;" in rendered
+    assert rendered.count("listen 1883;") == 1
+    assert rendered.count("listen 514;") == 1
+    _parse_ok(rendered, tmp_path)
+
+
 def test_ipv6_upstream_host_gets_bracket_notation(tmp_path: Path) -> None:
     catalog = {"services": [_proxy_service(upstream={"scheme": "http", "host": "2001:db8::1", "port": 8080})]}
     rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
