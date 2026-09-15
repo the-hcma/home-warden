@@ -1,0 +1,204 @@
+"""Tests for app.api.catalog_crud_routes."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.api.app import create_app
+from app.catalog_crud import GixyResult, NginxTestResult, PreviewResult
+
+
+def _allow_all(username: str, password: str) -> bool:
+    return True
+
+
+def _preview_result(*, can_apply: bool = True) -> PreviewResult:
+    return PreviewResult(
+        can_apply=can_apply,
+        diff="--- current\n+++ candidate\n",
+        gixy=GixyResult(exit_code=0, output="", status="ok"),
+        nginx_test=NginxTestResult(
+            exit_code=0 if can_apply else 1,
+            ok=can_apply,
+            output="syntax ok" if can_apply else "syntax failed",
+            status="ok" if can_apply else "failed",
+        ),
+        rendered="# rendered\n",
+    )
+
+
+def _service(name: str, **overrides) -> dict:
+    service = {
+        "kind": "proxy",
+        "name": name,
+        "server_name": f"{name}.example.com",
+        "upstream": {"host": "backend.example.internal", "path": "/", "port": 8080, "scheme": "http"},
+    }
+    service.update(overrides)
+    return service
+
+
+def make_client() -> TestClient:
+    client = TestClient(
+        create_app(authenticate_user=_allow_all, session_secret="test-session-secret"),
+        base_url="https://testserver",
+    )
+    login = client.post("/auth/login", json={"username": "tester", "password": "irrelevant"})
+    assert login.status_code == 200
+    return client
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        ("delete", "/catalog/services/example", None),
+        ("get", "/catalog/services", None),
+        ("post", "/catalog/apply", {"action": "delete", "name": "example"}),
+        ("post", "/catalog/preview", {"action": "delete", "name": "example"}),
+        ("post", "/catalog/services", {"service": _service("example")}),
+        ("put", "/catalog/services/example", {"service": {"server_name": "new.example.com"}}),
+    ],
+)
+def test_catalog_routes_require_session(method: str, path: str, payload: dict | None) -> None:
+    client = TestClient(create_app(session_secret="test-session-secret"), base_url="https://testserver")
+    request = getattr(client, method)
+    response = request(path, json=payload) if payload is not None else request(path)
+    assert response.status_code == 401
+
+
+def test_catalog_list_host_guard_refused() -> None:
+    client = make_client()
+    with patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=False):
+        response = client.get("/catalog/services")
+    assert response.status_code == 503
+
+
+def test_catalog_list_returns_services(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": [_service("one"), _service("two")]}), encoding="utf-8")
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_crud_routes.services_json_path", return_value=catalog_path),
+    ):
+        response = client.get("/catalog/services")
+
+    assert response.status_code == 200
+    assert [service["name"] for service in response.json()["services"]] == ["one", "two"]
+
+
+def test_catalog_get_returns_one_service(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": [_service("one")]}), encoding="utf-8")
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_crud_routes.services_json_path", return_value=catalog_path),
+    ):
+        response = client.get("/catalog/services/one")
+
+    assert response.status_code == 200
+    assert response.json()["service"]["server_name"] == "one.example.com"
+
+
+def test_catalog_preview_returns_structured_preview(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": [_service("one")]}), encoding="utf-8")
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_crud_routes.services_json_path", return_value=catalog_path),
+        patch("app.api.catalog_crud_routes.render_preview", return_value=_preview_result(can_apply=False)),
+    ):
+        response = client.post(
+            "/catalog/preview",
+            json={"action": "update", "name": "one", "service": {"server_name": "preview.example.com"}},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["can_apply"] is False
+    assert body["nginx_test"]["status"] == "failed"
+
+
+def test_catalog_apply_blocks_when_revalidation_fails(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": [_service("one")]}), encoding="utf-8")
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_crud_routes.services_json_path", return_value=catalog_path),
+        patch("app.api.catalog_crud_routes.render_preview", return_value=_preview_result(can_apply=False)),
+    ):
+        response = client.post(
+            "/catalog/apply",
+            json={"action": "update", "name": "one", "service": {"server_name": "blocked.example.com"}},
+        )
+
+    assert response.status_code == 409
+    assert json.loads(catalog_path.read_text(encoding="utf-8"))["services"][0]["server_name"] == "one.example.com"
+
+
+def test_catalog_apply_persists_the_mutation(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": [_service("one")]}), encoding="utf-8")
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_crud_routes.services_json_path", return_value=catalog_path),
+        patch("app.api.catalog_crud_routes.render_preview", return_value=_preview_result()),
+    ):
+        response = client.post(
+            "/catalog/apply",
+            json={"action": "update", "name": "one", "service": {"server_name": "updated.example.com"}},
+        )
+
+    assert response.status_code == 200
+    assert json.loads(catalog_path.read_text(encoding="utf-8"))["services"][0]["server_name"] == "updated.example.com"
+
+
+def test_catalog_update_preserves_hidden_fields(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(
+        json.dumps(
+            {
+                "services": [
+                    _service(
+                        "one",
+                        client_cert={"allow_cn": ["alice"], "ca_bundle": "/ca.pem", "mode": "required"},
+                        managed_by={"repo": "the-hcma/example"},
+                    )
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_crud_routes.services_json_path", return_value=catalog_path),
+        patch("app.api.catalog_crud_routes.render_preview", return_value=_preview_result()),
+    ):
+        response = client.put(
+            "/catalog/services/one",
+            json={"service": {"server_name": "updated.example.com", "upstream": {"port": 9090}}},
+        )
+
+    assert response.status_code == 200
+    persisted = json.loads(catalog_path.read_text(encoding="utf-8"))["services"][0]
+    assert persisted["server_name"] == "updated.example.com"
+    assert persisted["upstream"]["host"] == "backend.example.internal"
+    assert persisted["upstream"]["port"] == 9090
+    assert persisted["client_cert"]["allow_cn"] == ["alice"]
+    assert persisted["managed_by"]["repo"] == "the-hcma/example"

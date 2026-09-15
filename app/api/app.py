@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.api.auth_routes import router as auth_router
+from app.api.catalog_crud_routes import router as catalog_crud_router
 from app.api.catalog_health_routes import router as catalog_health_router
 from app.home_warden_auth import (
     SESSION_COOKIE_NAME,
@@ -52,6 +53,7 @@ def create_app(
     # this app, so a route that used to only matter on a trusted loopback
     # call (health/cert/DNS details, incl. exception text) must not be
     # reachable by an unauthenticated visitor once that vhost exists.
+    app.include_router(catalog_crud_router, dependencies=[Depends(require_session)])
     app.include_router(catalog_health_router, dependencies=[Depends(require_session)])
     # dist/ (esbuild output, web/build.mjs) is gitignored -- StaticFiles is
     # instantiated lazily via a mount so a missing dist/ at import time (e.g.
