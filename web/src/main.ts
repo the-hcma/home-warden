@@ -954,9 +954,17 @@ function mountHealthDashboard(root: HTMLElement): () => void {
   let disposed = false;
   let intervalId: number | null = null;
   let requestVersion = 0;
+  let requestInFlight = false;
 
   void refreshHealth("initial");
   intervalId = window.setInterval(() => {
+    // Skip this poll tick rather than starting an overlapping request: /health/catalog
+    // can legitimately take longer than healthPollIntervalMs (DNS checks retry with
+    // backoff), and letting requests pile up means every response keeps getting
+    // superseded before it lands, leaving the dashboard stuck on "Loading" forever.
+    if (requestInFlight) {
+      return;
+    }
     void refreshHealth("poll");
   }, healthPollIntervalMs);
   render();
@@ -975,6 +983,7 @@ function mountHealthDashboard(root: HTMLElement): () => void {
     const hasData = state.data !== null;
 
     requestVersion = currentRequest;
+    requestInFlight = true;
     state.error = null;
     state.loading = !hasData;
     state.refreshing = hasData;
@@ -994,6 +1003,10 @@ function mountHealthDashboard(root: HTMLElement): () => void {
       }
       const message = error instanceof Error ? error.message : "Failed to load health data";
       state.error = hasData && source !== "initial" ? `Refresh failed: ${message}` : message;
+    } finally {
+      if (currentRequest === requestVersion) {
+        requestInFlight = false;
+      }
     }
 
     if (disposed || currentRequest !== requestVersion) {
