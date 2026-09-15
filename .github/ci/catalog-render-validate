@@ -137,6 +137,11 @@ uv run render-catalog \
 
 full_conf="${work_dir}/nginx.conf"
 cat >"${full_conf}" <<EOF
+# modules-enabled/*.conf carries the load_module line for
+# libnginx-mod-stream (Debian/Ubuntu ships the stream module as a
+# dynamic module, not compiled in -- without this, nginx -t fails with
+# "unknown directive stream" even with nginx-full installed).
+include /etc/nginx/modules-enabled/*.conf;
 worker_processes 1;
 error_log ${work_dir}/nginx-error.log warn;
 pid ${work_dir}/nginx.pid;
