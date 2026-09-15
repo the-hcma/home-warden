@@ -78,7 +78,33 @@ def test_allow_cn_pattern_escapes_regex_metacharacters(tmp_path: Path) -> None:
     _parse_ok(rendered, tmp_path)
 
 
-def test_crl_renders_ssl_crl_directive(tmp_path: Path) -> None:
+def test_allow_cn_gate_applies_to_static_service(tmp_path: Path) -> None:
+    # Regression: the if-gate previously lived only in
+    # _proxy_location_directives, so a static + allow_cn service rendered
+    # the map but never enforced it (any cert signed by the CA passed).
+    catalog = {
+        "services": [
+            {
+                "name": "static-mtls",
+                "server_name": "static-mtls.example.com",
+                "kind": "static",
+                "static": {"root": "/srv/example"},
+                "client_cert": {"mode": "required", "ca_bundle": "/tmp/ca.pem", "allow_cn": ["alice"]},
+            }
+        ]
+    }
+    rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
+    assert "map $ssl_client_s_dn $allow_static_mtls_cn {" in rendered
+    assert "if ($allow_static_mtls_cn = 0) {" in rendered
+    assert "return 403;" in rendered
+    _parse_ok(rendered, tmp_path)
+
+
+def test_extra_location_blocks_raises_value_error(tmp_path: Path) -> None:
+    catalog = {"services": [_proxy_service(extra_location_blocks=["location /raw/ { return 200; }"])]}
+    with pytest.raises(ValueError, match="extra_location_blocks"):
+        render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
+
     catalog = {
         "services": [
             _proxy_service(

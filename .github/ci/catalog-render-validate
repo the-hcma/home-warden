@@ -118,7 +118,7 @@ cat >"${fixture_json}" <<EOF
         "ca_bundle": "${work_dir}/mtls/ca.pem",
         "verify_depth": 1,
         "crl": "${work_dir}/mtls/ca.crl",
-        "allow_cn": ["ci-render-validate test client"]
+        "allow_cn": ["ci-render-validate-test-client"]
       }
     }
   ],

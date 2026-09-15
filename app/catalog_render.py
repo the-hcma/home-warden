@@ -26,8 +26,9 @@ resolves each:
   #54's "lean on... a documented convention" option.
 - CRL: `client_cert.crl`, when present, becomes `ssl_crl <path>;`.
 - allow_cn: becomes a `map $ssl_client_s_dn $allow_<name>_cn { ... }` block
-  plus an `if` gate in the service's location -- exactly the mapping
-  services.json.example's notes already document.
+  plus an `if` gate applied at the server level -- kind-agnostic, so it
+  enforces the CN allowlist for static as well as proxy vhosts, not just
+  the location a particular kind happens to wrap its content in.
 - Legacy/redundant blocks: this renderer never emits anything beyond what
   the catalog + this module's fixed template describe -- no historical
   cruft carries over, and that's a deliberate, documented property of
@@ -120,6 +121,21 @@ def _allow_cidr_directives(allow_cidrs: list[str] | None) -> list[dict]:
     return directives
 
 
+def _allow_cn_gate_directives(service: dict) -> list[dict]:
+    allow_cn = (service.get("client_cert") or {}).get("allow_cn")
+    if not allow_cn:
+        return []
+    # crossplane's builder wraps `if` args in "(" ")" itself (see its
+    # `build()`): passing already-parenthesized args here would double
+    # them up and get the whole condition mis-quoted as one token. `if` is
+    # valid directly in `server` context, so this applies uniformly to
+    # every kind (not just proxy, where a location-scoped `if` would also
+    # work) -- keeping enforcement kind-agnostic instead of only wiring it
+    # into one location handler.
+    map_var = f"${_allow_cn_map_name(service)}"
+    return [_directive("if", args=[map_var, "=", "0"], block=[_directive("return", args=["403"])])]
+
+
 def _allow_cn_map_name(service: dict) -> str:
     return f"allow_{_safe_ident(service.get('name', 'service'))}_cn"
 
@@ -147,6 +163,15 @@ def _build_server_block(service: dict, ctx: RenderContext, *, is_default_server:
     else:
         raise ValueError(f"unsupported service kind {kind!r} for {service.get('name', '<unnamed>')!r}")
 
+    if service.get("extra_location_blocks"):
+        # Not yet implemented (see services.json.example note 16): fail
+        # loudly rather than silently drop the operator's declared
+        # location-block escape hatch (a rendered vhost with no trace of
+        # it looks correct while quietly missing the intended directives).
+        raise ValueError(
+            f"extra_location_blocks is not yet supported by the renderer (service {service.get('name', '<unnamed>')!r})"
+        )
+
     domain = service["server_name"]
     cert_dir = ctx.certs_live_dir / domain
     listen_args = ["443", "ssl", "default_server"] if is_default_server else ["443", "ssl"]
@@ -159,6 +184,7 @@ def _build_server_block(service: dict, ctx: RenderContext, *, is_default_server:
         _directive("client_max_body_size", args=[ctx.client_max_body_size]),
         *_allow_cidr_directives(service.get("allow_cidrs")),
         *_client_cert_directives(service),
+        *_allow_cn_gate_directives(service),
     ]
     if service.get("gzip") is False:
         block.append(_directive("gzip", args=["off"]))
@@ -211,14 +237,6 @@ def _escape_map_pattern(value: str) -> str:
 def _proxy_location_directives(service: dict, ctx: RenderContext) -> list[dict]:
     del ctx  # unused for now; kept for a consistent per-kind signature
     directives = [_directive("proxy_pass", args=[_upstream_url(service["upstream"])])]
-
-    allow_cn = (service.get("client_cert") or {}).get("allow_cn")
-    if allow_cn:
-        # crossplane's builder wraps `if` args in "(" ")" itself (see its
-        # `build()`): passing already-parenthesized args here would double
-        # them up and get the whole condition mis-quoted as one token.
-        map_var = f"${_allow_cn_map_name(service)}"
-        directives.append(_directive("if", args=[map_var, "=", "0"], block=[_directive("return", args=["403"])]))
 
     if service.get("forward_host_header"):
         directives.append(_directive("proxy_set_header", args=["Host", "$host"]))

@@ -56,6 +56,17 @@ def main() -> int:
     except (FileNotFoundError, ValueError) as e:
         print(f"render-catalog: {e}", file=sys.stderr)
         return 2
+    except (KeyError, TypeError) as e:
+        # load_catalog only validates the top-level services list and each
+        # entry's upstream object -- a catalog that's shape-valid JSON but
+        # missing/misusing a field the renderer itself requires (no
+        # server_name, static.root, an unknown client_cert.mode, a
+        # streams entry with no upstream, ...) surfaces here as a raw
+        # KeyError/TypeError instead of load_catalog's ValueError. Report
+        # it the same way rather than let a traceback escape the
+        # documented exit-2 contract.
+        print(f"render-catalog: malformed catalog: {e!r}", file=sys.stderr)
+        return 2
 
     if args.output:
         args.output.write_text(rendered)
