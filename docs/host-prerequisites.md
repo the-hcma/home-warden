@@ -227,6 +227,13 @@ systemctl status home-warden.socket home-warden.service \
 | `home-warden-healthcheck.timer` | Every minute → healthcheck | `systemctl list-timers home-warden-healthcheck.timer`; `sudo systemctl start home-warden-healthcheck.service` |
 | `home-warden-healthcheck.service` | Oneshot probe + optional email (no `[Install]`) | Activated by the timer or manual `start` |
 
+`setup-service` also installs `/etc/sudoers.d/home-warden-web-ui-nginx-test`,
+allowing the authenticated web UI backend to run the read-only
+`scripts/nginx-test-candidate` helper via `sudo -n` for preview/apply
+validation. Until that file is installed on the designated host, the UI
+can still render diffs but `nginx -t` remains unavailable and Apply stays
+blocked.
+
 Logs (also listed above):
 
 | Unit / script | Log |

@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Privileged nginx -t helper for web UI preview/apply validation.
+#
+# Usage:
+#   sudo ./scripts/nginx-test-candidate /absolute/path/to/nginx.conf
+#
+# Runs nginx -t as root against a generated candidate config, but keeps the
+# same designated-host guard as the rest of home-warden's mutating helpers.
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly script_dir
+
+usage() {
+  echo "Usage: nginx-test-candidate /absolute/path/to/nginx.conf" >&2
+}
+
+if ((EUID != 0)); then
+  echo "nginx-test-candidate: run via sudo/root" >&2
+  exit 2
+fi
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 2
+fi
+
+owner="${SUDO_USER:-${OWNER:-}}"
+if [[ -z "${owner}" ]]; then
+  echo "nginx-test-candidate: could not determine the invoking operator" >&2
+  exit 2
+fi
+readonly owner
+
+owner_home="$(getent passwd "${owner}" | cut -d: -f6 || true)"
+if [[ -z "${owner_home}" ]]; then
+  echo "nginx-test-candidate: could not resolve home directory for ${owner}" >&2
+  exit 2
+fi
+readonly owner_home
+
+export HOME="${owner_home}"
+
+# shellcheck source=scripts/lib/host-guard
+source "${script_dir}/lib/host-guard"
+if ! hw_host_guard_enforce "nginx-test-candidate"; then
+  exit 1
+fi
+
+candidate_conf="$1"
+readonly candidate_conf
+if [[ ! -f "${candidate_conf}" ]]; then
+  echo "nginx-test-candidate: conf not found: ${candidate_conf}" >&2
+  exit 2
+fi
+
+nginx_bin="/usr/sbin/nginx"
+if [[ ! -x "${nginx_bin}" ]]; then
+  nginx_bin="$(command -v nginx 2>/dev/null || true)"
+fi
+if [[ -z "${nginx_bin}" ]]; then
+  echo "nginx-test-candidate: nginx binary not found" >&2
+  exit 2
+fi
+readonly nginx_bin
+
+exec "${nginx_bin}" -t -c "${candidate_conf}"

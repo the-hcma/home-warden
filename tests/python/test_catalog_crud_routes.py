@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from app.api.app import create_app
 from app.catalog_crud import GixyResult, NginxTestResult, PreviewResult
+from app.home_warden_config import HomeWardenConfig
 
 
 def _allow_all(username: str, password: str) -> bool:
@@ -58,6 +59,7 @@ def make_client() -> TestClient:
     [
         ("delete", "/catalog/services/example", None),
         ("get", "/catalog/services", None),
+        ("get", "/catalog/services/example", None),
         ("post", "/catalog/apply", {"action": "delete", "name": "example"}),
         ("post", "/catalog/preview", {"action": "delete", "name": "example"}),
         ("post", "/catalog/services", {"service": _service("example")}),
@@ -148,6 +150,24 @@ def test_catalog_apply_blocks_when_revalidation_fails(tmp_path: Path) -> None:
     assert json.loads(catalog_path.read_text(encoding="utf-8"))["services"][0]["server_name"] == "one.example.com"
 
 
+def test_catalog_create_persists_the_new_service(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": [_service("one")]}), encoding="utf-8")
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_crud_routes.services_json_path", return_value=catalog_path),
+        patch("app.api.catalog_crud_routes.render_preview", return_value=_preview_result()),
+    ):
+        response = client.post("/catalog/services", json={"service": _service("two")})
+
+    assert response.status_code == 200
+    assert response.json()["service"]["name"] == "two"
+    persisted = json.loads(catalog_path.read_text(encoding="utf-8"))
+    assert [service["name"] for service in persisted["services"]] == ["one", "two"]
+
+
 def test_catalog_apply_persists_the_mutation(tmp_path: Path) -> None:
     catalog_path = tmp_path / "services.json"
     catalog_path.write_text(json.dumps({"services": [_service("one")]}), encoding="utf-8")
@@ -165,6 +185,46 @@ def test_catalog_apply_persists_the_mutation(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert json.loads(catalog_path.read_text(encoding="utf-8"))["services"][0]["server_name"] == "updated.example.com"
+
+
+def test_catalog_delete_removes_the_service(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": [_service("one"), _service("two")]}), encoding="utf-8")
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_crud_routes.services_json_path", return_value=catalog_path),
+        patch("app.api.catalog_crud_routes.render_preview", return_value=_preview_result()),
+    ):
+        response = client.delete("/catalog/services/one")
+
+    assert response.status_code == 200
+    assert response.json()["deleted_name"] == "one"
+    persisted = json.loads(catalog_path.read_text(encoding="utf-8"))
+    assert [service["name"] for service in persisted["services"]] == ["two"]
+
+
+def test_catalog_preview_surfaces_reserved_web_ui_collisions_as_400(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": [_service("home-warden-web-ui")]}), encoding="utf-8")
+    monkeypatch.setattr("app.catalog_crud.load_config", lambda path: HomeWardenConfig(fqdn="warden.example.com"))
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_crud_routes.services_json_path", return_value=catalog_path),
+    ):
+        response = client.post(
+            "/catalog/preview",
+            json={"action": "update", "name": "home-warden-web-ui", "service": {"server_name": "new.example.com"}},
+        )
+
+    assert response.status_code == 400
+    assert "reserved service name" in response.json()["detail"]
 
 
 def test_catalog_update_preserves_hidden_fields(tmp_path: Path) -> None:

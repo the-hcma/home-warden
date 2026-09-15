@@ -15,7 +15,7 @@ type JsonValue = JsonObject | JsonPrimitive | JsonValue[];
 type JsonObject = { [key: string]: JsonValue };
 type ManagedBy = JsonObject;
 type StaticConfig = JsonObject & {
-  listing_path?: string;
+  listing_path?: null | string;
   root: string;
 };
 type UpstreamConfig = JsonObject & {
@@ -25,17 +25,17 @@ type UpstreamConfig = JsonObject & {
   scheme?: "http" | "https";
 };
 type ServiceEntry = JsonObject & {
-  allow_cidrs?: string[];
+  allow_cidrs?: null | string[];
   client_cert?: JsonObject;
-  forward_host_header?: boolean;
-  gzip?: boolean;
+  forward_host_header?: boolean | null;
+  gzip?: boolean | null;
   kind: ServiceKind;
   managed_by?: ManagedBy;
   name: string;
   server_name: string;
-  static?: StaticConfig;
-  upstream?: UpstreamConfig;
-  websocket?: boolean;
+  static?: null | StaticConfig;
+  upstream?: null | UpstreamConfig;
+  websocket?: boolean | null;
 };
 type CatalogMutationRequest = {
   action: CatalogAction;
@@ -79,6 +79,7 @@ type FormState = {
   websocket: boolean;
 };
 type CatalogState = {
+  applying: boolean;
   error: string | null;
   form: FormState;
   loading: boolean;
@@ -110,7 +111,7 @@ function blankFormState(): FormState {
   };
 }
 
-function buildServiceFromForm(form: FormState, base: ServiceEntry | null): ServiceEntry {
+function buildServiceFromForm(form: FormState, base: ServiceEntry | null, forUpdate: boolean): ServiceEntry {
   const service = base ? cloneJson(base) : ({} as ServiceEntry);
 
   service.kind = form.kind;
@@ -118,7 +119,11 @@ function buildServiceFromForm(form: FormState, base: ServiceEntry | null): Servi
   service.server_name = form.serverName.trim();
 
   if (form.kind === "proxy") {
-    delete service.static;
+    if (forUpdate) {
+      service.static = null;
+    } else {
+      delete service.static;
+    }
     service.upstream = {
       ...(service.upstream ?? {}),
       host: form.upstreamHost.trim(),
@@ -127,38 +132,53 @@ function buildServiceFromForm(form: FormState, base: ServiceEntry | null): Servi
       scheme: form.upstreamScheme,
     };
   } else {
-    delete service.upstream;
-    service.static = {
+    if (forUpdate) {
+      service.upstream = null;
+    } else {
+      delete service.upstream;
+    }
+    const staticConfig: StaticConfig = {
       ...(service.static ?? {}),
       root: form.staticRoot.trim(),
     };
+    service.static = staticConfig;
     if (form.staticListingPath.trim()) {
-      service.static.listing_path = form.staticListingPath.trim();
+      staticConfig.listing_path = form.staticListingPath.trim();
+    } else if (forUpdate) {
+      staticConfig.listing_path = null;
     } else {
-      delete service.static.listing_path;
+      delete staticConfig.listing_path;
     }
   }
 
   if (form.allowCidrs.trim()) {
     service.allow_cidrs = parseAllowCidrs(form.allowCidrs);
+  } else if (forUpdate) {
+    service.allow_cidrs = null;
   } else {
     delete service.allow_cidrs;
   }
 
   if (form.forwardHostHeader) {
     service.forward_host_header = true;
+  } else if (forUpdate) {
+    service.forward_host_header = null;
   } else {
     delete service.forward_host_header;
   }
 
   if (form.gzipDisabled) {
     service.gzip = false;
+  } else if (forUpdate) {
+    service.gzip = null;
   } else {
     delete service.gzip;
   }
 
   if (form.websocket) {
     service.websocket = true;
+  } else if (forUpdate) {
+    service.websocket = null;
   } else {
     delete service.websocket;
   }
@@ -230,6 +250,7 @@ function mountAppShell(root: HTMLElement): void {
 
 function mountCatalogManager(root: HTMLElement): void {
   const state: CatalogState = {
+    applying: false,
     error: null,
     form: blankFormState(),
     loading: true,
@@ -263,29 +284,33 @@ function mountCatalogManager(root: HTMLElement): void {
   }
 
   async function applyCurrentPreview(): Promise<void> {
-    if (!state.previewRequest) {
+    if (state.applying || !state.previewRequest) {
       return;
     }
 
+    state.applying = true;
     state.error = null;
     state.message = "Applying catalog change…";
     render();
     try {
       const result = await applyCatalogMutation(state.previewRequest);
-      state.preview = result.preview;
       if (result.deleted_name) {
         resetEditor();
         state.message = `Deleted ${result.deleted_name}.`;
       } else if (result.service) {
+        invalidatePreview();
         state.originalService = result.service;
         state.form = serviceToFormState(result.service);
         state.message = `Applied ${result.service.name}.`;
       } else {
+        invalidatePreview();
         state.message = "Applied catalog change.";
       }
       await refreshServices();
     } catch (error: unknown) {
       state.error = error instanceof Error ? error.message : "Apply failed";
+    } finally {
+      state.applying = false;
     }
     render();
   }
@@ -338,7 +363,7 @@ function mountCatalogManager(root: HTMLElement): void {
     render();
 
     try {
-      const nextService = buildServiceFromForm(state.form, state.originalService);
+      const nextService = buildServiceFromForm(state.form, state.originalService, state.originalService !== null);
       const request: CatalogMutationRequest = state.originalService
         ? { action: "update", name: state.originalService.name, service: nextService }
         : { action: "create", service: nextService };
@@ -433,8 +458,12 @@ function mountCatalogManager(root: HTMLElement): void {
     }
 
     const applyButton = document.createElement("button");
-    applyButton.disabled = !state.preview.can_apply || !state.previewRequest;
-    applyButton.textContent = state.preview.can_apply ? "Apply change" : "Apply blocked";
+    applyButton.disabled = state.applying || !state.preview.can_apply || !state.previewRequest;
+    applyButton.textContent = state.applying
+      ? "Applying…"
+      : state.preview.can_apply
+        ? "Apply change"
+        : "Apply blocked";
     applyButton.type = "button";
     applyButton.addEventListener("click", () => {
       void applyCurrentPreview();

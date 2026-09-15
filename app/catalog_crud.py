@@ -25,6 +25,7 @@ GIXY_SKIPS = "proxy_buffering_off,proxy_pass_normalized"
 GIXY_TIMEOUT_SECONDS = 15
 NGINX_TIMEOUT_SECONDS = 15
 REPO_ROOT = Path(__file__).resolve().parent.parent
+NGINX_TEST_HELPER = REPO_ROOT / "scripts/nginx-test-candidate"
 
 
 class CatalogConflictError(ValueError):
@@ -121,16 +122,17 @@ def load_catalog_file(path: Path | None = None) -> dict:
 
 def persist_catalog(catalog: dict, path: Path | None = None) -> None:
     target_path = path or services_json_path()
-    target_path.parent.mkdir(parents=True, exist_ok=True)
+    write_path = target_path.resolve() if target_path.is_symlink() else target_path
+    write_path.parent.mkdir(parents=True, exist_ok=True)
 
-    fd, temp_name = tempfile.mkstemp(prefix=f".{target_path.name}.", suffix=".tmp", dir=target_path.parent)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{write_path.name}.", suffix=".tmp", dir=write_path.parent)
     temp_path = Path(temp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
             temp_file.write(json.dumps(catalog, indent=2) + "\n")
             temp_file.flush()
             os.fsync(temp_file.fileno())
-        os.replace(temp_path, target_path)
+        os.replace(temp_path, write_path)
     except Exception:
         try:
             temp_path.unlink()
@@ -281,8 +283,8 @@ def _optional_string_list(service: dict, field: str) -> None:
 
 def _render_catalog_text(catalog: dict) -> str:
     config = load_config(config_path())
-    merged_catalog = catalog_with_web_ui_service(catalog, config)
     try:
+        merged_catalog = catalog_with_web_ui_service(catalog, config)
         return render_catalog(merged_catalog, RenderContext(certs_live_dir=certs_live_dir()))
     except (KeyError, TypeError, ValueError) as exc:
         raise CatalogValidationError(f"malformed catalog: {exc!r}") from exc
@@ -329,7 +331,7 @@ def _run_gixy(full_conf: Path) -> GixyResult:
 def _run_nginx_test(full_conf: Path) -> NginxTestResult:
     try:
         proc = subprocess.run(
-            ["nginx", "-t", "-c", str(full_conf)],
+            ["sudo", "-n", str(NGINX_TEST_HELPER), str(full_conf)],
             capture_output=True,
             text=True,
             timeout=NGINX_TIMEOUT_SECONDS,
@@ -338,7 +340,7 @@ def _run_nginx_test(full_conf: Path) -> NginxTestResult:
         return NginxTestResult(
             exit_code=None,
             ok=False,
-            output=f"nginx binary unavailable: {exc}",
+            output=f"nginx preview helper unavailable: {exc}",
             status="unavailable",
         )
     except subprocess.TimeoutExpired:
@@ -350,6 +352,18 @@ def _run_nginx_test(full_conf: Path) -> NginxTestResult:
         )
 
     output = _combine_output(proc.stdout, proc.stderr)
+    if proc.returncode != 0 and (
+        "a password is required" in output or "not allowed to execute" in output or output.startswith("sudo:")
+    ):
+        return NginxTestResult(
+            exit_code=proc.returncode,
+            ok=False,
+            output=(
+                "nginx preview helper is not provisioned; re-run scripts/setup-service on the designated host.\n"
+                f"{output}"
+            ),
+            status="unavailable",
+        )
     return NginxTestResult(
         exit_code=proc.returncode,
         ok=proc.returncode == 0,

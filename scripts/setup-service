@@ -36,6 +36,8 @@ readonly unit_template_dir="${repo_dir}/etc/systemd"
 readonly system_unit_dir="/etc/systemd/system"
 readonly logrotate_template="${repo_dir}/etc/logrotate/home-warden"
 readonly logrotate_dest="/etc/logrotate.d/home-warden"
+readonly sudoers_template="${repo_dir}/etc/sudoers/home-warden-web-ui-nginx-test"
+readonly sudoers_dest="/etc/sudoers.d/home-warden-web-ui-nginx-test"
 readonly home_warden_config_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/home-warden"
 readonly home_warden_config_path="${home_warden_config_dir}/config.toml"
 
@@ -303,8 +305,20 @@ check_prerequisites() {
     echo "ERROR: missing logrotate template ${logrotate_template}" >&2
     missing=1
   fi
+  if [[ ! -f "${sudoers_template}" ]]; then
+    echo "ERROR: missing sudoers template ${sudoers_template}" >&2
+    missing=1
+  fi
+  if ! command -v visudo >/dev/null 2>&1; then
+    echo "ERROR: visudo not on PATH — install sudo" >&2
+    missing=1
+  fi
   if [[ ! -x "${repo_dir}/scripts/nginx-test-and-reload" ]]; then
     echo "ERROR: scripts/nginx-test-and-reload missing or not executable" >&2
+    missing=1
+  fi
+  if [[ ! -x "${repo_dir}/scripts/nginx-test-candidate" ]]; then
+    echo "ERROR: scripts/nginx-test-candidate missing or not executable" >&2
     missing=1
   fi
   if [[ ! -x "${repo_dir}/scripts/healthcheck" ]]; then
@@ -431,6 +445,32 @@ expand_unit() {
   tmp="$(mktemp)"
   printf '%s\n' "${generated}" >"${tmp}"
   run sudo install -o root -g root -m 644 "${tmp}" "${dest}"
+  rm -f "${tmp}"
+}
+
+install_sudoers() {
+  local rendered
+  local tmp
+
+  rendered="$(
+    sed \
+      -e "s|@@OWNER@@|${owner}|g" \
+      -e "s|@@REPO_DIR@@|${repo_dir}|g" \
+      "${sudoers_template}"
+  )"
+
+  if ((dry_run)); then
+    echo "DRY-RUN: would write ${sudoers_dest}"
+    echo "-----"
+    printf '%s\n' "${rendered}"
+    echo "-----"
+    return 0
+  fi
+
+  tmp="$(mktemp)"
+  printf '%s\n' "${rendered}" >"${tmp}"
+  sudo visudo -cf "${tmp}" >/dev/null
+  run sudo install -o root -g root -m 440 "${tmp}" "${sudoers_dest}"
   rm -f "${tmp}"
 }
 
@@ -583,6 +623,7 @@ main() {
   expand_unit "${unit_template_dir}/home-warden-healthcheck.service" "${system_unit_dir}/home-warden-healthcheck.service"
   expand_unit "${unit_template_dir}/home-warden-healthcheck.timer" "${system_unit_dir}/home-warden-healthcheck.timer"
   expand_unit "${logrotate_template}" "${logrotate_dest}"
+  install_sudoers
 
   mask_distro_nginx
 
