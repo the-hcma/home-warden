@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# ci/web-build — typecheck + build the web/ TypeScript frontend, then assert
+# the esbuild output exists (fail loud on a silent misconfiguration rather
+# than a mysterious 404 in production). pnpm is activated by the calling
+# workflow's setup-pnpm-corepack step. See the-hcma/home-warden#55/#67.
+set -euo pipefail
+cd web
+pnpm install --frozen-lockfile
+pnpm run typecheck
+pnpm run build
+test -f ../app/api/static/dist/main.js

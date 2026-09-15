@@ -272,6 +272,58 @@ vhosts. See [#54](https://github.com/the-hcma/home-warden/issues/54).
 
 ---
 
+## Web UI
+
+home-warden's first-party admin web UI
+([#55](https://github.com/the-hcma/home-warden/issues/55), scaffolded in
+[#67](https://github.com/the-hcma/home-warden/issues/67)) follows
+[the-hcma/domesti-bot](https://github.com/the-hcma/domesti-bot)'s `web/`
+conventions as its structural/governance model — this repo's needs are a
+small subset of domesti-bot's, so adopt the shape, not its full scale.
+
+- **Layout**: TypeScript sources live under `web/src/`, bundled by a single
+  `web/build.mjs` esbuild call — no Vite/Webpack/Rollup, and **no frontend
+  framework** (React/Vue/Svelte/etc.). The first concrete proposal to add
+  one must call this out explicitly and update this section as part of
+  the same PR, matching domesti-bot's own rule. Output goes to
+  `app/api/static/dist/main.js` (stable filename; no content-hashing yet)
+  — served by the existing FastAPI app (`app/api/app.py`) via a
+  `StaticFiles` mount at `/static/`, with `GET /` reading
+  `app/api/static/index.html` from disk on every request (so local edits
+  show up without a restart). `app/api/static/dist/` is gitignored (build
+  output only); `app/api/static/` itself (HTML, future icons) is tracked.
+- **Toolchain**: `pnpm` (pinned via `web/package.json`'s `packageManager`
+  field, currently `pnpm@10.33.4`) + `esbuild` (bundling) + `typescript`
+  (`tsc --noEmit` only — esbuild does the actual emit). `engines.node`
+  requires `>=20`; Node is a **build-time-only** dependency, never a
+  runtime one — the FastAPI/uvicorn server has zero Node dependency.
+  `web/tsconfig.json` is strict: `strict`, `noUncheckedIndexedAccess`,
+  `exactOptionalPropertyTypes`, `verbatimModuleSyntax`, `isolatedModules`,
+  `noImplicitOverride`, `noFallthroughCasesInSwitch`,
+  `forceConsistentCasingInFileNames`.
+- **Day to day** (from `web/`): `pnpm install`, `pnpm run typecheck`,
+  `pnpm run build` (one-shot) / `pnpm run watch` (rebuild on change, dev
+  only), `pnpm run check` (typecheck + build, mirrors CI).
+- **CI**: `.github/ci/web-build` runs `pnpm install --frozen-lockfile` +
+  `pnpm run typecheck` + `pnpm run build`, then asserts
+  `app/api/static/dist/main.js` exists (catches a silent esbuild
+  misconfiguration in CI instead of a mysterious 404 in production).
+  Wired as its own `web-build` job in `.github/workflows/ci.yml`, using
+  `actions/setup-node` + the shared
+  `the-hcma/repository-helpers/actions/setup-pnpm-corepack` action (same
+  as domesti-bot's own `web-build` job).
+- **Dependabot**: a dedicated `npm` / `/web` entry in
+  `.github/dependabot.yml`, grouped by package (`typescript`, `esbuild`)
+  to reduce PR noise — separate from the existing `github-actions` entry.
+- **Auth and transport**: none in the scaffold itself. PAM-based login and
+  the requirement that this UI is *only* ever reachable through nginx's
+  own HTTPS (never a direct/plaintext listener) are #68's scope — see
+  that issue and #55's "Decided" section before adding any real route
+  that isn't already behind those, and before assuming the scaffold's
+  dev-only loopback bind is safe to expose as-is.
+
+---
+
 ## Development
 
 ```bash
@@ -327,6 +379,7 @@ CI lives in `.github/workflows/ci.yml`:
 - Nginx security lint (`.github/ci/nginx-security-lint` — Gixy-Next, see above)
 - Catalog render validate (`.github/ci/catalog-render-validate` — renders a
   fixture catalog, runs `nginx -t` + Gixy-Next against it, see above)
+- Web (`.github/ci/web-build` — pnpm typecheck + esbuild build, see Web UI above)
 
 No PR may be merged with a failing CI check.
 
@@ -343,6 +396,8 @@ No PR may be merged with a failing CI check.
       `HOME_NGINX_CONF`) changed
 - [ ] `uv run render-catalog` output still round-trips through
       `crossplane.parse()` clean when `app/catalog_render.py` changed
+- [ ] `pnpm run check` (typecheck + build) clean from `web/` when
+      `web/` changed
 - [ ] No certs, keys, or secrets in the diff
 - [ ] Commit message follows Conventional Commits
 - [ ] Unit templates keep `@@REPO_DIR@@` / `@@OWNER@@` placeholders until setup expands them
