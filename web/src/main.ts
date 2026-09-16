@@ -43,10 +43,21 @@ type ServiceEntry = JsonObject & {
   upstream?: null | UpstreamConfig;
   websocket?: boolean | null;
 };
+type StreamUpstreamConfig = JsonObject & {
+  host: string;
+  port: number;
+};
+type StreamEntry = JsonObject & {
+  listen_port: number;
+  name: string;
+  upstream: StreamUpstreamConfig;
+};
+type CatalogEntityKind = "service" | "stream";
 type CatalogMutationRequest = {
   action: CatalogAction;
   name?: string;
-  service?: ServiceEntry;
+  service?: JsonObject;
+  target?: CatalogEntityKind;
 };
 type PreviewResponse = {
   can_apply: boolean;
@@ -68,6 +79,7 @@ type ApplyResponse = {
   deleted_name?: string;
   preview: PreviewResponse;
   service?: ServiceEntry;
+  stream?: StreamEntry;
 };
 type FormState = {
   allowCidrs: string;
@@ -84,16 +96,27 @@ type FormState = {
   upstreamScheme: "http" | "https";
   websocket: boolean;
 };
+type StreamFormState = {
+  listenPort: string;
+  name: string;
+  upstreamHost: string;
+  upstreamPort: string;
+};
 type CatalogState = {
+  activeEntity: CatalogEntityKind;
   applying: boolean;
   error: string | null;
   form: FormState;
   loading: boolean;
+  loadingStreams: boolean;
   message: string | null;
   originalService: ServiceEntry | null;
+  originalStream: StreamEntry | null;
   preview: PreviewResponse | null;
   previewRequest: CatalogMutationRequest | null;
   services: ServiceEntry[];
+  streamForm: StreamFormState;
+  streams: StreamEntry[];
 };
 type DashboardState = {
   data: HealthResponse | null;
@@ -210,6 +233,35 @@ function blankFormState(): FormState {
   };
 }
 
+function blankStreamFormState(): StreamFormState {
+  return {
+    listenPort: "",
+    name: "",
+    upstreamHost: "",
+    upstreamPort: "",
+  };
+}
+
+function buildStreamFromForm(form: StreamFormState): StreamEntry {
+  return {
+    listen_port: Number(form.listenPort),
+    name: form.name.trim(),
+    upstream: {
+      host: form.upstreamHost.trim(),
+      port: Number(form.upstreamPort),
+    },
+  };
+}
+
+function streamToFormState(stream: StreamEntry): StreamFormState {
+  return {
+    listenPort: String(stream.listen_port),
+    name: stream.name,
+    upstreamHost: stream.upstream.host,
+    upstreamPort: String(stream.upstream.port),
+  };
+}
+
 function buildServiceFromForm(form: FormState, base: ServiceEntry | null, forUpdate: boolean): ServiceEntry {
   const service = base ? cloneJson(base) : ({} as ServiceEntry);
 
@@ -296,6 +348,22 @@ function buildStatusBadge(status: HealthCheck["status"]): HTMLElement {
 
 function cloneJson<T extends JsonValue>(value: T): T {
   return structuredClone(value);
+}
+
+function renderDomainLink(domain: null | string, fallback: string): Node {
+  const trimmed = domain?.trim();
+  if (!trimmed) {
+    return document.createTextNode(fallback);
+  }
+
+  // home-warden terminates TLS for every proxied/static service, so a bare
+  // server_name/domain is always reachable over https.
+  const link = document.createElement("a");
+  link.href = `https://${trimmed}`;
+  link.rel = "noopener noreferrer";
+  link.target = "_blank";
+  link.textContent = trimmed;
+  return link;
 }
 
 async function errorMessage(response: Response): Promise<string> {
@@ -483,15 +551,20 @@ function mountAppShell(root: HTMLElement): void {
 
 function mountCatalogManager(root: HTMLElement): () => void {
   const state: CatalogState = {
+    activeEntity: "service",
     applying: false,
     error: null,
     form: blankFormState(),
     loading: true,
+    loadingStreams: true,
     message: null,
     originalService: null,
+    originalStream: null,
     preview: null,
     previewRequest: null,
     services: [],
+    streamForm: blankStreamFormState(),
+    streams: [],
   };
   let actionsHost: HTMLDivElement | null = null;
   let disposed = false;
@@ -499,6 +572,9 @@ function mountCatalogManager(root: HTMLElement): () => void {
 
   render();
   void refreshServices().finally(() => {
+    safeRender();
+  });
+  void refreshStreams().finally(() => {
     safeRender();
   });
 
@@ -512,6 +588,7 @@ function mountCatalogManager(root: HTMLElement): () => void {
       return;
     }
 
+    const target = state.previewRequest.target ?? "service";
     state.applying = true;
     state.error = null;
     state.message = "Applying catalog change…";
@@ -522,8 +599,17 @@ function mountCatalogManager(root: HTMLElement): () => void {
         return;
       }
       if (result.deleted_name) {
-        resetEditor();
+        if (target === "stream") {
+          resetStreamEditor();
+        } else {
+          resetEditor();
+        }
         state.message = `Deleted ${result.deleted_name}.`;
+      } else if (result.stream) {
+        invalidatePreview();
+        state.streamForm = streamToFormState(result.stream);
+        state.message = `Applied ${result.stream.name}.`;
+        state.originalStream = result.stream;
       } else if (result.service) {
         invalidatePreview();
         state.form = serviceToFormState(result.service);
@@ -533,7 +619,7 @@ function mountCatalogManager(root: HTMLElement): () => void {
         invalidatePreview();
         state.message = "Applied catalog change.";
       }
-      const refreshPromise = refreshServices();
+      const refreshPromise = target === "stream" ? refreshStreams() : refreshServices();
       safeRender();
       await refreshPromise;
       if (disposed) {
@@ -560,17 +646,56 @@ function mountCatalogManager(root: HTMLElement): () => void {
     safeRender();
   }
 
+  function beginCreateStream(): void {
+    if (disposed) {
+      return;
+    }
+    state.error = null;
+    state.message = "Creating a new stream.";
+    resetStreamEditor();
+    safeRender();
+  }
+
   async function beginDelete(name: string): Promise<void> {
     if (disposed) {
       return;
     }
+    state.activeEntity = "service";
     state.error = null;
     state.message = `Previewing deletion of ${name}…`;
     invalidatePreview();
     safeRender();
 
     try {
-      const request: CatalogMutationRequest = { action: "delete", name };
+      const request: CatalogMutationRequest = { action: "delete", name, target: "service" };
+      const preview = await previewCatalogMutation(request);
+      if (disposed) {
+        return;
+      }
+      state.message = `Preview ready for deleting ${name}.`;
+      state.preview = preview;
+      state.previewRequest = request;
+    } catch (error: unknown) {
+      if (disposed) {
+        return;
+      }
+      state.error = error instanceof Error ? error.message : "Preview failed";
+    }
+    safeRender();
+  }
+
+  async function beginDeleteStream(name: string): Promise<void> {
+    if (disposed) {
+      return;
+    }
+    state.activeEntity = "stream";
+    state.error = null;
+    state.message = `Previewing deletion of ${name}…`;
+    invalidatePreview();
+    safeRender();
+
+    try {
+      const request: CatalogMutationRequest = { action: "delete", name, target: "stream" };
       const preview = await previewCatalogMutation(request);
       if (disposed) {
         return;
@@ -591,6 +716,7 @@ function mountCatalogManager(root: HTMLElement): () => void {
     if (disposed) {
       return;
     }
+    state.activeEntity = "service";
     state.error = null;
     state.message = `Loading ${name}…`;
     invalidatePreview();
@@ -613,6 +739,33 @@ function mountCatalogManager(root: HTMLElement): () => void {
     safeRender();
   }
 
+  async function beginEditStream(name: string): Promise<void> {
+    if (disposed) {
+      return;
+    }
+    state.activeEntity = "stream";
+    state.error = null;
+    state.message = `Loading ${name}…`;
+    invalidatePreview();
+    safeRender();
+
+    try {
+      const stream = await readCatalogStream(name);
+      if (disposed) {
+        return;
+      }
+      state.streamForm = streamToFormState(stream);
+      state.message = `Editing ${name}.`;
+      state.originalStream = stream;
+    } catch (error: unknown) {
+      if (disposed) {
+        return;
+      }
+      state.error = error instanceof Error ? error.message : "Failed to load stream";
+    }
+    safeRender();
+  }
+
   function invalidatePreview(): void {
     state.preview = null;
     state.previewRequest = null;
@@ -631,6 +784,7 @@ function mountCatalogManager(root: HTMLElement): () => void {
     if (disposed) {
       return;
     }
+    state.activeEntity = "service";
     state.error = null;
     state.message = "Rendering preview…";
     invalidatePreview();
@@ -639,13 +793,44 @@ function mountCatalogManager(root: HTMLElement): () => void {
     try {
       const nextService = buildServiceFromForm(state.form, state.originalService, state.originalService !== null);
       const request: CatalogMutationRequest = state.originalService
-        ? { action: "update", name: state.originalService.name, service: nextService }
-        : { action: "create", service: nextService };
+        ? { action: "update", name: state.originalService.name, service: nextService, target: "service" }
+        : { action: "create", service: nextService, target: "service" };
       const preview = await previewCatalogMutation(request);
       if (disposed) {
         return;
       }
       state.message = `Preview ready for ${nextService.name || "this service"}.`;
+      state.preview = preview;
+      state.previewRequest = request;
+    } catch (error: unknown) {
+      if (disposed) {
+        return;
+      }
+      state.error = error instanceof Error ? error.message : "Preview failed";
+    }
+    safeRender();
+  }
+
+  async function previewCurrentStreamForm(): Promise<void> {
+    if (disposed) {
+      return;
+    }
+    state.activeEntity = "stream";
+    state.error = null;
+    state.message = "Rendering preview…";
+    invalidatePreview();
+    safeRender();
+
+    try {
+      const nextStream = buildStreamFromForm(state.streamForm);
+      const request: CatalogMutationRequest = state.originalStream
+        ? { action: "update", name: state.originalStream.name, service: nextStream, target: "stream" }
+        : { action: "create", service: nextStream, target: "stream" };
+      const preview = await previewCatalogMutation(request);
+      if (disposed) {
+        return;
+      }
+      state.message = `Preview ready for ${nextStream.name || "this stream"}.`;
       state.preview = preview;
       state.previewRequest = request;
     } catch (error: unknown) {
@@ -676,6 +861,25 @@ function mountCatalogManager(root: HTMLElement): () => void {
     state.loading = false;
   }
 
+  async function refreshStreams(): Promise<void> {
+    state.loadingStreams = true;
+    state.error = null;
+    try {
+      const streams = await readCatalogStreams();
+      if (disposed) {
+        return;
+      }
+      state.streams = streams;
+    } catch (error: unknown) {
+      if (disposed) {
+        return;
+      }
+      state.error = error instanceof Error ? error.message : "Failed to load streams";
+      state.streams = [];
+    }
+    state.loadingStreams = false;
+  }
+
   function refreshCatalogChrome(): void {
     if (disposed) {
       return;
@@ -700,6 +904,10 @@ function mountCatalogManager(root: HTMLElement): () => void {
     const editorSection = document.createElement("section");
     const layout = document.createElement("div");
     const listSection = document.createElement("section");
+    const streamActions = renderStreamActions();
+    const streamEditorSection = document.createElement("section");
+    const streamLayout = document.createElement("div");
+    const streamListSection = document.createElement("section");
     const previewSection = renderPreviewSection();
 
     editorSection.append(renderServiceEditor());
@@ -708,11 +916,19 @@ function mountCatalogManager(root: HTMLElement): () => void {
     styleSection(listSection);
 
     layout.classList.add("catalog-layout");
-    layout.append(listSection, editorSection, previewSection);
+    layout.append(listSection, editorSection);
+
+    streamEditorSection.append(renderStreamEditor());
+    streamListSection.append(renderStreamList());
+    styleSection(streamEditorSection);
+    styleSection(streamListSection);
+
+    streamLayout.classList.add("catalog-layout");
+    streamLayout.append(streamListSection, streamEditorSection);
 
     actionsHost = actions;
     previewHost = previewSection;
-    container.append(actions, layout);
+    container.append(actions, layout, streamActions, streamLayout, previewSection);
     root.replaceChildren(container);
   }
 
@@ -743,6 +959,24 @@ function mountCatalogManager(root: HTMLElement): () => void {
       errorNode.textContent = state.error;
       actions.append(errorNode);
     }
+
+    return actions;
+  }
+
+  function renderStreamActions(): HTMLDivElement {
+    const actions = document.createElement("div");
+    const heading = document.createElement("h2");
+
+    heading.textContent = "Streams (TCP passthrough)";
+    actions.append(heading);
+
+    const addButton = document.createElement("button");
+    addButton.textContent = "Add stream";
+    addButton.type = "button";
+    addButton.addEventListener("click", () => {
+      beginCreateStream();
+    });
+    actions.append(addButton);
 
     return actions;
   }
@@ -923,6 +1157,64 @@ function mountCatalogManager(root: HTMLElement): () => void {
     return section;
   }
 
+  function renderStreamEditor(): HTMLElement {
+    const form = document.createElement("form");
+    const heading = document.createElement("h3");
+    const previewButton = document.createElement("button");
+    const section = document.createElement("div");
+
+    heading.textContent = state.originalStream ? `Edit ${state.originalStream.name}` : "New stream";
+    section.append(heading);
+
+    previewButton.textContent = state.originalStream ? "Preview update" : "Preview create";
+    previewButton.type = "submit";
+
+    appendTextInput(form, "Name", state.streamForm.name, (value) => {
+      state.streamForm.name = value;
+      markPreviewStale();
+    });
+    appendTextInput(
+      form,
+      "Listen port",
+      state.streamForm.listenPort,
+      (value) => {
+        state.streamForm.listenPort = value;
+        markPreviewStale();
+      },
+      "number",
+    );
+    appendTextInput(form, "Upstream host", state.streamForm.upstreamHost, (value) => {
+      state.streamForm.upstreamHost = value;
+      markPreviewStale();
+    });
+    appendTextInput(
+      form,
+      "Upstream port",
+      state.streamForm.upstreamPort,
+      (value) => {
+        state.streamForm.upstreamPort = value;
+        markPreviewStale();
+      },
+      "number",
+    );
+
+    const cancelButton = document.createElement("button");
+    cancelButton.textContent = state.originalStream ? "Cancel edit" : "Reset form";
+    cancelButton.type = "button";
+    cancelButton.addEventListener("click", () => {
+      resetStreamEditor();
+      safeRender();
+    });
+
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void previewCurrentStreamForm();
+    });
+    form.append(previewButton, document.createTextNode(" "), cancelButton);
+    section.append(form);
+    return section;
+  }
+
   function renderServiceList(): HTMLElement {
     const heading = document.createElement("h3");
     const section = document.createElement("div");
@@ -967,7 +1259,7 @@ function mountCatalogManager(root: HTMLElement): () => void {
 
       kindCell.textContent = service.kind;
       nameCell.textContent = service.name;
-      serverCell.textContent = service.server_name;
+      serverCell.append(renderDomainLink(service.server_name, service.server_name));
       styleTableCell(actionsCell);
       styleTableCell(kindCell);
       styleTableCell(nameCell);
@@ -994,9 +1286,88 @@ function mountCatalogManager(root: HTMLElement): () => void {
     return section;
   }
 
+  function renderStreamList(): HTMLElement {
+    const heading = document.createElement("h3");
+    const section = document.createElement("div");
+
+    heading.textContent = "Streams";
+    section.append(heading);
+
+    if (state.loadingStreams) {
+      const loading = document.createElement("p");
+      loading.textContent = "Loading streams…";
+      section.append(loading);
+      return section;
+    }
+
+    if (state.streams.length === 0) {
+      const empty = document.createElement("p");
+      empty.textContent = "No streams found.";
+      section.append(empty);
+      return section;
+    }
+
+    const table = document.createElement("table");
+    const headerRow = document.createElement("tr");
+
+    styleTable(table);
+    for (const title of ["Name", "Listen port", "Upstream", "Actions"]) {
+      const cell = document.createElement("th");
+      cell.textContent = title;
+      styleTableCell(cell, true);
+      headerRow.append(cell);
+    }
+    table.append(headerRow);
+
+    for (const stream of state.streams) {
+      const actionsCell = document.createElement("td");
+      const deleteButton = document.createElement("button");
+      const editButton = document.createElement("button");
+      const listenPortCell = document.createElement("td");
+      const nameCell = document.createElement("td");
+      const row = document.createElement("tr");
+      const upstreamCell = document.createElement("td");
+
+      // Raw TCP passthrough has no HTTP endpoint to link to (unlike a
+      // service's server_name), so the upstream is shown as plain text.
+      listenPortCell.textContent = String(stream.listen_port);
+      nameCell.textContent = stream.name;
+      upstreamCell.textContent = `${stream.upstream.host}:${stream.upstream.port}`;
+      styleTableCell(actionsCell);
+      styleTableCell(listenPortCell);
+      styleTableCell(nameCell);
+      styleTableCell(upstreamCell);
+
+      editButton.textContent = "Edit";
+      editButton.type = "button";
+      editButton.addEventListener("click", () => {
+        void beginEditStream(stream.name);
+      });
+
+      deleteButton.textContent = "Preview delete";
+      deleteButton.type = "button";
+      deleteButton.addEventListener("click", () => {
+        void beginDeleteStream(stream.name);
+      });
+
+      actionsCell.append(editButton, document.createTextNode(" "), deleteButton);
+      row.append(nameCell, listenPortCell, upstreamCell, actionsCell);
+      table.append(row);
+    }
+
+    section.append(table);
+    return section;
+  }
+
   function resetEditor(): void {
     state.form = blankFormState();
     state.originalService = null;
+    invalidatePreview();
+  }
+
+  function resetStreamEditor(): void {
+    state.streamForm = blankStreamFormState();
+    state.originalStream = null;
     invalidatePreview();
   }
 
@@ -1176,7 +1547,7 @@ function mountHealthDashboard(root: HTMLElement): () => void {
       const statusCell = document.createElement("td");
 
       detailCell.textContent = check.detail;
-      domainCell.textContent = extractCertDomain(check) ?? "Unavailable from current API response";
+      domainCell.append(renderDomainLink(extractCertDomain(check), "Unavailable from current API response"));
       renewalCell.textContent = inferRenewalState(check);
       serviceCell.textContent = check.service;
       statusCell.append(buildStatusBadge(check.status));
@@ -1431,6 +1802,20 @@ async function readCatalogServices(): Promise<ServiceEntry[]> {
     method: "GET",
   });
   return response.services;
+}
+
+async function readCatalogStream(name: string): Promise<StreamEntry> {
+  const response = await fetchJson<{ stream: StreamEntry }>(`/catalog/streams/${encodeURIComponent(name)}`, {
+    method: "GET",
+  });
+  return response.stream;
+}
+
+async function readCatalogStreams(): Promise<StreamEntry[]> {
+  const response = await fetchJson<{ streams: StreamEntry[] }>("/catalog/streams", {
+    method: "GET",
+  });
+  return response.streams;
 }
 
 async function readSession(): Promise<SessionResponse | null> {

@@ -77,7 +77,25 @@ def build_candidate_catalog(
     *,
     name: str | None = None,
     service: dict | None = None,
+    target: Literal["service", "stream"] = "service",
 ) -> dict:
+    if target == "stream":
+        if action == "create":
+            if service is None:
+                raise CatalogValidationError("stream payload is required for create")
+            return create_stream(catalog, service)
+        if action == "delete":
+            if not name:
+                raise CatalogValidationError("stream name is required for delete")
+            return delete_stream(catalog, name)
+        if action == "update":
+            if not name:
+                raise CatalogValidationError("stream name is required for update")
+            if service is None:
+                raise CatalogValidationError("stream payload is required for update")
+            return update_stream(catalog, name, service)
+        raise CatalogValidationError(f"unsupported catalog action {action!r}")
+
     if action == "create":
         if service is None:
             raise CatalogValidationError("service payload is required for create")
@@ -103,6 +121,76 @@ def create_service(catalog: dict, service: dict) -> dict:
     updated_catalog = copy.deepcopy(catalog)
     updated_catalog["services"] = [*(copy.deepcopy(entry) for entry in services), validated]
     return updated_catalog
+
+
+def create_stream(catalog: dict, stream: dict) -> dict:
+    validated = validate_stream(stream)
+    streams = _streams(catalog)
+    _ensure_unique_stream_identifiers(streams, validated)
+
+    updated_catalog = copy.deepcopy(catalog)
+    updated_catalog["streams"] = [*(copy.deepcopy(entry) for entry in streams), validated]
+    return updated_catalog
+
+
+def delete_stream(catalog: dict, name: str) -> dict:
+    streams = _streams(catalog)
+    index = _stream_index(streams, name)
+
+    updated_catalog = copy.deepcopy(catalog)
+    updated_catalog["streams"] = [copy.deepcopy(stream) for i, stream in enumerate(streams) if i != index]
+    return updated_catalog
+
+
+def get_stream(catalog: dict, name: str) -> dict:
+    streams = _streams(catalog)
+    return copy.deepcopy(streams[_stream_index(streams, name)])
+
+
+def list_streams(catalog: dict) -> list[dict]:
+    return [copy.deepcopy(stream) for stream in _streams(catalog)]
+
+
+def update_stream(catalog: dict, name: str, stream: dict) -> dict:
+    streams = _streams(catalog)
+    index = _stream_index(streams, name)
+    merged = _merge_dicts(streams[index], stream)
+    validated = validate_stream(merged)
+    _ensure_unique_stream_identifiers(streams, validated, skip_index=index)
+
+    updated_catalog = copy.deepcopy(catalog)
+    updated_streams = [copy.deepcopy(entry) for entry in streams]
+    updated_streams[index] = validated
+    updated_catalog["streams"] = updated_streams
+    return updated_catalog
+
+
+def validate_stream(stream: dict) -> dict:
+    if not isinstance(stream, dict):
+        raise CatalogValidationError(f"stream entry must be an object, got {type(stream).__name__}")
+
+    candidate = copy.deepcopy(stream)
+    candidate["name"] = _required_string(candidate, "name")
+    name = candidate["name"]
+
+    listen_port = candidate.get("listen_port")
+    if not isinstance(listen_port, int) or isinstance(listen_port, bool) or not (1 <= listen_port <= 65535):
+        raise CatalogValidationError(f"stream {name!r} listen_port must be an integer between 1 and 65535")
+
+    upstream = candidate.get("upstream")
+    if not isinstance(upstream, dict):
+        raise CatalogValidationError(f"stream {name!r} requires an upstream object")
+
+    host = upstream.get("host")
+    if not isinstance(host, str) or not host.strip():
+        raise CatalogValidationError(f"stream {name!r} upstream.host must be a non-empty string")
+
+    port = upstream.get("port")
+    if not isinstance(port, int) or isinstance(port, bool) or not (1 <= port <= 65535):
+        raise CatalogValidationError(f"stream {name!r} upstream.port must be an integer between 1 and 65535")
+
+    candidate["upstream"] = {"host": host.strip(), "port": port}
+    return candidate
 
 
 def delete_service(catalog: dict, name: str) -> dict:
@@ -238,6 +326,16 @@ def _ensure_unique_identifiers(services: list[dict], service: dict, *, skip_inde
             raise CatalogConflictError(f"service name {service['name']!r} already exists")
         if existing.get("server_name") == service["server_name"]:
             raise CatalogConflictError(f"server_name {service['server_name']!r} already exists")
+
+
+def _ensure_unique_stream_identifiers(streams: list[dict], stream: dict, *, skip_index: int | None = None) -> None:
+    for index, existing in enumerate(streams):
+        if skip_index is not None and index == skip_index:
+            continue
+        if existing.get("name") == stream["name"]:
+            raise CatalogConflictError(f"stream name {stream['name']!r} already exists")
+        if existing.get("listen_port") == stream["listen_port"]:
+            raise CatalogConflictError(f"stream listen_port {stream['listen_port']!r} already exists")
 
 
 def _merge_dicts(base: dict, updates: dict) -> dict:
@@ -427,6 +525,22 @@ def _service_index(services: list[dict], name: str) -> int:
         if service.get("name") == name:
             return index
     raise CatalogNotFoundError(f"service {name!r} not found")
+
+
+def _stream_index(streams: list[dict], name: str) -> int:
+    for index, stream in enumerate(streams):
+        if stream.get("name") == name:
+            return index
+    raise CatalogNotFoundError(f"stream {name!r} not found")
+
+
+def _streams(catalog: dict) -> list[dict]:
+    streams = catalog.get("streams")
+    if streams is None:
+        return []
+    if not isinstance(streams, list):
+        raise ValueError("catalog streams must be a list")
+    return streams
 
 
 def _services(catalog: dict) -> list[dict]:
