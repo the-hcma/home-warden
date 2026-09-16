@@ -279,11 +279,7 @@ function buildStatusBadge(status: HealthCheck["status"]): HTMLElement {
   const badge = document.createElement("span");
 
   badge.textContent = status.toUpperCase();
-  badge.style.borderRadius = "999px";
-  badge.style.display = "inline-block";
-  badge.style.fontSize = "0.8rem";
-  badge.style.fontWeight = "700";
-  badge.style.padding = "0.15rem 0.55rem";
+  badge.classList.add("badge");
   styleStatusBadge(badge, status);
   return badge;
 }
@@ -412,6 +408,7 @@ function mountAppShell(root: HTMLElement): void {
     console.error("home-warden: failed to render app shell", error);
     const message = error instanceof Error ? error.message : "Failed to load session";
     const errorNode = document.createElement("p");
+    errorNode.classList.add("error-banner");
     errorNode.textContent = message;
     root.replaceChildren(errorNode);
   });
@@ -643,8 +640,7 @@ function mountCatalogManager(root: HTMLElement): () => void {
     styleSection(editorSection);
     styleSection(listSection);
 
-    layout.style.display = "grid";
-    layout.style.gap = "1.5rem";
+    layout.classList.add("catalog-layout");
     layout.append(listSection, editorSection, previewSection);
 
     actionsHost = actions;
@@ -670,11 +666,13 @@ function mountCatalogManager(root: HTMLElement): () => void {
 
     if (state.message) {
       const messageNode = document.createElement("p");
+      messageNode.classList.add("message");
       messageNode.textContent = state.message;
       actions.append(messageNode);
     }
     if (state.error) {
       const errorNode = document.createElement("p");
+      errorNode.classList.add("error-banner");
       errorNode.textContent = state.error;
       actions.append(errorNode);
     }
@@ -689,9 +687,7 @@ function mountCatalogManager(root: HTMLElement): () => void {
 
     heading.textContent = `${title} (${status})`;
     pre.textContent = content || "(empty)";
-    pre.style.fontFamily = "monospace";
-    pre.style.overflowX = "auto";
-    pre.style.whiteSpace = "pre-wrap";
+    pre.classList.add("code-block");
     wrapper.append(heading, pre);
     return wrapper;
   }
@@ -723,6 +719,7 @@ function mountCatalogManager(root: HTMLElement): () => void {
     });
 
     const gateStatus = document.createElement("p");
+    gateStatus.classList.add(state.preview.can_apply ? "status-ok" : "status-fail");
     gateStatus.textContent = state.preview.can_apply
       ? "nginx validation passed — apply is enabled."
       : "nginx validation failed or is unavailable — apply is disabled.";
@@ -1035,6 +1032,7 @@ function mountHealthDashboard(root: HTMLElement): () => void {
     controls.append(refreshButton);
 
     const cadence = document.createElement("p");
+    cadence.classList.add("message");
     cadence.textContent = state.lastUpdatedLabel
       ? `Auto-refreshes every 30s. Last updated ${state.lastUpdatedLabel}.`
       : "Auto-refreshes every 30s.";
@@ -1042,6 +1040,7 @@ function mountHealthDashboard(root: HTMLElement): () => void {
 
     if (state.error) {
       const errorNode = document.createElement("p");
+      errorNode.classList.add("error-banner");
       errorNode.textContent = state.data ? `${state.error}. Showing last successful response.` : state.error;
       controls.append(errorNode);
     }
@@ -1138,9 +1137,7 @@ function mountHealthDashboard(root: HTMLElement): () => void {
 
     const detail = document.createElement("p");
     detail.textContent = check.detail;
-    detail.style.marginBottom = "0";
-    detail.style.marginTop = "0.35rem";
-    detail.style.whiteSpace = "pre-wrap";
+    detail.classList.add("check-detail");
 
     wrapper.append(buildStatusBadge(check.status), detail);
     return wrapper;
@@ -1243,6 +1240,7 @@ function mountHealthDashboard(root: HTMLElement): () => void {
 }
 
 function mountLoginForm(root: HTMLElement): void {
+  root.classList.add("login-shell");
   let errorNode: HTMLParagraphElement | null = null;
 
   const heading = document.createElement("h1");
@@ -1295,6 +1293,7 @@ function mountLoginForm(root: HTMLElement): void {
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : "Login failed";
         errorNode = document.createElement("p");
+        errorNode.classList.add("error-banner");
         errorNode.textContent = message;
         root.append(errorNode);
       })
@@ -1429,6 +1428,7 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
         const message = error instanceof Error ? error.message : "Log out failed";
         logoutErrorNode?.remove();
         logoutErrorNode = document.createElement("p");
+        logoutErrorNode.classList.add("error-banner");
         logoutErrorNode.textContent = message;
         root.append(logoutErrorNode);
       })
@@ -1437,15 +1437,10 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
       });
   });
 
-  nav.style.display = "flex";
-  nav.style.gap = "0.5rem";
+  nav.classList.add("tabs");
   nav.append(healthButton, catalogButton);
 
-  toolbar.style.display = "flex";
-  toolbar.style.flexWrap = "wrap";
-  toolbar.style.gap = "1rem";
-  toolbar.style.justifyContent = "space-between";
-  toolbar.style.marginBottom = "1rem";
+  toolbar.classList.add("toolbar");
   content.append(summary, nav);
   toolbar.append(content, logoutButton);
 
@@ -1484,41 +1479,31 @@ function serviceToFormState(service: ServiceEntry): FormState {
 }
 
 function styleSection(section: HTMLElement): void {
-  section.style.border = "1px solid #d0d7de";
-  section.style.borderRadius = "0.5rem";
-  section.style.marginBottom = "1rem";
-  section.style.padding = "1rem";
+  section.classList.add("card");
 }
 
 function styleStatusBadge(node: HTMLElement, status: HealthCheck["status"]): void {
   switch (status) {
     case "fail":
-      node.style.backgroundColor = "#fbeaea";
-      node.style.color = "#a40e26";
+      node.classList.add("badge--fail");
       return;
     case "ok":
-      node.style.backgroundColor = "#dafbe1";
-      node.style.color = "#116329";
+      node.classList.add("badge--ok");
       return;
     case "skip":
-      node.style.backgroundColor = "#ddf4ff";
-      node.style.color = "#0550ae";
+      node.classList.add("badge--skip");
       return;
   }
 }
 
 function styleTable(table: HTMLTableElement): void {
-  table.style.borderCollapse = "collapse";
-  table.style.width = "100%";
+  table.classList.add("table");
 }
 
 function styleTableCell(cell: HTMLTableCellElement, header = false): void {
-  cell.style.border = "1px solid #d0d7de";
-  cell.style.padding = "0.5rem";
-  cell.style.textAlign = "left";
-  cell.style.verticalAlign = "top";
+  cell.classList.add("table__cell");
   if (header) {
-    cell.style.backgroundColor = "#f6f8fa";
+    cell.classList.add("table__cell--header");
   }
 }
 
