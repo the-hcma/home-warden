@@ -41,7 +41,12 @@ def create_app(
     login_rate_limiter: LoginRateLimiter | None = None,
     session_secret: str | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="home-warden", version="0.1.0")
+    # FastAPI's default /docs (Swagger UI) and /redoc pull their JS/CSS/fonts
+    # from third-party CDNs (jsdelivr, fonts.googleapis.com), which the CSP
+    # above blocks anyway (rendering a blank page), and this app has no
+    # public API contract that needs a live schema browser. Disabling them
+    # also drops an unauthenticated endpoint instead of leaving a broken one.
+    app = FastAPI(title="home-warden", version="0.1.0", docs_url=None, redoc_url=None)
     app.middleware("http")(add_security_headers)
     app.add_middleware(
         SessionMiddleware,

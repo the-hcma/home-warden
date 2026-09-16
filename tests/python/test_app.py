@@ -93,6 +93,16 @@ def test_static_mount_serves_a_committed_file() -> None:
     assert '<script type="module" src="/static/dist/main.js">' in index_html
 
 
+def test_swagger_and_redoc_are_disabled() -> None:
+    # #76: FastAPI's default /docs and /redoc pull JS/CSS from third-party
+    # CDNs, which the app's own CSP blocks anyway (a blank page), and this
+    # app has no public API contract needing a live schema browser -- both
+    # must be off rather than left broken.
+    client = make_client()
+    assert client.get("/docs").status_code == HTTPStatus.NOT_FOUND
+    assert client.get("/redoc").status_code == HTTPStatus.NOT_FOUND
+
+
 def test_security_headers_present_on_every_response() -> None:
     # #76: baseline hardening headers must be present regardless of route,
     # auth state, or status code -- check an unauthenticated 303 redirect,

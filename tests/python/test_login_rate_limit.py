@@ -50,6 +50,21 @@ def test_backoff_is_capped_at_max_backoff_seconds() -> None:
     assert limiter.seconds_until_allowed("1.2.3.4") <= 10.0
 
 
+def test_many_failures_do_not_overflow_the_backoff_calculation() -> None:
+    # entry.failures is attacker-controlled (each unauthenticated attempt
+    # increments it); a naive 2 ** failures would raise OverflowError long
+    # before reaching this count, taking the only login route down with a
+    # 500 that never recovers. The block must instead stay pinned at the
+    # cap without raising.
+    clock = _FakeClock()
+    limiter = LoginRateLimiter(base_backoff_seconds=1.0, failure_threshold=1, max_backoff_seconds=60.0, clock=clock)
+
+    for _ in range(2000):
+        limiter.record_failure("1.2.3.4")
+
+    assert limiter.seconds_until_allowed("1.2.3.4") == 60.0
+
+
 def test_record_success_clears_the_block() -> None:
     clock = _FakeClock()
     limiter = LoginRateLimiter(base_backoff_seconds=1.0, failure_threshold=1, clock=clock)

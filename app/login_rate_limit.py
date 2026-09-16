@@ -72,7 +72,13 @@ class LoginRateLimiter:
             entry.last_seen = now
             entry.failures += 1
             if entry.failures > self._failure_threshold:
-                backoff = self._base_backoff_seconds * (2 ** (entry.failures - self._failure_threshold - 1))
+                # Bound the exponent itself, not just the resulting backoff:
+                # entry.failures is attacker-controlled (unauthenticated
+                # requests keep incrementing it), and 2 ** huge_exponent
+                # raises OverflowError converting to float long before
+                # min(...) below ever gets a chance to clamp the value.
+                exponent = min(entry.failures - self._failure_threshold - 1, 63)
+                backoff = self._base_backoff_seconds * (2**exponent)
                 entry.blocked_until = now + min(backoff, self._max_backoff_seconds)
             self._evict_stale(now)
 
