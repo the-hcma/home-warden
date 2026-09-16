@@ -1498,9 +1498,10 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
   });
 
   menuButton.classList.add("menu-button");
-  menuButton.textContent = "☰ Menu";
+  menuButton.textContent = "☰";
   menuButton.type = "button";
   menuButton.setAttribute("aria-expanded", "false");
+  menuButton.setAttribute("aria-label", "Menu");
   menuButton.addEventListener("click", () => {
     setMenuOpen(Boolean(menuPanel.hidden));
   });
@@ -1520,11 +1521,15 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
     }
   });
 
-  toolbar.classList.add("toolbar");
-  content.append(summary, menu);
-  toolbar.append(content, logoutButton);
+  const headerBar = document.createElement("div");
+  headerBar.classList.add("header-bar");
+  headerBar.append(menu, heading, logoutButton);
 
-  root.replaceChildren(heading, toolbar, shell);
+  toolbar.classList.add("toolbar");
+  content.append(summary);
+  toolbar.append(headerBar, content);
+
+  root.replaceChildren(toolbar, shell);
   mountView(activeView);
 
   function closeMenu(): void {
