@@ -97,6 +97,25 @@ def test_catalog_list_host_guard_refused() -> None:
     assert response.status_code == 503
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        ("delete", "/catalog/services/example", None),
+        ("get", "/catalog/services/example", None),
+        ("post", "/catalog/apply", {"action": "delete", "name": "example"}),
+        ("post", "/catalog/preview", {"action": "delete", "name": "example"}),
+        ("post", "/catalog/services", {"service": _service("example")}),
+        ("put", "/catalog/services/example", {"service": {"server_name": "new.example.com"}}),
+    ],
+)
+def test_catalog_mutating_routes_host_guard_refused(method: str, path: str, payload: dict | None) -> None:
+    client = make_client()
+    with patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=False):
+        request = getattr(client, method)
+        response = request(path, json=payload) if payload is not None else request(path)
+    assert response.status_code == 503
+
+
 def test_catalog_list_returns_services(tmp_path: Path) -> None:
     catalog_path = tmp_path / "services.json"
     catalog_path.write_text(json.dumps({"services": [_service("one"), _service("two")]}), encoding="utf-8")
