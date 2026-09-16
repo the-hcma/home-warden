@@ -36,6 +36,25 @@ def build_web_ui_catalog_service(config: HomeWardenConfig) -> dict | None:
     }
 
 
+def catalog_with_web_ui_service(catalog: dict, config: HomeWardenConfig) -> dict:
+    web_ui_service = build_web_ui_catalog_service(config)
+    if web_ui_service is None:
+        return catalog
+
+    services = list(catalog.get("services") or [])
+    for service in services:
+        if service.get("name") == web_ui_service["name"]:
+            raise ValueError(f"catalog already defines reserved service name {web_ui_service['name']!r}")
+        if service.get("server_name") == web_ui_service["server_name"]:
+            raise ValueError(
+                f"catalog already defines server_name {web_ui_service['server_name']!r} reserved for the web UI"
+            )
+
+    merged_catalog = dict(catalog)
+    merged_catalog["services"] = [*services, web_ui_service]
+    return merged_catalog
+
+
 def config_path(path: Path | None = None) -> Path:
     if path is not None:
         return path

@@ -11,6 +11,7 @@ from app.home_warden_config import (
     BACKEND_LOOPBACK_PORT,
     HomeWardenConfig,
     build_web_ui_catalog_service,
+    catalog_with_web_ui_service,
     config_path,
     load_config,
 )
@@ -34,6 +35,29 @@ def test_build_web_ui_catalog_service_returns_proxy_entry_when_fqdn_set() -> Non
             "scheme": "http",
         },
     }
+
+
+def test_catalog_with_web_ui_service_appends_the_self_catalog_entry() -> None:
+    catalog = {"services": [{"kind": "static", "name": "downloads", "server_name": "downloads.example.com"}]}
+
+    merged = catalog_with_web_ui_service(catalog, HomeWardenConfig(fqdn="warden.example.com"))
+
+    assert [service["name"] for service in merged["services"]] == ["downloads", "home-warden-web-ui"]
+    assert [service["name"] for service in catalog["services"]] == ["downloads"]
+
+
+def test_catalog_with_web_ui_service_rejects_reserved_name_collisions() -> None:
+    catalog = {"services": [{"kind": "proxy", "name": "home-warden-web-ui", "server_name": "app.example.com"}]}
+
+    with pytest.raises(ValueError, match="reserved service name"):
+        catalog_with_web_ui_service(catalog, HomeWardenConfig(fqdn="warden.example.com"))
+
+
+def test_catalog_with_web_ui_service_rejects_reserved_server_name_collisions() -> None:
+    catalog = {"services": [{"kind": "proxy", "name": "app", "server_name": "warden.example.com"}]}
+
+    with pytest.raises(ValueError, match="reserved for the web UI"):
+        catalog_with_web_ui_service(catalog, HomeWardenConfig(fqdn="warden.example.com"))
 
 
 def test_config_path_defaults_to_xdg_location(monkeypatch: pytest.MonkeyPatch) -> None:

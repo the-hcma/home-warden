@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Privileged nginx -t helper for web UI preview/apply validation.
+#
+# Source template installed by scripts/setup-service as the root-owned
+# /usr/local/sbin/home-warden-nginx-test-candidate helper. The installed copy
+# reads the fixed preview config path from a root-owned marker file and accepts
+# no caller-controlled path.
+
+set -euo pipefail
+
+readonly owner_home="@@OWNER_HOME@@"
+readonly host_guard_lib="@@HOST_GUARD_LIB@@"
+readonly preview_conf_path_file="@@PREVIEW_CONF_PATH_FILE@@"
+
+usage() {
+  echo "Usage: home-warden-nginx-test-candidate" >&2
+}
+
+if ((EUID != 0)); then
+  echo "nginx-test-candidate: run via sudo/root" >&2
+  exit 2
+fi
+
+if [[ $# -ne 0 ]]; then
+  usage
+  exit 2
+fi
+
+export HOME="${owner_home}"
+if [[ ! -r "${host_guard_lib}" ]]; then
+  echo "nginx-test-candidate: host-guard library not found: ${host_guard_lib}" >&2
+  exit 2
+fi
+
+# shellcheck disable=SC1090 # setup-service installs the absolute root-owned host-guard path.
+source "${host_guard_lib}"
+
+if ! hw_host_guard_enforce "nginx-test-candidate"; then
+  exit 1
+fi
+
+preview_conf="$(hw_first_line "${preview_conf_path_file}")"
+readonly preview_conf
+if [[ -z "${preview_conf}" ]]; then
+  echo "nginx-test-candidate: preview-conf path file is empty: ${preview_conf_path_file}" >&2
+  exit 2
+fi
+
+if [[ ! -f "${preview_conf}" ]]; then
+  echo "nginx-test-candidate: conf not found: ${preview_conf}" >&2
+  exit 2
+fi
+
+nginx_bin="/usr/sbin/nginx"
+if [[ ! -x "${nginx_bin}" ]]; then
+  nginx_bin="$(command -v nginx 2>/dev/null || true)"
+fi
+if [[ -z "${nginx_bin}" ]]; then
+  echo "nginx-test-candidate: nginx binary not found" >&2
+  exit 2
+fi
+readonly nginx_bin
+
+exec "${nginx_bin}" -t -c "${preview_conf}"
