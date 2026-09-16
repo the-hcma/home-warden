@@ -14,6 +14,7 @@
 // adopted structural model).
 
 import { build, context } from "esbuild";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -22,6 +23,19 @@ const repoRoot = path.resolve(here, "..");
 const outdir = path.join(repoRoot, "app", "api", "static", "dist");
 
 const watch = process.argv.includes("--watch");
+
+function readCommitSha() {
+  try {
+    return execFileSync("git", ["rev-parse", "--short", "HEAD"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    }).trim();
+  } catch {
+    // No .git available (e.g. a packaged/tarball checkout) -- the About
+    // view falls back to this rather than failing the build.
+    return "unknown";
+  }
+}
 
 /** @type {import("esbuild").BuildOptions} */
 const options = {
@@ -39,6 +53,9 @@ const options = {
   // Stable filename; index.html refers to /static/dist/main.js by name.
   // Hashing/cache-busting is a later-PR concern once there are real assets.
   entryNames: "[name]",
+  define: {
+    __COMMIT_SHA__: JSON.stringify(readCommitSha()),
+  },
 };
 
 if (watch) {

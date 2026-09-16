@@ -3,6 +3,11 @@
 // Still intentionally framework-free: plain DOM + fetch keeps the first UI
 // issues small and inspectable while the backend contract settles.
 
+// Injected by web/build.mjs's esbuild `define` at build time from
+// `git rev-parse --short HEAD`; falls back to "unknown" if `.git` isn't
+// available (e.g. a packaged checkout).
+declare const __COMMIT_SHA__: string;
+
 type AppView = "about" | "catalog" | "health";
 type CatalogAction = "create" | "delete" | "update";
 type ServiceKind = "proxy" | "static";
@@ -113,6 +118,7 @@ type HealthResponse = {
 };
 
 const appPath = "/";
+const appCopyright = "Copyright © 2026 Henrique Andrade";
 const appLicense = "MIT License";
 const appLogo = "🛡️";
 const appRepoUrl = "https://github.com/the-hcma/home-warden";
@@ -411,6 +417,7 @@ function mountAboutPanel(root: HTMLElement, username: string): () => void {
   const facts = document.createElement("p");
   const repoLink = document.createElement("a");
   const licenseLink = document.createElement("a");
+  const commitLink = document.createElement("a");
 
   heading.textContent = `${appLogo} home-warden`;
   description.textContent =
@@ -426,14 +433,27 @@ function mountAboutPanel(root: HTMLElement, username: string): () => void {
   licenseLink.target = "_blank";
   licenseLink.textContent = appLicense;
 
+  const commitSha = __COMMIT_SHA__;
+  const commitNode: Node = document.createTextNode(commitSha);
+  if (commitSha !== "unknown") {
+    commitLink.href = `${appRepoUrl}/commit/${commitSha}`;
+    commitLink.rel = "noopener noreferrer";
+    commitLink.target = "_blank";
+    commitLink.textContent = commitSha;
+  }
+
   facts.append(
-    `Version ${appVersion}`,
+    `Version ${appVersion} (`,
+    commitSha === "unknown" ? commitNode : commitLink,
+    `)`,
     document.createElement("br"),
     "Repository: ",
     repoLink,
     document.createElement("br"),
     "License: ",
     licenseLink,
+    document.createElement("br"),
+    appCopyright,
     document.createElement("br"),
     `Signed in as ${username}.`,
   );
