@@ -3,7 +3,7 @@
 // Still intentionally framework-free: plain DOM + fetch keeps the first UI
 // issues small and inspectable while the backend contract settles.
 
-type AppView = "catalog" | "health";
+type AppView = "about" | "catalog" | "health";
 type CatalogAction = "create" | "delete" | "update";
 type ServiceKind = "proxy" | "static";
 type SessionResponse = {
@@ -113,6 +113,10 @@ type HealthResponse = {
 };
 
 const appPath = "/";
+const appLicense = "MIT License";
+const appLogo = "🛡️";
+const appRepoUrl = "https://github.com/the-hcma/home-warden";
+const appVersion = "0.1.0";
 const healthPollIntervalMs = 30_000;
 const loginPath = "/login";
 
@@ -398,6 +402,49 @@ async function logout(): Promise<void> {
     throw new Error(await errorMessage(response));
   }
   window.location.assign(loginPath);
+}
+
+function mountAboutPanel(root: HTMLElement, username: string): () => void {
+  const card = document.createElement("div");
+  const heading = document.createElement("h2");
+  const description = document.createElement("p");
+  const facts = document.createElement("p");
+  const repoLink = document.createElement("a");
+  const licenseLink = document.createElement("a");
+
+  heading.textContent = `${appLogo} home-warden`;
+  description.textContent =
+    "A self-hosted nginx reverse proxy + certbot runner for home services, managed through this admin UI.";
+
+  repoLink.href = appRepoUrl;
+  repoLink.rel = "noopener noreferrer";
+  repoLink.target = "_blank";
+  repoLink.textContent = appRepoUrl.replace("https://", "");
+
+  licenseLink.href = `${appRepoUrl}/blob/main/LICENSE`;
+  licenseLink.rel = "noopener noreferrer";
+  licenseLink.target = "_blank";
+  licenseLink.textContent = appLicense;
+
+  facts.append(
+    `Version ${appVersion}`,
+    document.createElement("br"),
+    "Repository: ",
+    repoLink,
+    document.createElement("br"),
+    "License: ",
+    licenseLink,
+    document.createElement("br"),
+    `Signed in as ${username}.`,
+  );
+
+  card.append(heading, description, facts);
+  styleSection(card);
+  root.replaceChildren(card);
+
+  return () => {
+    root.replaceChildren();
+  };
 }
 
 function mountAppShell(root: HTMLElement): void {
@@ -1244,7 +1291,7 @@ function mountLoginForm(root: HTMLElement): void {
   let errorNode: HTMLParagraphElement | null = null;
 
   const heading = document.createElement("h1");
-  heading.textContent = "home-warden login";
+  heading.textContent = `${appLogo} home-warden login`;
 
   const form = document.createElement("form");
   const passwordInput = document.createElement("input");
@@ -1386,10 +1433,13 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
     window.location.assign(loginPath);
     return;
   }
+  const username = session.username;
 
   const content = document.createElement("div");
   const heading = document.createElement("h1");
-  const nav = document.createElement("div");
+  const menu = document.createElement("div");
+  const menuButton = document.createElement("button");
+  const menuPanel = document.createElement("div");
   const shell = document.createElement("div");
   const summary = document.createElement("p");
   const toolbar = document.createElement("div");
@@ -1397,23 +1447,33 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
   let logoutErrorNode: HTMLParagraphElement | null = null;
   let unmountCurrentView: (() => void) | null = null;
 
-  heading.textContent = "home-warden";
-  summary.textContent = `Signed in as ${session.username}.`;
+  heading.textContent = `${appLogo} home-warden`;
+  summary.textContent = `Signed in as ${username}.`;
 
+  const aboutButton = document.createElement("button");
   const catalogButton = document.createElement("button");
   const healthButton = document.createElement("button");
   const logoutButton = document.createElement("button");
+
+  aboutButton.textContent = "About";
+  aboutButton.type = "button";
+  aboutButton.addEventListener("click", () => {
+    mountView("about");
+    closeMenu();
+  });
 
   catalogButton.textContent = "Catalog";
   catalogButton.type = "button";
   catalogButton.addEventListener("click", () => {
     mountView("catalog");
+    closeMenu();
   });
 
   healthButton.textContent = "Health dashboard";
   healthButton.type = "button";
   healthButton.addEventListener("click", () => {
     mountView("health");
+    closeMenu();
   });
 
   logoutButton.textContent = "Log out";
@@ -1437,15 +1497,44 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
       });
   });
 
-  nav.classList.add("tabs");
-  nav.append(healthButton, catalogButton);
+  menuButton.classList.add("menu-button");
+  menuButton.textContent = "☰ Menu";
+  menuButton.type = "button";
+  menuButton.setAttribute("aria-expanded", "false");
+  menuButton.addEventListener("click", () => {
+    setMenuOpen(Boolean(menuPanel.hidden));
+  });
+
+  menuPanel.classList.add("menu-panel");
+  menuPanel.hidden = true;
+  menuPanel.append(healthButton, catalogButton, aboutButton);
+
+  menu.classList.add("menu");
+  menu.append(menuButton, menuPanel);
+
+  // Close the menu on an outside click -- registered once here rather than
+  // added/removed per open/close so there's nothing to leak on unmount.
+  document.addEventListener("click", (event) => {
+    if (!menuPanel.hidden && !menu.contains(event.target as Node)) {
+      setMenuOpen(false);
+    }
+  });
 
   toolbar.classList.add("toolbar");
-  content.append(summary, nav);
+  content.append(summary, menu);
   toolbar.append(content, logoutButton);
 
   root.replaceChildren(heading, toolbar, shell);
   mountView(activeView);
+
+  function closeMenu(): void {
+    setMenuOpen(false);
+  }
+
+  function setMenuOpen(open: boolean): void {
+    menuPanel.hidden = !open;
+    menuButton.setAttribute("aria-expanded", String(open));
+  }
 
   function mountView(view: AppView): void {
     if (activeView === view && unmountCurrentView) {
@@ -1454,11 +1543,18 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
 
     unmountCurrentView?.();
     activeView = view;
+    aboutButton.disabled = activeView === "about";
     catalogButton.disabled = activeView === "catalog";
     healthButton.disabled = activeView === "health";
-    unmountCurrentView = activeView === "catalog" ? mountCatalogManager(shell) : mountHealthDashboard(shell);
+    unmountCurrentView =
+      activeView === "catalog"
+        ? mountCatalogManager(shell)
+        : activeView === "about"
+          ? mountAboutPanel(shell, username)
+          : mountHealthDashboard(shell);
   }
 }
+
 
 function serviceToFormState(service: ServiceEntry): FormState {
   return {
