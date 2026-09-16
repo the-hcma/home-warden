@@ -55,6 +55,10 @@ def _configure_real_preview(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     monkeypatch.setattr("app.catalog_crud.certs_live_dir", lambda: tmp_path / "certs")
     monkeypatch.setattr("app.catalog_crud.load_config", lambda path: HomeWardenConfig())
     monkeypatch.setattr("app.catalog_crud.subprocess.run", fake_run)
+    # Force the SCRATCH_DIR fallback rather than whatever setup-service may have
+    # installed on the machine running this suite (AGENTS.md: tests must not
+    # depend on live infrastructure) -- mirrors test_catalog_crud.py's autouse fixture.
+    monkeypatch.setattr("app.catalog_crud.NGINX_PREVIEW_CONF_PATH_FILE", tmp_path / "unused-preview-conf-path")
 
 
 def make_client() -> TestClient:
