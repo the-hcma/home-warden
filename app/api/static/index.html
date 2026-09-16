@@ -4,6 +4,337 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>home-warden</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%9B%A1%EF%B8%8F%3C/text%3E%3C/svg%3E"
+    />
+    <style>
+      /*
+       * Plain CSS theme for the admin UI (#75). No framework/preprocessor --
+       * matches AGENTS.md's "no Tailwind, no frontend framework" rule for web/.
+       * Light theme is the default; dark values apply automatically for
+       * operators whose OS/browser prefers a dark color scheme.
+       */
+      :root {
+        color-scheme: light dark;
+        --hw-bg: #f6f8fa;
+        --hw-surface: #ffffff;
+        --hw-border: #d0d7de;
+        --hw-fg: #1f2328;
+        --hw-muted: #57606a;
+        --hw-accent: #0969da;
+        --hw-accent-fg: #ffffff;
+        --hw-danger: #a40e26;
+        --hw-danger-bg: #fbeaea;
+        --hw-ok: #116329;
+        --hw-ok-bg: #dafbe1;
+        --hw-skip: #0550ae;
+        --hw-skip-bg: #ddf4ff;
+        --hw-radius: 0.5rem;
+        --hw-font:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --hw-bg: #0d1117;
+          --hw-surface: #161b22;
+          --hw-border: #30363d;
+          --hw-fg: #e6edf3;
+          --hw-muted: #8b949e;
+          --hw-accent: #4493f8;
+          --hw-accent-fg: #0d1117;
+          --hw-danger: #ff7b72;
+          --hw-danger-bg: #2d1214;
+          --hw-ok: #3fb950;
+          --hw-ok-bg: #10261a;
+          --hw-skip: #58a6ff;
+          --hw-skip-bg: #0c2d48;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: var(--hw-font);
+        background: var(--hw-bg);
+        color: var(--hw-fg);
+        line-height: 1.5;
+      }
+
+      #app {
+        max-width: 72rem;
+        margin: 0 auto;
+        padding: 1.5rem;
+      }
+
+      #app.login-shell {
+        max-width: 24rem;
+        margin: 4rem auto;
+      }
+
+      h1,
+      h2,
+      h3,
+      h4 {
+        font-weight: 600;
+        line-height: 1.25;
+      }
+
+      h1 {
+        font-size: 1.75rem;
+        margin: 0 0 1rem;
+      }
+
+      h2 {
+        font-size: 1.35rem;
+        margin: 0 0 0.75rem;
+      }
+
+      h3 {
+        font-size: 1.1rem;
+        margin: 0 0 0.5rem;
+      }
+
+      h4 {
+        font-size: 0.95rem;
+        margin: 0 0 0.35rem;
+        color: var(--hw-muted);
+      }
+
+      p {
+        margin: 0 0 0.75rem;
+      }
+
+      a {
+        color: var(--hw-accent);
+      }
+
+      label {
+        display: inline-block;
+        font-size: 0.9rem;
+        color: var(--hw-muted);
+        margin-top: 0.5rem;
+      }
+
+      input,
+      select,
+      textarea {
+        font: inherit;
+        color: var(--hw-fg);
+        background: var(--hw-surface);
+        border: 1px solid var(--hw-border);
+        border-radius: 0.35rem;
+        padding: 0.4rem 0.6rem;
+        margin-bottom: 0.5rem;
+        width: 100%;
+        max-width: 28rem;
+      }
+
+      input[type="checkbox"] {
+        width: auto;
+        margin-right: 0.35rem;
+        vertical-align: middle;
+      }
+
+      button {
+        font: inherit;
+        color: var(--hw-fg);
+        background: var(--hw-surface);
+        border: 1px solid var(--hw-border);
+        border-radius: 0.35rem;
+        padding: 0.45rem 0.9rem;
+        cursor: pointer;
+      }
+
+      button:hover:not(:disabled) {
+        border-color: var(--hw-accent);
+      }
+
+      button:disabled {
+        cursor: default;
+        opacity: 0.6;
+      }
+
+      button[type="submit"] {
+        background: var(--hw-accent);
+        color: var(--hw-accent-fg);
+        border-color: var(--hw-accent);
+      }
+
+      .toolbar {
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+        margin-bottom: 1rem;
+      }
+
+      .header-bar {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 0.5rem;
+      }
+
+      .header-bar h1 {
+        margin: 0;
+        flex: 1;
+      }
+
+      .menu {
+        position: relative;
+        display: inline-block;
+      }
+
+      .menu-button {
+        font-size: 1.25rem;
+        line-height: 1;
+        padding: 0.4rem 0.65rem;
+      }
+
+      .menu-panel {
+        position: absolute;
+        top: calc(100% + 0.35rem);
+        left: 0;
+        z-index: 10;
+        display: flex;
+        flex-direction: column;
+        min-width: 12rem;
+        background: var(--hw-surface);
+        border: 1px solid var(--hw-border);
+        border-radius: var(--hw-radius);
+        box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+        padding: 0.35rem;
+        gap: 0.15rem;
+      }
+
+      .menu-panel button {
+        display: block;
+        width: 100%;
+        text-align: left;
+        border: none;
+        border-radius: 0.3rem;
+        background: transparent;
+        padding: 0.5rem 0.65rem;
+      }
+
+      .menu-panel button:hover:not(:disabled) {
+        background: var(--hw-bg);
+        border-color: transparent;
+      }
+
+      .menu-panel button:disabled {
+        background: var(--hw-accent);
+        color: var(--hw-accent-fg);
+        opacity: 1;
+      }
+
+      .menu-panel[hidden] {
+        display: none;
+      }
+
+      .card {
+        border: 1px solid var(--hw-border);
+        border-radius: var(--hw-radius);
+        background: var(--hw-surface);
+        margin-bottom: 1rem;
+        padding: 1rem;
+      }
+
+      .catalog-layout {
+        display: grid;
+        gap: 1.5rem;
+      }
+
+      @media (min-width: 60rem) {
+        .catalog-layout {
+          grid-template-columns: 1fr 1fr;
+        }
+
+        .catalog-layout > :last-child {
+          grid-column: 1 / -1;
+        }
+      }
+
+      table.table {
+        border-collapse: collapse;
+        width: 100%;
+      }
+
+      .table__cell {
+        border: 1px solid var(--hw-border);
+        padding: 0.5rem;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .table__cell--header {
+        background: var(--hw-bg);
+        font-weight: 600;
+      }
+
+      .badge {
+        display: inline-block;
+        border-radius: 999px;
+        font-size: 0.8rem;
+        font-weight: 700;
+        padding: 0.15rem 0.55rem;
+      }
+
+      .badge--ok {
+        background: var(--hw-ok-bg);
+        color: var(--hw-ok);
+      }
+
+      .badge--fail {
+        background: var(--hw-danger-bg);
+        color: var(--hw-danger);
+      }
+
+      .badge--skip {
+        background: var(--hw-skip-bg);
+        color: var(--hw-skip);
+      }
+
+      .message {
+        color: var(--hw-muted);
+      }
+
+      .error-banner {
+        color: var(--hw-danger);
+        background: var(--hw-danger-bg);
+        border: 1px solid var(--hw-danger);
+        border-radius: 0.35rem;
+        padding: 0.5rem 0.75rem;
+      }
+
+      .status-ok {
+        color: var(--hw-ok);
+      }
+
+      .status-fail {
+        color: var(--hw-danger);
+      }
+
+      .code-block {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        overflow-x: auto;
+        white-space: pre-wrap;
+        background: var(--hw-bg);
+        border: 1px solid var(--hw-border);
+        border-radius: 0.35rem;
+        padding: 0.6rem;
+      }
+
+      .check-detail {
+        margin-top: 0.35rem;
+        margin-bottom: 0;
+        white-space: pre-wrap;
+      }
+    </style>
   </head>
   <body>
     <div id="app"></div>

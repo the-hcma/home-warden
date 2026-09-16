@@ -3,7 +3,12 @@
 // Still intentionally framework-free: plain DOM + fetch keeps the first UI
 // issues small and inspectable while the backend contract settles.
 
-type AppView = "catalog" | "health";
+// Injected by web/build.mjs's esbuild `define` at build time from
+// `git rev-parse --short HEAD`; falls back to "unknown" if `.git` isn't
+// available (e.g. a packaged checkout).
+declare const __COMMIT_SHA__: string;
+
+type AppView = "about" | "catalog" | "health";
 type CatalogAction = "create" | "delete" | "update";
 type ServiceKind = "proxy" | "static";
 type SessionResponse = {
@@ -113,6 +118,11 @@ type HealthResponse = {
 };
 
 const appPath = "/";
+const appCopyright = "Copyright © 2026 Henrique Andrade";
+const appLicense = "MIT License";
+const appLogo = "🛡️";
+const appRepoUrl = "https://github.com/the-hcma/home-warden";
+const appVersion = "0.1.0";
 const healthPollIntervalMs = 30_000;
 const loginPath = "/login";
 
@@ -279,11 +289,7 @@ function buildStatusBadge(status: HealthCheck["status"]): HTMLElement {
   const badge = document.createElement("span");
 
   badge.textContent = status.toUpperCase();
-  badge.style.borderRadius = "999px";
-  badge.style.display = "inline-block";
-  badge.style.fontSize = "0.8rem";
-  badge.style.fontWeight = "700";
-  badge.style.padding = "0.15rem 0.55rem";
+  badge.classList.add("badge");
   styleStatusBadge(badge, status);
   return badge;
 }
@@ -404,6 +410,63 @@ async function logout(): Promise<void> {
   window.location.assign(loginPath);
 }
 
+function mountAboutPanel(root: HTMLElement, username: string): () => void {
+  const card = document.createElement("div");
+  const heading = document.createElement("h2");
+  const description = document.createElement("p");
+  const facts = document.createElement("p");
+  const repoLink = document.createElement("a");
+  const licenseLink = document.createElement("a");
+  const commitLink = document.createElement("a");
+
+  heading.textContent = `${appLogo} home-warden`;
+  description.textContent =
+    "A self-hosted nginx reverse proxy + certbot runner for home services, managed through this admin UI.";
+
+  repoLink.href = appRepoUrl;
+  repoLink.rel = "noopener noreferrer";
+  repoLink.target = "_blank";
+  repoLink.textContent = appRepoUrl.replace("https://", "");
+
+  licenseLink.href = `${appRepoUrl}/blob/main/LICENSE`;
+  licenseLink.rel = "noopener noreferrer";
+  licenseLink.target = "_blank";
+  licenseLink.textContent = appLicense;
+
+  const commitSha = __COMMIT_SHA__;
+  const commitNode: Node = document.createTextNode(commitSha);
+  if (commitSha !== "unknown") {
+    commitLink.href = `${appRepoUrl}/commit/${commitSha}`;
+    commitLink.rel = "noopener noreferrer";
+    commitLink.target = "_blank";
+    commitLink.textContent = commitSha;
+  }
+
+  facts.append(
+    `Version ${appVersion} (`,
+    commitSha === "unknown" ? commitNode : commitLink,
+    `)`,
+    document.createElement("br"),
+    "Repository: ",
+    repoLink,
+    document.createElement("br"),
+    "License: ",
+    licenseLink,
+    document.createElement("br"),
+    appCopyright,
+    document.createElement("br"),
+    `Signed in as ${username}.`,
+  );
+
+  card.append(heading, description, facts);
+  styleSection(card);
+  root.replaceChildren(card);
+
+  return () => {
+    root.replaceChildren();
+  };
+}
+
 function mountAppShell(root: HTMLElement): void {
   renderAppShell(root).catch((error: unknown) => {
     // readSession()/logout() throw on a 500/503 or a dropped connection --
@@ -412,6 +475,7 @@ function mountAppShell(root: HTMLElement): void {
     console.error("home-warden: failed to render app shell", error);
     const message = error instanceof Error ? error.message : "Failed to load session";
     const errorNode = document.createElement("p");
+    errorNode.classList.add("error-banner");
     errorNode.textContent = message;
     root.replaceChildren(errorNode);
   });
@@ -643,8 +707,7 @@ function mountCatalogManager(root: HTMLElement): () => void {
     styleSection(editorSection);
     styleSection(listSection);
 
-    layout.style.display = "grid";
-    layout.style.gap = "1.5rem";
+    layout.classList.add("catalog-layout");
     layout.append(listSection, editorSection, previewSection);
 
     actionsHost = actions;
@@ -670,11 +733,13 @@ function mountCatalogManager(root: HTMLElement): () => void {
 
     if (state.message) {
       const messageNode = document.createElement("p");
+      messageNode.classList.add("message");
       messageNode.textContent = state.message;
       actions.append(messageNode);
     }
     if (state.error) {
       const errorNode = document.createElement("p");
+      errorNode.classList.add("error-banner");
       errorNode.textContent = state.error;
       actions.append(errorNode);
     }
@@ -689,9 +754,7 @@ function mountCatalogManager(root: HTMLElement): () => void {
 
     heading.textContent = `${title} (${status})`;
     pre.textContent = content || "(empty)";
-    pre.style.fontFamily = "monospace";
-    pre.style.overflowX = "auto";
-    pre.style.whiteSpace = "pre-wrap";
+    pre.classList.add("code-block");
     wrapper.append(heading, pre);
     return wrapper;
   }
@@ -723,6 +786,7 @@ function mountCatalogManager(root: HTMLElement): () => void {
     });
 
     const gateStatus = document.createElement("p");
+    gateStatus.classList.add(state.preview.can_apply ? "status-ok" : "status-fail");
     gateStatus.textContent = state.preview.can_apply
       ? "nginx validation passed — apply is enabled."
       : "nginx validation failed or is unavailable — apply is disabled.";
@@ -1035,6 +1099,7 @@ function mountHealthDashboard(root: HTMLElement): () => void {
     controls.append(refreshButton);
 
     const cadence = document.createElement("p");
+    cadence.classList.add("message");
     cadence.textContent = state.lastUpdatedLabel
       ? `Auto-refreshes every 30s. Last updated ${state.lastUpdatedLabel}.`
       : "Auto-refreshes every 30s.";
@@ -1042,6 +1107,7 @@ function mountHealthDashboard(root: HTMLElement): () => void {
 
     if (state.error) {
       const errorNode = document.createElement("p");
+      errorNode.classList.add("error-banner");
       errorNode.textContent = state.data ? `${state.error}. Showing last successful response.` : state.error;
       controls.append(errorNode);
     }
@@ -1138,9 +1204,7 @@ function mountHealthDashboard(root: HTMLElement): () => void {
 
     const detail = document.createElement("p");
     detail.textContent = check.detail;
-    detail.style.marginBottom = "0";
-    detail.style.marginTop = "0.35rem";
-    detail.style.whiteSpace = "pre-wrap";
+    detail.classList.add("check-detail");
 
     wrapper.append(buildStatusBadge(check.status), detail);
     return wrapper;
@@ -1243,10 +1307,11 @@ function mountHealthDashboard(root: HTMLElement): () => void {
 }
 
 function mountLoginForm(root: HTMLElement): void {
+  root.classList.add("login-shell");
   let errorNode: HTMLParagraphElement | null = null;
 
   const heading = document.createElement("h1");
-  heading.textContent = "home-warden login";
+  heading.textContent = `${appLogo} home-warden login`;
 
   const form = document.createElement("form");
   const passwordInput = document.createElement("input");
@@ -1295,6 +1360,7 @@ function mountLoginForm(root: HTMLElement): void {
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : "Login failed";
         errorNode = document.createElement("p");
+        errorNode.classList.add("error-banner");
         errorNode.textContent = message;
         root.append(errorNode);
       })
@@ -1387,10 +1453,13 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
     window.location.assign(loginPath);
     return;
   }
+  const username = session.username;
 
   const content = document.createElement("div");
   const heading = document.createElement("h1");
-  const nav = document.createElement("div");
+  const menu = document.createElement("div");
+  const menuButton = document.createElement("button");
+  const menuPanel = document.createElement("div");
   const shell = document.createElement("div");
   const summary = document.createElement("p");
   const toolbar = document.createElement("div");
@@ -1398,23 +1467,33 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
   let logoutErrorNode: HTMLParagraphElement | null = null;
   let unmountCurrentView: (() => void) | null = null;
 
-  heading.textContent = "home-warden";
-  summary.textContent = `Signed in as ${session.username}.`;
+  heading.textContent = `${appLogo} home-warden`;
+  summary.textContent = `Signed in as ${username}.`;
 
+  const aboutButton = document.createElement("button");
   const catalogButton = document.createElement("button");
   const healthButton = document.createElement("button");
   const logoutButton = document.createElement("button");
+
+  aboutButton.textContent = "About";
+  aboutButton.type = "button";
+  aboutButton.addEventListener("click", () => {
+    mountView("about");
+    closeMenu();
+  });
 
   catalogButton.textContent = "Catalog";
   catalogButton.type = "button";
   catalogButton.addEventListener("click", () => {
     mountView("catalog");
+    closeMenu();
   });
 
   healthButton.textContent = "Health dashboard";
   healthButton.type = "button";
   healthButton.addEventListener("click", () => {
     mountView("health");
+    closeMenu();
   });
 
   logoutButton.textContent = "Log out";
@@ -1429,6 +1508,7 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
         const message = error instanceof Error ? error.message : "Log out failed";
         logoutErrorNode?.remove();
         logoutErrorNode = document.createElement("p");
+        logoutErrorNode.classList.add("error-banner");
         logoutErrorNode.textContent = message;
         root.append(logoutErrorNode);
       })
@@ -1437,20 +1517,49 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
       });
   });
 
-  nav.style.display = "flex";
-  nav.style.gap = "0.5rem";
-  nav.append(healthButton, catalogButton);
+  menuButton.classList.add("menu-button");
+  menuButton.textContent = "☰";
+  menuButton.type = "button";
+  menuButton.setAttribute("aria-expanded", "false");
+  menuButton.setAttribute("aria-label", "Menu");
+  menuButton.addEventListener("click", () => {
+    setMenuOpen(Boolean(menuPanel.hidden));
+  });
 
-  toolbar.style.display = "flex";
-  toolbar.style.flexWrap = "wrap";
-  toolbar.style.gap = "1rem";
-  toolbar.style.justifyContent = "space-between";
-  toolbar.style.marginBottom = "1rem";
-  content.append(summary, nav);
-  toolbar.append(content, logoutButton);
+  menuPanel.classList.add("menu-panel");
+  menuPanel.hidden = true;
+  menuPanel.append(healthButton, catalogButton, aboutButton);
 
-  root.replaceChildren(heading, toolbar, shell);
+  menu.classList.add("menu");
+  menu.append(menuButton, menuPanel);
+
+  // Close the menu on an outside click -- registered once here rather than
+  // added/removed per open/close so there's nothing to leak on unmount.
+  document.addEventListener("click", (event) => {
+    if (!menuPanel.hidden && !menu.contains(event.target as Node)) {
+      setMenuOpen(false);
+    }
+  });
+
+  const headerBar = document.createElement("div");
+  headerBar.classList.add("header-bar");
+  headerBar.append(menu, heading, logoutButton);
+
+  toolbar.classList.add("toolbar");
+  content.append(summary);
+  toolbar.append(headerBar, content);
+
+  root.replaceChildren(toolbar, shell);
   mountView(activeView);
+
+  function closeMenu(): void {
+    setMenuOpen(false);
+  }
+
+  function setMenuOpen(open: boolean): void {
+    menuPanel.hidden = !open;
+    menuButton.setAttribute("aria-expanded", String(open));
+  }
 
   function mountView(view: AppView): void {
     if (activeView === view && unmountCurrentView) {
@@ -1459,11 +1568,18 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
 
     unmountCurrentView?.();
     activeView = view;
+    aboutButton.disabled = activeView === "about";
     catalogButton.disabled = activeView === "catalog";
     healthButton.disabled = activeView === "health";
-    unmountCurrentView = activeView === "catalog" ? mountCatalogManager(shell) : mountHealthDashboard(shell);
+    unmountCurrentView =
+      activeView === "catalog"
+        ? mountCatalogManager(shell)
+        : activeView === "about"
+          ? mountAboutPanel(shell, username)
+          : mountHealthDashboard(shell);
   }
 }
+
 
 function serviceToFormState(service: ServiceEntry): FormState {
   return {
@@ -1484,41 +1600,31 @@ function serviceToFormState(service: ServiceEntry): FormState {
 }
 
 function styleSection(section: HTMLElement): void {
-  section.style.border = "1px solid #d0d7de";
-  section.style.borderRadius = "0.5rem";
-  section.style.marginBottom = "1rem";
-  section.style.padding = "1rem";
+  section.classList.add("card");
 }
 
 function styleStatusBadge(node: HTMLElement, status: HealthCheck["status"]): void {
   switch (status) {
     case "fail":
-      node.style.backgroundColor = "#fbeaea";
-      node.style.color = "#a40e26";
+      node.classList.add("badge--fail");
       return;
     case "ok":
-      node.style.backgroundColor = "#dafbe1";
-      node.style.color = "#116329";
+      node.classList.add("badge--ok");
       return;
     case "skip":
-      node.style.backgroundColor = "#ddf4ff";
-      node.style.color = "#0550ae";
+      node.classList.add("badge--skip");
       return;
   }
 }
 
 function styleTable(table: HTMLTableElement): void {
-  table.style.borderCollapse = "collapse";
-  table.style.width = "100%";
+  table.classList.add("table");
 }
 
 function styleTableCell(cell: HTMLTableCellElement, header = false): void {
-  cell.style.border = "1px solid #d0d7de";
-  cell.style.padding = "0.5rem";
-  cell.style.textAlign = "left";
-  cell.style.verticalAlign = "top";
+  cell.classList.add("table__cell");
   if (header) {
-    cell.style.backgroundColor = "#f6f8fa";
+    cell.classList.add("table__cell--header");
   }
 }
 
