@@ -227,6 +227,19 @@ systemctl status home-warden.socket home-warden.service \
 | `home-warden-healthcheck.timer` | Every minute → healthcheck | `systemctl list-timers home-warden-healthcheck.timer`; `sudo systemctl start home-warden-healthcheck.service` |
 | `home-warden-healthcheck.service` | Oneshot probe + optional email (no `[Install]`) | Activated by the timer or manual `start` |
 
+`setup-service` also installs a root-owned
+`/usr/local/sbin/home-warden-nginx-test-candidate` helper,
+`/usr/local/libexec/home-warden/host-guard`, the matching
+`/etc/sudoers.d/home-warden-web-ui-nginx-test` rule, and the root-owned
+`/usr/local/etc/home-warden-preview-conf-path` marker that records the one
+preview candidate path the helper is allowed to test. The web UI backend may
+only run that exact command via `sudo -n`; both the backend and the helper
+read the candidate path from the same marker file, so changing `SCRATCH_DIR`
+means re-running `setup-service` to refresh that single source of truth.
+Until `setup-service` installs or refreshes those files on the designated
+host, the UI can still render diffs but `nginx -t` remains unavailable and
+Apply stays blocked.
+
 Logs (also listed above):
 
 | Unit / script | Log |
