@@ -74,6 +74,7 @@ class LoginRateLimiter:
             if entry.failures > self._failure_threshold:
                 backoff = self._base_backoff_seconds * (2 ** (entry.failures - self._failure_threshold - 1))
                 entry.blocked_until = now + min(backoff, self._max_backoff_seconds)
+            self._evict_stale(now)
 
     def record_success(self, key: str) -> None:
         with self._lock:
@@ -83,8 +84,28 @@ class LoginRateLimiter:
         """Returns 0.0 if an attempt is allowed right now, otherwise how
         many seconds the caller must wait before trying again."""
         with self._lock:
+            now = self._clock()
             entry = self._entries.get(key)
             if entry is None:
                 return 0.0
-            remaining = entry.blocked_until - self._clock()
+            if now - entry.last_seen > self._entry_ttl_seconds:
+                del self._entries[key]
+                return 0.0
+            remaining = entry.blocked_until - now
             return remaining if remaining > 0 else 0.0
+
+    def _evict_stale(self, now: float) -> None:
+        # Called with self._lock already held. A key that fails once and is
+        # never seen again would otherwise keep its _Entry for the process
+        # lifetime -- record_success only clears the one key that just
+        # succeeded, and seconds_until_allowed only evicts a key that's
+        # actually queried again. Sweeping here (bounded by however often
+        # failures happen) is what actually bounds _entries' size against a
+        # flood of one-off/rotating source keys.
+        stale = [
+            stale_key
+            for stale_key, stale_entry in self._entries.items()
+            if now - stale_entry.last_seen > self._entry_ttl_seconds
+        ]
+        for stale_key in stale:
+            del self._entries[stale_key]

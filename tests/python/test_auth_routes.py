@@ -15,7 +15,11 @@ def _allow_only_alice(username: str, password: str) -> bool:
     return (username, password) == ("alice", "correct horse battery staple")
 
 
-def make_client(*, login_rate_limiter: LoginRateLimiter | None = None) -> TestClient:
+def make_client(
+    *,
+    client_peer: tuple[str, int] = ("testclient", 50000),
+    login_rate_limiter: LoginRateLimiter | None = None,
+) -> TestClient:
     return TestClient(
         create_app(
             authenticate_user=_allow_only_alice,
@@ -23,6 +27,7 @@ def make_client(*, login_rate_limiter: LoginRateLimiter | None = None) -> TestCl
             session_secret="test-session-secret",
         ),
         base_url="https://testserver",
+        client=client_peer,
     )
 
 
@@ -139,6 +144,26 @@ def test_successful_login_resets_the_failure_count() -> None:
 
     still_allowed = client.post("/auth/login", json={"username": "alice", "password": "correct horse battery staple"})
     assert still_allowed.status_code == HTTPStatus.OK
+
+
+def test_a_different_source_ip_is_unaffected_while_one_is_throttled() -> None:
+    # Pins the module's core claim (per-IP, not global/per-username): two
+    # clients sharing one LoginRateLimiter instance but distinct peer
+    # addresses must not affect each other. Without this, swapping
+    # _client_key to key on username (or a constant) would still pass
+    # every other throttling test in this file, since they all use one
+    # username *and* one peer address.
+    shared_limiter = LoginRateLimiter(clock=_FakeClock())
+    attacker = make_client(client_peer=("10.0.0.1", 50000), login_rate_limiter=shared_limiter)
+    victim = make_client(client_peer=("10.0.0.2", 50000), login_rate_limiter=shared_limiter)
+
+    for _ in range(6):
+        attacker.post("/auth/login", json={"username": "alice", "password": "wrong"})
+    throttled = attacker.post("/auth/login", json={"username": "alice", "password": "correct horse battery staple"})
+    assert throttled.status_code == HTTPStatus.TOO_MANY_REQUESTS
+
+    still_ok = victim.post("/auth/login", json={"username": "alice", "password": "correct horse battery staple"})
+    assert still_ok.status_code == HTTPStatus.OK
 
 
 class _FakeClock:

@@ -21,8 +21,12 @@ from starlette.responses import Response
 HSTS_VALUE = "max-age=31536000; includeSubDomains"
 # Single-origin static assets (web/, #67) with no third-party scripts, no
 # inline event handlers, and no embedding, so a strict default-src plus an
-# explicit frame-ancestors covers this app's actual surface.
-CSP_VALUE = "default-src 'self'; frame-ancestors 'none'"
+# explicit frame-ancestors covers this app's actual surface. style-src and
+# img-src need explicit 'unsafe-inline'/data: allowances: app/api/static
+# /index.html ships its CSS as an inline <style> block and its favicon as a
+# data: URI, both of which a bare default-src 'self' would silently block
+# (breaking the UI, not just tightening it).
+CSP_VALUE = "default-src 'self'; frame-ancestors 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
 
 SECURITY_HEADERS: dict[str, str] = {
     "Content-Security-Policy": CSP_VALUE,
