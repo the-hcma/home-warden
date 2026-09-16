@@ -29,6 +29,8 @@ from app.home_warden_auth import (
     get_session_username,
     require_session,
 )
+from app.login_rate_limit import LoginRateLimiter
+from app.security_headers import add_security_headers
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -36,9 +38,11 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 def create_app(
     *,
     authenticate_user: Callable[[str, str], bool] | None = None,
+    login_rate_limiter: LoginRateLimiter | None = None,
     session_secret: str | None = None,
 ) -> FastAPI:
     app = FastAPI(title="home-warden", version="0.1.0")
+    app.middleware("http")(add_security_headers)
     app.add_middleware(
         SessionMiddleware,
         secret_key=session_secret or ensure_session_secret(),
@@ -48,6 +52,10 @@ def create_app(
         session_cookie=SESSION_COOKIE_NAME,
     )
     app.state.authenticate_user = authenticate_user or authenticate_with_pam
+    # One limiter per app instance (mirrors authenticate_user/session_secret
+    # injection above) so tests get isolated state instead of sharing a
+    # module-level singleton across cases.
+    app.state.login_rate_limiter = login_rate_limiter or LoginRateLimiter()
     app.include_router(auth_router)
     # #68's self-catalog vhost proxies every path on the configured FQDN to
     # this app, so a route that used to only matter on a trusted loopback
