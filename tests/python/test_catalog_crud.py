@@ -12,6 +12,7 @@ import pytest
 from app.catalog_crud import (
     NGINX_TEST_HELPER,
     CatalogConflictError,
+    CatalogNotFoundError,
     CatalogValidationError,
     _preview_catalog_conf_path,
     _preview_full_conf_path,
@@ -26,6 +27,19 @@ from app.catalog_crud import (
     validate_service,
 )
 from app.home_warden_config import HomeWardenConfig
+
+
+@pytest.fixture(autouse=True)
+def _default_preview_conf_path_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Default every test to a nonexistent marker path so preview tests exercise the
+    # SCRATCH_DIR-derived fallback rather than whatever setup-service may have
+    # installed on the machine actually running the suite (AGENTS.md: tests must not
+    # depend on live infrastructure). Tests that specifically cover the installed
+    # marker override this with their own monkeypatch.setattr call.
+    monkeypatch.setattr(
+        "app.catalog_crud.NGINX_PREVIEW_CONF_PATH_FILE",
+        tmp_path / "unused-home-warden-preview-conf-path",
+    )
 
 
 def _proxy_service(name: str, **overrides) -> dict:
@@ -73,6 +87,52 @@ def test_delete_service_removes_the_named_entry() -> None:
     updated = delete_service(catalog, "one")
 
     assert [service["name"] for service in updated["services"]] == ["two"]
+
+
+def test_get_service_raises_not_found_for_a_missing_name() -> None:
+    catalog = {"services": [_proxy_service("one")]}
+
+    with pytest.raises(CatalogNotFoundError):
+        get_service(catalog, "missing")
+
+
+def test_update_service_raises_not_found_for_a_missing_name() -> None:
+    catalog = {"services": [_proxy_service("one")]}
+
+    with pytest.raises(CatalogNotFoundError):
+        update_service(catalog, "missing", {"server_name": "one.example.com"})
+
+
+def test_delete_service_raises_not_found_for_a_missing_name() -> None:
+    catalog = {"services": [_proxy_service("one")]}
+
+    with pytest.raises(CatalogNotFoundError):
+        delete_service(catalog, "missing")
+
+
+def test_validate_service_accepts_a_valid_static_entry() -> None:
+    service = {
+        "kind": "static",
+        "name": "assets",
+        "server_name": "assets.example.com",
+        "static": {"root": "/srv/site", "listing_path": "/browse"},
+    }
+
+    validated = validate_service(service)
+
+    assert validated["static"] == {"root": "/srv/site", "listing_path": "/browse"}
+
+
+def test_validate_service_rejects_a_static_entry_missing_root() -> None:
+    service = {
+        "kind": "static",
+        "name": "assets",
+        "server_name": "assets.example.com",
+        "static": {"listing_path": "/browse"},
+    }
+
+    with pytest.raises(CatalogValidationError):
+        validate_service(service)
 
 
 def test_get_service_returns_a_copy() -> None:

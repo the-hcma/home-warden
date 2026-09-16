@@ -123,6 +123,50 @@ def test_catalog_get_returns_one_service(tmp_path: Path) -> None:
     assert response.json()["service"]["server_name"] == "one.example.com"
 
 
+def test_catalog_get_returns_404_for_a_missing_service(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": [_service("one")]}), encoding="utf-8")
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_crud_routes.services_json_path", return_value=catalog_path),
+    ):
+        response = client.get("/catalog/services/missing")
+
+    assert response.status_code == 404
+
+
+def test_catalog_update_returns_404_for_a_missing_service(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": [_service("one")]}), encoding="utf-8")
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_crud_routes.services_json_path", return_value=catalog_path),
+        patch("app.api.catalog_crud_routes.render_preview", return_value=_preview_result()),
+    ):
+        response = client.put("/catalog/services/missing", json={"service": {"server_name": "missing.example.com"}})
+
+    assert response.status_code == 404
+
+
+def test_catalog_delete_returns_404_for_a_missing_service(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": [_service("one")]}), encoding="utf-8")
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_crud_routes.services_json_path", return_value=catalog_path),
+        patch("app.api.catalog_crud_routes.render_preview", return_value=_preview_result()),
+    ):
+        response = client.delete("/catalog/services/missing")
+
+    assert response.status_code == 404
+
+
 def test_catalog_preview_returns_structured_preview(tmp_path: Path) -> None:
     catalog_path = tmp_path / "services.json"
     catalog_path.write_text(json.dumps({"services": [_service("one")]}), encoding="utf-8")
