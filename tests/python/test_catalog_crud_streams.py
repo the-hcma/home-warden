@@ -168,9 +168,7 @@ def test_build_candidate_catalog_dispatches_stream_actions() -> None:
     deleted = build_candidate_catalog(catalog, "delete", name="mqtt", target="stream")
     assert deleted["streams"] == []
 
-    updated = build_candidate_catalog(
-        catalog, "update", name="mqtt", service={"listen_port": 8885}, target="stream"
-    )
+    updated = build_candidate_catalog(catalog, "update", name="mqtt", service={"listen_port": 8885}, target="stream")
     assert updated["streams"][0]["listen_port"] == 8885
 
 
