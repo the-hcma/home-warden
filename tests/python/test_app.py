@@ -91,3 +91,29 @@ def test_static_mount_serves_a_committed_file() -> None:
 
     index_html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     assert '<script type="module" src="/static/dist/main.js">' in index_html
+
+
+def test_swagger_and_redoc_are_disabled() -> None:
+    # #76: FastAPI's default /docs and /redoc pull JS/CSS from third-party
+    # CDNs, which the app's own CSP blocks anyway (a blank page), and this
+    # app has no public API contract needing a live schema browser -- both
+    # must be off rather than left broken.
+    client = make_client()
+    assert client.get("/docs").status_code == HTTPStatus.NOT_FOUND
+    assert client.get("/redoc").status_code == HTTPStatus.NOT_FOUND
+
+
+def test_security_headers_present_on_every_response() -> None:
+    # #76: baseline hardening headers must be present regardless of route,
+    # auth state, or status code -- check an unauthenticated 303 redirect,
+    # not just a 200, since header middleware bugs often only show up on
+    # early-return responses.
+    client = make_client()
+    resp = client.get("/", follow_redirects=False)
+    assert resp.status_code == HTTPStatus.SEE_OTHER
+    assert resp.headers["x-content-type-options"] == "nosniff"
+    assert resp.headers["x-frame-options"] == "DENY"
+    assert resp.headers["referrer-policy"] == "same-origin"
+    assert "default-src 'self'" in resp.headers["content-security-policy"]
+    assert "frame-ancestors 'none'" in resp.headers["content-security-policy"]
+    assert "max-age=" in resp.headers["strict-transport-security"]
