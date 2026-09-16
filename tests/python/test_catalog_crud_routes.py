@@ -211,6 +211,40 @@ def test_catalog_apply_blocks_when_revalidation_fails(tmp_path: Path) -> None:
     assert json.loads(catalog_path.read_text(encoding="utf-8"))["services"][0]["server_name"] == "one.example.com"
 
 
+def test_catalog_create_blocks_when_revalidation_fails(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": [_service("one")]}), encoding="utf-8")
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_crud_routes.services_json_path", return_value=catalog_path),
+        patch("app.api.catalog_crud_routes.render_preview", return_value=_preview_result(can_apply=False)),
+    ):
+        response = client.post("/catalog/services", json={"service": _service("two")})
+
+    assert response.status_code == 409
+    persisted = json.loads(catalog_path.read_text(encoding="utf-8"))
+    assert [service["name"] for service in persisted["services"]] == ["one"]
+
+
+def test_catalog_delete_blocks_when_revalidation_fails(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": [_service("one")]}), encoding="utf-8")
+
+    client = make_client()
+    with (
+        patch("app.api.catalog_crud_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_crud_routes.services_json_path", return_value=catalog_path),
+        patch("app.api.catalog_crud_routes.render_preview", return_value=_preview_result(can_apply=False)),
+    ):
+        response = client.delete("/catalog/services/one")
+
+    assert response.status_code == 409
+    persisted = json.loads(catalog_path.read_text(encoding="utf-8"))
+    assert [service["name"] for service in persisted["services"]] == ["one"]
+
+
 def test_catalog_create_persists_the_new_service(tmp_path: Path) -> None:
     catalog_path = tmp_path / "services.json"
     catalog_path.write_text(json.dumps({"services": [_service("one")]}), encoding="utf-8")
