@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import smtplib
 import socket
+import ssl
 from unittest.mock import MagicMock
 
 import pytest
 
-from app.smtp_service import SmtpConnectionParams, build_message, send_email, smtp_friendly_error
+from app.smtp_service import (
+    SmtpConnectionParams,
+    SmtpNotEncryptedError,
+    build_message,
+    send_email,
+    smtp_friendly_error,
+)
 
 
 def _params(**overrides) -> SmtpConnectionParams:
@@ -43,6 +50,8 @@ def test_send_email_starttls_on_587(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_smtp.send_message.return_value = {}
     fake_smtp.smtp_data_code = 250
     fake_smtp.smtp_data_response = "OK"
+    fake_smtp.has_extn.return_value = True
+    fake_smtp.sock = MagicMock(spec=ssl.SSLSocket)
     smtp_cls = MagicMock(return_value=fake_smtp)
     monkeypatch.setattr("app.smtp_service._LoggingSMTP", smtp_cls)
 
@@ -55,12 +64,48 @@ def test_send_email_starttls_on_587(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.recipients == ("ops@example.com",)
 
 
+def test_send_email_attempts_starttls_on_any_advertised_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression: TLS used to be gated on a hardcoded (587, 2525) port
+    # list, so a relay advertising STARTTLS on any other port (e.g. 25)
+    # never got upgraded and credentials went out in the clear.
+    fake_smtp = MagicMock()
+    fake_smtp.__enter__.return_value = fake_smtp
+    fake_smtp.send_message.return_value = {}
+    fake_smtp.smtp_data_code = 250
+    fake_smtp.smtp_data_response = "OK"
+    fake_smtp.has_extn.return_value = True
+    fake_smtp.sock = MagicMock(spec=ssl.SSLSocket)
+    monkeypatch.setattr("app.smtp_service._LoggingSMTP", MagicMock(return_value=fake_smtp))
+
+    message = build_message(from_address="alerts@example.com", subject="s", body="b", to_address="ops@example.com")
+    send_email(_params(port=25), message)
+
+    fake_smtp.has_extn.assert_called_once_with("starttls")
+    fake_smtp.starttls.assert_called_once()
+
+
+def test_send_email_refuses_credentials_over_unencrypted_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_smtp = MagicMock()
+    fake_smtp.__enter__.return_value = fake_smtp
+    fake_smtp.has_extn.return_value = False  # server doesn't offer STARTTLS
+    fake_smtp.sock = MagicMock()  # a plain socket, not ssl.SSLSocket
+    monkeypatch.setattr("app.smtp_service._LoggingSMTP", MagicMock(return_value=fake_smtp))
+
+    message = build_message(from_address="alerts@example.com", subject="s", body="b", to_address="ops@example.com")
+    with pytest.raises(SmtpNotEncryptedError):
+        send_email(_params(port=25), message)
+
+    fake_smtp.login.assert_not_called()
+    fake_smtp.send_message.assert_not_called()
+
+
 def test_send_email_uses_ssl_on_465(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_smtp = MagicMock()
     fake_smtp.__enter__.return_value = fake_smtp
     fake_smtp.send_message.return_value = {}
     fake_smtp.smtp_data_code = 250
     fake_smtp.smtp_data_response = "OK"
+    fake_smtp.sock = MagicMock(spec=ssl.SSLSocket)
     ssl_cls = MagicMock(return_value=fake_smtp)
     plain_cls = MagicMock()
     monkeypatch.setattr("app.smtp_service._LoggingSMTPSSL", ssl_cls)
@@ -92,6 +137,7 @@ def test_send_email_raises_on_refused_recipients(monkeypatch: pytest.MonkeyPatch
     fake_smtp = MagicMock()
     fake_smtp.__enter__.return_value = fake_smtp
     fake_smtp.send_message.return_value = {"ops@example.com": (550, b"no such user")}
+    fake_smtp.sock = MagicMock(spec=ssl.SSLSocket)
     monkeypatch.setattr("app.smtp_service._LoggingSMTP", MagicMock(return_value=fake_smtp))
 
     message = build_message(from_address="alerts@example.com", subject="s", body="b", to_address="ops@example.com")
@@ -137,3 +183,8 @@ def test_smtp_friendly_error_generic_smtp_exception() -> None:
 def test_smtp_friendly_error_unrecognized_exception_falls_back_to_str() -> None:
     err = ValueError("something else")
     assert smtp_friendly_error(err) == "something else"
+
+
+def test_smtp_friendly_error_not_encrypted() -> None:
+    err = SmtpNotEncryptedError("Refusing to send SMTP credentials to smtp.example.com:25 over plaintext")
+    assert "Refusing to send SMTP credentials" in smtp_friendly_error(err)

@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from app.catalog_health_settings import enforce_host_guard
 from app.smtp_config import (
     SmtpConfig,
+    SmtpConfigStorageError,
     SmtpConfigUpdate,
     delete_smtp_config,
     load_smtp_config,
@@ -50,7 +51,10 @@ class SmtpTestEmailOut(BaseModel):
 @router.delete("/smtp", status_code=HTTPStatus.NO_CONTENT)
 def delete_smtp_settings_route() -> None:
     _require_host_guard("smtp-settings-delete-api")
-    delete_smtp_config()
+    try:
+        delete_smtp_config()
+    except SmtpConfigStorageError as exc:
+        raise HTTPException(status_code=HTTPStatus.CONFLICT, detail=str(exc)) from exc
 
 
 @router.get("/smtp", response_model=SmtpConfigOut | None)
@@ -66,16 +70,20 @@ def get_smtp_settings() -> SmtpConfigOut | None:
 def put_smtp_settings(body: SmtpConfigIn) -> SmtpConfigOut:
     _require_host_guard("smtp-settings-put-api")
     _validate_smtp_body(body)
-    saved = save_smtp_config(
-        SmtpConfigUpdate(
-            from_address=body.from_address,
-            host=body.host,
-            mail_domain=body.mail_domain,
-            password=body.password,
-            port=body.port,
-            username=body.username,
+    password = _resolve_save_password(body)
+    try:
+        saved = save_smtp_config(
+            SmtpConfigUpdate(
+                from_address=body.from_address,
+                host=body.host,
+                mail_domain=body.mail_domain,
+                password=password,
+                port=body.port,
+                username=body.username,
+            )
         )
-    )
+    except SmtpConfigStorageError as exc:
+        raise HTTPException(status_code=HTTPStatus.CONFLICT, detail=str(exc)) from exc
     return _to_schema(saved)
 
 
@@ -110,6 +118,20 @@ def post_smtp_test_email(body: SmtpTestEmailIn) -> SmtpTestEmailOut:
     return SmtpTestEmailOut(ok=True, message=f"Test email sent to {body.to_address.strip()}")
 
 
+def _connection_target_matches(existing: SmtpConfig, *, host: str, port: int, username: str) -> bool:
+    """True when (host, port, username) still describe the same relay
+    `existing`'s password was saved for. Port and username are compared
+    alongside host -- host alone isn't the actual connection target
+    send_email/_maybe_login use, so a request that only changes port or
+    username would otherwise still get handed the old relay's secret.
+    """
+    return (
+        existing.host.strip() == host.strip()
+        and existing.port == port
+        and existing.username.strip() == username.strip()
+    )
+
+
 def _require_host_guard(caller: str) -> None:
     if not enforce_host_guard(caller):
         raise HTTPException(
@@ -118,16 +140,36 @@ def _require_host_guard(caller: str) -> None:
         )
 
 
+def _resolve_save_password(body: SmtpConfigIn) -> str | None:
+    """A blank password on save means "keep the stored one" -- but only
+    when the draft still targets the same relay that password belongs to
+    (see _connection_target_matches). Switching host/port/username with
+    the field left blank must clear the old secret, not silently carry it
+    over to a relay it was never issued for.
+    """
+    if body.password is not None:
+        return body.password
+    existing = load_smtp_config()
+    if existing is None or not _connection_target_matches(
+        existing, host=body.host, port=body.port, username=body.username
+    ):
+        return ""
+    return None
+
+
 def _resolve_test_password(body: SmtpTestEmailIn) -> str:
     """Reuse the stored password only when the draft is blank AND still
-    points at the same host the stored password belongs to -- otherwise an
-    operator testing a *different* relay would silently authenticate
+    points at the same connection target the stored password belongs to
+    -- otherwise an operator testing a *different* relay (or even just a
+    different port/username on the same host) would silently authenticate
     against it with credentials for the old one.
     """
     if body.password is not None and body.password != "":
         return body.password
     existing = load_smtp_config()
-    if existing is None or existing.host.strip() != body.host.strip():
+    if existing is None or not _connection_target_matches(
+        existing, host=body.host, port=body.port, username=body.username
+    ):
         return ""
     return existing.password
 
@@ -151,4 +193,9 @@ def _validate_smtp_body(body: SmtpConfigIn) -> None:
     if body.from_address.strip() == "":
         raise HTTPException(
             status_code=HTTPStatus.UNPROCESSABLE_ENTITY, detail="Expected from address, got empty value"
+        )
+    if not 1 <= body.port <= 65535:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=f"Expected port between 1 and 65535, got {body.port}",
         )

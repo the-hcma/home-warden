@@ -27,6 +27,16 @@ DEFAULT_PORT = 25
 _CONFIG_HEADER = "# home-warden web UI config."
 
 
+class SmtpConfigStorageError(RuntimeError):
+    """Raised when config.toml exists but can't be parsed, on a write.
+
+    A read-modify-write must never silently rewrite a file it failed to
+    read: home_warden_config.load_config's fqdn (or any other top-level
+    key this module doesn't own) would otherwise be dropped permanently
+    the moment an operator saves SMTP settings against a malformed file.
+    """
+
+
 @dataclass(frozen=True)
 class SmtpConfig:
     from_address: str = ""
@@ -57,7 +67,7 @@ class SmtpConfigUpdate:
 def delete_smtp_config(path: Path | None = None) -> None:
     """Remove the [smtp] table, leaving any other config.toml keys intact."""
     resolved = config_path(path)
-    data = _read_toml_dict(resolved)
+    data = _read_toml_dict_for_write(resolved)
     if SMTP_TABLE not in data:
         return
     del data[SMTP_TABLE]
@@ -84,7 +94,7 @@ def load_smtp_config(path: Path | None = None) -> SmtpConfig | None:
 def save_smtp_config(update: SmtpConfigUpdate, path: Path | None = None) -> SmtpConfig:
     """Upsert the [smtp] table, preserving every other top-level config.toml key."""
     resolved = config_path(path)
-    data = _read_toml_dict(resolved)
+    data = _read_toml_dict_for_write(resolved)
 
     password = update.password
     if password is None:
@@ -159,6 +169,11 @@ def _int(table: dict[str, object], key: str, default: int) -> int:
 
 
 def _read_toml_dict(path: Path) -> dict[str, object]:
+    """Lenient read for GET-style consumers (this module's own
+    load_smtp_config): a malformed file degrades to "nothing configured"
+    rather than an error, matching home_warden_config.load_config's
+    existing precedent for this same file.
+    """
     if not path.is_file():
         return {}
     try:
@@ -167,6 +182,28 @@ def _read_toml_dict(path: Path) -> dict[str, object]:
     except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _read_toml_dict_for_write(path: Path) -> dict[str, object]:
+    """Strict read for the read-modify-write save/delete path -- a file
+    that exists but fails to parse must never be silently overwritten
+    (see SmtpConfigStorageError). Only a genuinely absent file starts
+    from {}.
+    """
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("rb") as config_file:
+            data = tomllib.load(config_file)
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        raise SmtpConfigStorageError(
+            f"{path} exists but could not be parsed as TOML -- refusing to overwrite it: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise SmtpConfigStorageError(
+            f"{path} does not contain a TOML table at its top level -- refusing to overwrite it"
+        )
+    return data
 
 
 def _str(table: dict[str, object], key: str) -> str:

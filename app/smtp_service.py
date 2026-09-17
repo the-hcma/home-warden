@@ -13,10 +13,16 @@ from __future__ import annotations
 
 import smtplib
 import socket
+import ssl
 from dataclasses import dataclass
 from email.message import EmailMessage
 
 _SMTP_TIMEOUT_SECONDS = 10.0
+
+
+class SmtpNotEncryptedError(smtplib.SMTPException):
+    """Raised when credentials would otherwise be sent over a plaintext
+    connection -- see _maybe_login."""
 
 
 @dataclass(frozen=True)
@@ -97,8 +103,14 @@ def send_email(params: SmtpConnectionParams, message: EmailMessage) -> SmtpDeliv
     use_ssl = params.port == 465
     smtp_cls = _LoggingSMTPSSL if use_ssl else _LoggingSMTP
     with smtp_cls(params.host, params.port, timeout=_SMTP_TIMEOUT_SECONDS) as smtp:
-        if not use_ssl and params.port in (587, 2525):
+        smtp.ehlo_or_helo_if_needed()
+        # Upgrade whenever the server offers it, not just on the
+        # conventional submission ports -- credentials must never go out
+        # on a connection that could have been encrypted but wasn't
+        # because the port didn't match a hardcoded list.
+        if not use_ssl and smtp.has_extn("starttls"):
             smtp.starttls()
+            smtp.ehlo()
         _maybe_login(smtp, params)
         refused = smtp.send_message(message)
         if refused:
@@ -146,6 +158,8 @@ def smtp_friendly_error(exc: Exception, *, host: str = "") -> str:
         )
     if isinstance(exc, smtplib.SMTPRecipientsRefused):
         return f"SMTP relay refused {len(exc.recipients)} recipient(s) -- verify notification addresses are valid."
+    if isinstance(exc, SmtpNotEncryptedError):
+        return message
     if isinstance(exc, smtplib.SMTPException):
         return f"SMTP error: {message}"
     return message
@@ -154,6 +168,13 @@ def smtp_friendly_error(exc: Exception, *, host: str = "") -> str:
 def _maybe_login(smtp: smtplib.SMTP, params: SmtpConnectionParams) -> None:
     if params.username == "" and params.password == "":
         return
+    if not isinstance(smtp.sock, ssl.SSLSocket):
+        raise SmtpNotEncryptedError(
+            f"Refusing to send SMTP credentials to {params.host}:{params.port} over an "
+            "unencrypted connection -- the server did not offer STARTTLS and this isn't an "
+            "implicit-TLS (port 465) connection. Use a relay/port that supports TLS, or leave "
+            "Username and Password blank for an unauthenticated relay."
+        )
     smtp.login(params.username, params.password)
 
 

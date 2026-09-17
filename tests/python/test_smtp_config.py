@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from app.home_warden_config import HomeWardenConfig, load_config
 from app.smtp_config import (
     SmtpConfig,
+    SmtpConfigStorageError,
     SmtpConfigUpdate,
     delete_smtp_config,
     load_smtp_config,
@@ -118,6 +121,39 @@ def test_smtp_send_ready_requires_host_domain_and_from_address() -> None:
     assert smtp_send_ready(None) is False
     assert smtp_send_ready(SmtpConfig()) is False
     assert smtp_send_ready(SmtpConfig(from_address="a@b.com", host="smtp.example.com", mail_domain="b.com")) is True
+
+
+def test_load_smtp_config_gracefully_degrades_on_malformed_file(tmp_path: Path) -> None:
+    # Reads stay lenient (matches home_warden_config.load_config's own
+    # precedent for this file) -- only writes must refuse.
+    path = tmp_path / "config.toml"
+    path.write_text("fqdn = warden.example.com\n")  # unquoted string -- invalid TOML
+
+    assert load_smtp_config(path) is None
+
+
+def test_save_smtp_config_refuses_to_overwrite_malformed_file(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    original = "fqdn = warden.example.com\n"  # unquoted string -- invalid TOML
+    path.write_text(original)
+
+    with pytest.raises(SmtpConfigStorageError):
+        save_smtp_config(_update(), path)
+
+    # Must not have been overwritten -- a partial/guessed rewrite here
+    # would permanently drop the fqdn key this module doesn't own.
+    assert path.read_text() == original
+
+
+def test_delete_smtp_config_refuses_to_overwrite_malformed_file(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    original = "fqdn = warden.example.com\n"
+    path.write_text(original)
+
+    with pytest.raises(SmtpConfigStorageError):
+        delete_smtp_config(path)
+
+    assert path.read_text() == original
 
 
 def test_smtp_send_ready_requires_password_when_username_set() -> None:
