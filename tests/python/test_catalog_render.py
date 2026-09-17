@@ -428,6 +428,22 @@ def test_forward_host_header_and_websocket_directives(tmp_path: Path) -> None:
     _parse_ok(rendered, tmp_path)
 
 
+def test_forward_client_ip_directives(tmp_path: Path) -> None:
+    catalog = {"services": [_proxy_service(forward_client_ip=True)]}
+    rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
+    assert "proxy_set_header X-Forwarded-For $remote_addr;" in rendered
+    assert "proxy_set_header X-Forwarded-Proto $scheme;" in rendered
+    _parse_ok(rendered, tmp_path)
+
+
+def test_forward_client_ip_omitted_by_default(tmp_path: Path) -> None:
+    catalog = {"services": [_proxy_service()]}
+    rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))
+    assert "X-Forwarded-For" not in rendered
+    assert "X-Forwarded-Proto" not in rendered
+    _parse_ok(rendered, tmp_path)
+
+
 def test_gzip_off_only_when_explicitly_false(tmp_path: Path) -> None:
     catalog = {"services": [_proxy_service(name="a", gzip=False), _proxy_service(name="b")]}
     rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path))

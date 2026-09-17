@@ -14,6 +14,7 @@ import os
 import uvicorn
 
 from app.api.app import create_app
+from app.home_warden_config import BACKEND_LOOPBACK_HOST
 
 DEFAULT_PORT = 8090
 
@@ -52,7 +53,23 @@ def resolve_listen_address(args: argparse.Namespace, *, env: dict[str, str] | No
 def main() -> None:
     args = build_arg_parser().parse_args()
     host, port = resolve_listen_address(args)
-    uvicorn.run(create_app(), host=host, port=port)
+    # proxy_headers/forwarded_allow_ips already default to this exact
+    # setting (uvicorn.Config), but the login rate limiter (home-warden#82)
+    # keys per-source-IP from the X-Forwarded-For this trusts, so the trust
+    # boundary is spelled out here explicitly rather than left to an
+    # implicit vendor default a future uvicorn upgrade could silently
+    # change. BACKEND_LOOPBACK_HOST is the address the self-catalog vhost's
+    # proxy_pass always targets (app/home_warden_config.py), so it's also
+    # the only peer address a forwarded header can legitimately arrive
+    # from -- trusting anything wider would let a non-nginx source on this
+    # host spoof the header and bypass or hijack the per-IP throttle.
+    uvicorn.run(
+        create_app(),
+        host=host,
+        port=port,
+        proxy_headers=True,
+        forwarded_allow_ips=BACKEND_LOOPBACK_HOST,
+    )
 
 
 if __name__ == "__main__":
