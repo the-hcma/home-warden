@@ -23,6 +23,7 @@ def build_web_ui_catalog_service(config: HomeWardenConfig) -> dict | None:
     if not fqdn:
         return None
     return {
+        "forward_client_ip": True,
         "forward_host_header": True,
         "kind": "proxy",
         "name": "home-warden-web-ui",

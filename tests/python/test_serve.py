@@ -6,7 +6,9 @@ import argparse
 
 import pytest
 
-from config.serve import DEFAULT_PORT, build_arg_parser, resolve_listen_address
+import config.serve as serve
+from app.home_warden_config import BACKEND_LOOPBACK_HOST
+from config.serve import DEFAULT_PORT, build_arg_parser, main, resolve_listen_address
 
 
 def _args(**overrides) -> argparse.Namespace:
@@ -52,3 +54,29 @@ def test_non_numeric_env_port_raises_systemexit_not_valueerror() -> None:
     # as an uncaught ValueError instead of the same clean SystemExit.
     with pytest.raises(SystemExit):
         resolve_listen_address(_args(), env={"HOME_WARDEN_LISTEN_PORT": "809O"})
+
+
+def test_main_trusts_forwarded_headers_only_from_the_backend_loopback_peer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # home-warden#82: the login rate limiter keys per-source-IP from
+    # X-Forwarded-For, so this pins the trust boundary explicitly rather
+    # than relying on it matching uvicorn's own default forever. Widening
+    # forwarded_allow_ips beyond the one peer nginx's proxy_pass actually
+    # connects from would let any other loopback process spoof the header
+    # and bypass or hijack the per-IP throttle.
+    captured: dict[str, object] = {}
+
+    def _fake_run(app: object, **kwargs: object) -> None:
+        del app
+        captured.update(kwargs)
+
+    monkeypatch.setattr(serve.uvicorn, "run", _fake_run)
+    monkeypatch.setattr("sys.argv", ["home-warden-server"])
+    monkeypatch.delenv("HOME_WARDEN_LISTEN_HOST", raising=False)
+    monkeypatch.delenv("HOME_WARDEN_LISTEN_PORT", raising=False)
+
+    main()
+
+    assert captured["proxy_headers"] is True
+    assert captured["forwarded_allow_ips"] == BACKEND_LOOPBACK_HOST == "127.0.0.1"

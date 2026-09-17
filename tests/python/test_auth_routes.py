@@ -5,6 +5,7 @@ from __future__ import annotations
 from http import HTTPStatus
 
 from fastapi.testclient import TestClient
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.api.app import create_app
 from app.home_warden_auth import SESSION_COOKIE_NAME
@@ -144,6 +145,79 @@ def test_successful_login_resets_the_failure_count() -> None:
 
     still_allowed = client.post("/auth/login", json={"username": "alice", "password": "correct horse battery staple"})
     assert still_allowed.status_code == HTTPStatus.OK
+
+
+def _make_proxied_client(
+    *,
+    client_peer: tuple[str, int],
+    login_rate_limiter: LoginRateLimiter,
+    trusted_hosts: str = "127.0.0.1",
+) -> TestClient:
+    # Mirrors config/serve.py's real wiring (uvicorn.run(..., proxy_headers=
+    # True, forwarded_allow_ips=BACKEND_LOOPBACK_HOST)): create_app() alone
+    # never sees X-Forwarded-For, since that rewriting is uvicorn's own
+    # ProxyHeadersMiddleware, applied outside the ASGI app itself.
+    inner_app = create_app(
+        authenticate_user=_allow_only_alice,
+        login_rate_limiter=login_rate_limiter,
+        session_secret="test-session-secret",
+    )
+    # uvicorn's and Starlette's ASGI protocol types are structurally
+    # identical (both implement the same ASGI spec) but nominally
+    # distinct, so pyright rejects passing a Starlette app into uvicorn's
+    # ProxyHeadersMiddleware, and that middleware back into Starlette's
+    # TestClient -- runtime behavior is unaffected either way.
+    app = ProxyHeadersMiddleware(inner_app, trusted_hosts=trusted_hosts)  # type: ignore[arg-type]
+    return TestClient(app, base_url="https://testserver", client=client_peer)  # type: ignore[arg-type]
+
+
+def test_forwarded_header_from_trusted_peer_keys_the_real_client() -> None:
+    # home-warden#82: nginx (the loopback peer) sets X-Forwarded-For to the
+    # real visitor address. Two distinct forwarded addresses arriving from
+    # that one trusted peer must be throttled independently -- proving the
+    # limiter is keying on the forwarded address, not nginx's own peer
+    # address (which would collapse both into one shared bucket).
+    shared_limiter = LoginRateLimiter(clock=_FakeClock())
+    attacker = _make_proxied_client(
+        client_peer=("127.0.0.1", 50000),
+        login_rate_limiter=shared_limiter,
+    )
+    attacker.headers["X-Forwarded-For"] = "10.0.0.9"
+    victim = _make_proxied_client(
+        client_peer=("127.0.0.1", 50001),
+        login_rate_limiter=shared_limiter,
+    )
+    victim.headers["X-Forwarded-For"] = "10.0.0.10"
+
+    for _ in range(6):
+        attacker.post("/auth/login", json={"username": "alice", "password": "wrong"})
+    throttled = attacker.post("/auth/login", json={"username": "alice", "password": "correct horse battery staple"})
+    assert throttled.status_code == HTTPStatus.TOO_MANY_REQUESTS
+
+    still_ok = victim.post("/auth/login", json={"username": "alice", "password": "correct horse battery staple"})
+    assert still_ok.status_code == HTTPStatus.OK
+
+
+def test_forwarded_header_from_untrusted_peer_is_ignored() -> None:
+    # A non-nginx peer forging X-Forwarded-For must not be able to spread
+    # its failures across fake identities to dodge the limiter, nor pin
+    # them onto a victim's real address -- ProxyHeadersMiddleware only
+    # rewrites the client for a peer in trusted_hosts, so an untrusted
+    # peer's header is dropped entirely and every request still keys on
+    # its own real (untrusted) peer address.
+    limiter = LoginRateLimiter(clock=_FakeClock())
+    client = _make_proxied_client(
+        client_peer=("10.0.0.1", 50000),
+        login_rate_limiter=limiter,
+    )
+
+    for i in range(6):
+        client.headers["X-Forwarded-For"] = f"1.2.3.{i}"  # a different forged identity every request
+        client.post("/auth/login", json={"username": "alice", "password": "wrong"})
+
+    client.headers["X-Forwarded-For"] = "9.9.9.9"
+    throttled = client.post("/auth/login", json={"username": "alice", "password": "correct horse battery staple"})
+    assert throttled.status_code == HTTPStatus.TOO_MANY_REQUESTS
 
 
 def test_a_different_source_ip_is_unaffected_while_one_is_throttled() -> None:

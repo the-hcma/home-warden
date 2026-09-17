@@ -386,6 +386,20 @@ def _proxy_location_directives(service: dict, ctx: RenderContext) -> list[dict]:
     if service.get("forward_host_header"):
         directives.append(_directive("proxy_set_header", args=["Host", "$host"]))
 
+    if service.get("forward_client_ip"):
+        # $remote_addr is nginx's own TCP peer -- always the real client,
+        # since this vhost terminates TLS directly with no proxy in front
+        # of it -- so this overwrites rather than appends to any
+        # client-supplied X-Forwarded-For, closing the spoofing path an
+        # append (or blindly trusting an inbound header) would open.
+        # Paired with the backend trusting this header only from the
+        # loopback peer it's bound to (home-warden#82): a backend that
+        # keys per-source-IP (the login rate limiter) needs the real
+        # visitor address, not nginx's own loopback address, to isolate
+        # correctly.
+        directives.append(_directive("proxy_set_header", args=["X-Forwarded-For", "$remote_addr"]))
+        directives.append(_directive("proxy_set_header", args=["X-Forwarded-Proto", "$scheme"]))
+
     if service.get("websocket"):
         directives.extend(
             [

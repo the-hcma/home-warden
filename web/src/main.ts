@@ -33,6 +33,7 @@ type UpstreamConfig = JsonObject & {
 type ServiceEntry = JsonObject & {
   allow_cidrs?: null | string[];
   client_cert?: JsonObject;
+  forward_client_ip?: boolean | null;
   forward_host_header?: boolean | null;
   gzip?: boolean | null;
   kind: ServiceKind;
@@ -83,6 +84,7 @@ type ApplyResponse = {
 };
 type FormState = {
   allowCidrs: string;
+  forwardClientIp: boolean;
   forwardHostHeader: boolean;
   gzipDisabled: boolean;
   kind: ServiceKind;
@@ -218,6 +220,7 @@ async function applyCatalogMutation(request: CatalogMutationRequest): Promise<Ap
 function blankFormState(): FormState {
   return {
     allowCidrs: "",
+    forwardClientIp: false,
     forwardHostHeader: false,
     gzipDisabled: false,
     kind: "proxy",
@@ -308,6 +311,14 @@ function buildServiceFromForm(form: FormState, base: ServiceEntry | null, forUpd
     service.allow_cidrs = null;
   } else {
     delete service.allow_cidrs;
+  }
+
+  if (form.forwardClientIp) {
+    service.forward_client_ip = true;
+  } else if (forUpdate) {
+    service.forward_client_ip = null;
+  } else {
+    delete service.forward_client_ip;
   }
 
   if (form.forwardHostHeader) {
@@ -1122,6 +1133,10 @@ function mountCatalogManager(root: HTMLElement): () => void {
     });
     appendCheckbox(form, "Forward Host header", state.form.forwardHostHeader, (checked) => {
       state.form.forwardHostHeader = checked;
+      markPreviewStale();
+    });
+    appendCheckbox(form, "Forward client IP (X-Forwarded-For)", state.form.forwardClientIp, (checked) => {
+      state.form.forwardClientIp = checked;
       markPreviewStale();
     });
     appendCheckbox(form, "Disable gzip", state.form.gzipDisabled, (checked) => {
@@ -1969,6 +1984,7 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
 function serviceToFormState(service: ServiceEntry): FormState {
   return {
     allowCidrs: (service.allow_cidrs ?? []).join("\n"),
+    forwardClientIp: service.forward_client_ip === true,
     forwardHostHeader: service.forward_host_header === true,
     gzipDisabled: service.gzip === false,
     kind: service.kind,

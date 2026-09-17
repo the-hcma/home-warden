@@ -24,6 +24,7 @@ def test_build_web_ui_catalog_service_returns_none_when_fqdn_unset() -> None:
 def test_build_web_ui_catalog_service_returns_proxy_entry_when_fqdn_set() -> None:
     service = build_web_ui_catalog_service(HomeWardenConfig(fqdn="warden.example.com"))
     assert service == {
+        "forward_client_ip": True,
         "forward_host_header": True,
         "kind": "proxy",
         "name": "home-warden-web-ui",
