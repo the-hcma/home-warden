@@ -8,7 +8,7 @@
 // available (e.g. a packaged checkout).
 declare const __COMMIT_SHA__: string;
 
-type AppView = "about" | "catalog" | "health";
+type AppView = "about" | "catalog" | "health" | "settings";
 type CatalogAction = "create" | "delete" | "update";
 type ServiceKind = "proxy" | "static";
 type SessionResponse = {
@@ -81,6 +81,47 @@ type ApplyResponse = {
   preview: PreviewResponse;
   service?: ServiceEntry;
   stream?: StreamEntry;
+};
+type SmtpConfigOut = {
+  from_address: string;
+  host: string;
+  mail_domain: string;
+  password_configured: boolean;
+  port: number;
+  username: string;
+};
+type SmtpConfigIn = {
+  from_address: string;
+  host: string;
+  mail_domain: string;
+  password: null | string;
+  port: number;
+  username: string;
+};
+type SmtpTestEmailIn = SmtpConfigIn & { to_address: string };
+type SmtpTestEmailOut = {
+  message: string;
+  ok: boolean;
+};
+type SmtpSettingsFormState = {
+  fromAddress: string;
+  host: string;
+  mailDomain: string;
+  password: string;
+  port: string;
+  username: string;
+};
+type SmtpSettingsState = {
+  deleting: boolean;
+  error: string | null;
+  existing: null | SmtpConfigOut;
+  form: SmtpSettingsFormState;
+  loading: boolean;
+  message: string | null;
+  saving: boolean;
+  testPassed: boolean;
+  testRecipient: string;
+  testing: boolean;
 };
 type FormState = {
   allowCidrs: string;
@@ -1773,6 +1814,336 @@ function mountPage(root: HTMLElement): void {
   mountAppShell(root);
 }
 
+function blankSmtpFormState(): SmtpSettingsFormState {
+  return {
+    fromAddress: "",
+    host: "",
+    mailDomain: "",
+    password: "",
+    port: "25",
+    username: "",
+  };
+}
+
+function smtpConfigToFormState(config: null | SmtpConfigOut): SmtpSettingsFormState {
+  if (!config) {
+    return blankSmtpFormState();
+  }
+  return {
+    fromAddress: config.from_address,
+    host: config.host,
+    mailDomain: config.mail_domain,
+    password: "",
+    port: String(config.port),
+    username: config.username,
+  };
+}
+
+function mountSettingsPanel(root: HTMLElement): () => void {
+  const state: SmtpSettingsState = {
+    deleting: false,
+    error: null,
+    existing: null,
+    form: blankSmtpFormState(),
+    loading: true,
+    message: null,
+    saving: false,
+    testPassed: false,
+    testRecipient: "",
+    testing: false,
+  };
+  let disposed = false;
+
+  render();
+  void refreshSettings();
+
+  return () => {
+    disposed = true;
+    root.replaceChildren();
+  };
+
+  function buildDraft(): SmtpConfigIn {
+    return {
+      from_address: state.form.fromAddress.trim(),
+      host: state.form.host.trim(),
+      mail_domain: state.form.mailDomain.trim(),
+      password: state.form.password === "" ? null : state.form.password,
+      port: Number(state.form.port) || 25,
+      username: state.form.username.trim(),
+    };
+  }
+
+  function deleteSettings(): void {
+    if (state.deleting || disposed) {
+      return;
+    }
+    state.deleting = true;
+    state.error = null;
+    state.message = "Deleting SMTP settings…";
+    safeRender();
+    deleteSmtpSettings()
+      .then(() => {
+        if (disposed) {
+          return;
+        }
+        state.existing = null;
+        state.form = blankSmtpFormState();
+        state.testPassed = false;
+        state.message = "Deleted SMTP settings.";
+      })
+      .catch((error: unknown) => {
+        if (disposed) {
+          return;
+        }
+        state.error = error instanceof Error ? error.message : "Failed to delete SMTP settings";
+      })
+      .finally(() => {
+        if (disposed) {
+          return;
+        }
+        state.deleting = false;
+        safeRender();
+      });
+  }
+
+  function markDirty(): void {
+    state.testPassed = false;
+    safeRender();
+  }
+
+  async function refreshSettings(): Promise<void> {
+    try {
+      const existing = await readSmtpSettings();
+      if (disposed) {
+        return;
+      }
+      state.existing = existing;
+      state.form = smtpConfigToFormState(existing);
+      state.testPassed = existing !== null;
+    } catch (error: unknown) {
+      if (disposed) {
+        return;
+      }
+      state.error = error instanceof Error ? error.message : "Failed to load SMTP settings";
+    } finally {
+      if (!disposed) {
+        state.loading = false;
+        safeRender();
+      }
+    }
+  }
+
+  function render(): void {
+    const card = document.createElement("div");
+    const heading = document.createElement("h2");
+    const lead = document.createElement("p");
+    const form = document.createElement("form");
+
+    heading.textContent = "SMTP settings";
+    lead.classList.add("message");
+    lead.textContent = "Outgoing email for catalog-health alerts. Send a successful test before saving.";
+    form.noValidate = true;
+
+    appendTextInput(form, "SMTP host", state.form.host, (value) => {
+      state.form.host = value;
+      markDirty();
+    });
+    appendTextInput(
+      form,
+      "Port",
+      state.form.port,
+      (value) => {
+        state.form.port = value;
+        markDirty();
+      },
+      "number",
+    );
+    appendTextInput(form, "Username (optional)", state.form.username, (value) => {
+      state.form.username = value;
+      markDirty();
+    });
+    appendTextInput(
+      form,
+      state.existing?.password_configured ? "Password (leave blank to keep current)" : "Password (optional)",
+      state.form.password,
+      (value) => {
+        state.form.password = value;
+        markDirty();
+      },
+      "password",
+    );
+    appendTextInput(form, "Mail domain", state.form.mailDomain, (value) => {
+      state.form.mailDomain = value;
+      markDirty();
+    });
+    appendTextInput(form, "From address", state.form.fromAddress, (value) => {
+      state.form.fromAddress = value;
+      markDirty();
+    });
+
+    const actions = document.createElement("div");
+    const saveButton = document.createElement("button");
+    const deleteButton = document.createElement("button");
+
+    saveButton.disabled = !state.testPassed || state.saving || state.loading;
+    saveButton.title = state.testPassed ? "" : "Send a successful test email first";
+    saveButton.textContent = state.saving ? "Saving…" : "Save SMTP settings";
+    saveButton.type = "button";
+    saveButton.addEventListener("click", saveSettings);
+
+    deleteButton.disabled = state.existing === null || state.deleting || state.loading;
+    deleteButton.textContent = state.deleting ? "Deleting…" : "Delete SMTP settings";
+    deleteButton.type = "button";
+    deleteButton.addEventListener("click", deleteSettings);
+
+    actions.append(saveButton, deleteButton);
+    form.append(actions);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      saveSettings();
+    });
+
+    const testHeading = document.createElement("h3");
+    testHeading.textContent = "Send test email";
+
+    const testForm = document.createElement("form");
+    testForm.noValidate = true;
+    appendTextInput(
+      testForm,
+      "Recipient",
+      state.testRecipient,
+      (value) => {
+        state.testRecipient = value;
+      },
+      "email",
+    );
+    const testButton = document.createElement("button");
+    testButton.disabled = state.testing || state.loading;
+    testButton.textContent = state.testing ? "Sending…" : "Send test email";
+    testButton.type = "button";
+    testButton.addEventListener("click", sendTestEmail);
+    testForm.append(testButton);
+    testForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      sendTestEmail();
+    });
+
+    card.append(heading, lead);
+    if (state.loading) {
+      const loadingNode = document.createElement("p");
+      loadingNode.classList.add("message");
+      loadingNode.textContent = "Loading…";
+      card.append(loadingNode);
+    }
+    card.append(form, testHeading, testForm);
+
+    if (state.message) {
+      const messageNode = document.createElement("p");
+      messageNode.classList.add("message");
+      messageNode.textContent = state.message;
+      card.append(messageNode);
+    }
+    if (state.error) {
+      const errorNode = document.createElement("p");
+      errorNode.classList.add("error-banner");
+      errorNode.textContent = state.error;
+      card.append(errorNode);
+    }
+
+    styleSection(card);
+    root.replaceChildren(card);
+  }
+
+  function safeRender(): void {
+    if (!disposed) {
+      render();
+    }
+  }
+
+  function saveSettings(): void {
+    if (!state.testPassed || state.saving || disposed) {
+      return;
+    }
+    state.saving = true;
+    state.error = null;
+    state.message = "Saving SMTP settings…";
+    safeRender();
+    saveSmtpSettings(buildDraft())
+      .then((saved) => {
+        if (disposed) {
+          return;
+        }
+        state.existing = saved;
+        state.form = smtpConfigToFormState(saved);
+        state.message = `Saved SMTP settings for ${saved.host}:${saved.port}.`;
+      })
+      .catch((error: unknown) => {
+        if (disposed) {
+          return;
+        }
+        state.error = error instanceof Error ? error.message : "Failed to save SMTP settings";
+      })
+      .finally(() => {
+        if (disposed) {
+          return;
+        }
+        state.saving = false;
+        safeRender();
+      });
+  }
+
+  function sendTestEmail(): void {
+    if (state.testing || disposed) {
+      return;
+    }
+    if (state.form.host.trim() === "") {
+      state.error = "Expected SMTP host, got empty value";
+      safeRender();
+      return;
+    }
+    if (state.form.mailDomain.trim() === "") {
+      state.error = "Expected mail domain, got empty value";
+      safeRender();
+      return;
+    }
+    if (state.testRecipient.trim() === "") {
+      state.error = "Expected recipient email, got empty value";
+      safeRender();
+      return;
+    }
+    state.testing = true;
+    state.error = null;
+    state.message = "Sending test email…";
+    safeRender();
+    sendSmtpTestEmail({ ...buildDraft(), to_address: state.testRecipient.trim() })
+      .then((result) => {
+        if (disposed) {
+          return;
+        }
+        if (result.ok) {
+          state.testPassed = true;
+          state.message = result.message;
+        } else {
+          state.error = result.message;
+          state.message = null;
+        }
+      })
+      .catch((error: unknown) => {
+        if (disposed) {
+          return;
+        }
+        state.error = error instanceof Error ? error.message : "Failed to send test email";
+      })
+      .finally(() => {
+        if (disposed) {
+          return;
+        }
+        state.testing = false;
+        safeRender();
+      });
+  }
+}
+
 function parseAllowCidrs(value: string): string[] {
   return value
     .split(/[\n,]/u)
@@ -1847,6 +2218,36 @@ async function readSession(): Promise<SessionResponse | null> {
   return (await response.json()) as SessionResponse;
 }
 
+async function readSmtpSettings(): Promise<null | SmtpConfigOut> {
+  return fetchJson<null | SmtpConfigOut>("/settings/smtp", { method: "GET" });
+}
+
+async function saveSmtpSettings(payload: SmtpConfigIn): Promise<SmtpConfigOut> {
+  return fetchJson<SmtpConfigOut>("/settings/smtp", {
+    body: JSON.stringify(payload),
+    headers: { "Content-Type": "application/json" },
+    method: "PUT",
+  });
+}
+
+async function deleteSmtpSettings(): Promise<void> {
+  const response = await fetch("/settings/smtp", {
+    credentials: "same-origin",
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+}
+
+async function sendSmtpTestEmail(payload: SmtpTestEmailIn): Promise<SmtpTestEmailOut> {
+  return fetchJson<SmtpTestEmailOut>("/settings/smtp/test", {
+    body: JSON.stringify(payload),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  });
+}
+
 async function renderAppShell(root: HTMLElement): Promise<void> {
   const session = await readSession();
   if (!session) {
@@ -1873,6 +2274,7 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
   const aboutButton = document.createElement("button");
   const catalogButton = document.createElement("button");
   const healthButton = document.createElement("button");
+  const settingsButton = document.createElement("button");
   const logoutButton = document.createElement("button");
 
   aboutButton.textContent = "About";
@@ -1893,6 +2295,13 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
   healthButton.type = "button";
   healthButton.addEventListener("click", () => {
     mountView("health");
+    closeMenu();
+  });
+
+  settingsButton.textContent = "Settings";
+  settingsButton.type = "button";
+  settingsButton.addEventListener("click", () => {
+    mountView("settings");
     closeMenu();
   });
 
@@ -1928,7 +2337,7 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
 
   menuPanel.classList.add("menu-panel");
   menuPanel.hidden = true;
-  menuPanel.append(healthButton, catalogButton, aboutButton);
+  menuPanel.append(healthButton, catalogButton, settingsButton, aboutButton);
 
   menu.classList.add("menu");
   menu.append(menuButton, menuPanel);
@@ -1971,12 +2380,15 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
     aboutButton.disabled = activeView === "about";
     catalogButton.disabled = activeView === "catalog";
     healthButton.disabled = activeView === "health";
+    settingsButton.disabled = activeView === "settings";
     unmountCurrentView =
       activeView === "catalog"
         ? mountCatalogManager(shell)
         : activeView === "about"
           ? mountAboutPanel(shell, username)
-          : mountHealthDashboard(shell);
+          : activeView === "settings"
+            ? mountSettingsPanel(shell)
+            : mountHealthDashboard(shell);
   }
 }
 
