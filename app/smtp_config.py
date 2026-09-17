@@ -15,6 +15,7 @@ Cloudflare API token.
 
 from __future__ import annotations
 
+import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -222,14 +223,54 @@ def _toml_scalar(value: object) -> str:
 
 
 def _toml_string(value: str) -> str:
-    # Basic TOML string escaping, in the order that matters: the escape
-    # marker itself first, then the characters it would otherwise flag.
+    # Basic TOML string escaping. The escape marker itself must go first,
+    # then every other character TOML requires escaping in a basic string:
+    # the quote, and every control character (\x00-\x1f, \x7f) -- not just
+    # the three whitespace ones (\n \t \r). An unescaped control character
+    # (e.g. a pasted vertical tab or ESC in a password) would otherwise
+    # write a file tomllib itself can't parse back -- silently "losing"
+    # the settings (and fqdn alongside them) on the very next read.
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    escaped = escaped.replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
-    return f'"{escaped}"'
+    out = []
+    for char in escaped:
+        codepoint = ord(char)
+        if char == "\n":
+            out.append("\\n")
+        elif char == "\t":
+            out.append("\\t")
+        elif char == "\r":
+            out.append("\\r")
+        elif codepoint < 0x20 or codepoint == 0x7F:
+            out.append(f"\\u{codepoint:04x}")
+        else:
+            out.append(char)
+    return '"' + "".join(out) + '"'
 
 
 def _write_toml_dict(path: Path, data: dict[str, object]) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.write_text(_dump_toml(data), encoding="utf-8")
+    try:
+        text = _dump_toml(data)
+    except TypeError as exc:
+        raise SmtpConfigStorageError(f"{path} holds a value this writer can't serialize back to TOML: {exc}") from exc
+
+    try:
+        # O_CREAT|O_TRUNC with mode=0o600 directly on open, not a
+        # write-then-chmod -- matches app/home_warden_auth.py's
+        # ensure_session_secret precedent: mode= only applies at file
+        # creation, so a stray write-then-chmod leaves a real window (and,
+        # on a crash between the two calls, permanently) where this file
+        # -- now holding a relay password -- is readable at the process
+        # umask's default (typically 0644) rather than operator-only.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, text.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise SmtpConfigStorageError(f"failed to write {path}: {exc}") from exc
+    # Belt-and-suspenders for a pre-existing file that predates this fix
+    # and was left at a looser mode -- os.open's mode= only takes effect
+    # when it creates the file, so an already-present 0644 file wouldn't
+    # otherwise be tightened here.
     path.chmod(0o600)

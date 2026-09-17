@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -117,6 +118,36 @@ def test_toml_string_values_are_escaped(tmp_path: Path) -> None:
     assert reloaded.password == tricky
 
 
+def test_toml_string_values_escape_arbitrary_control_characters(tmp_path: Path) -> None:
+    # Regression: only \n \t \r were escaped -- any other control
+    # character (vertical tab, ESC, ...) wrote an invalid TOML file that
+    # tomllib itself couldn't parse back, silently "losing" the settings
+    # (and fqdn alongside them) on the very next read.
+    path = tmp_path / "config.toml"
+    tricky = "line1\x0bline2\x1bend"  # vertical tab + ESC
+    save_smtp_config(_update(password=tricky), path)
+
+    reloaded = load_smtp_config(path)
+    assert reloaded is not None
+    assert reloaded.password == tricky
+
+
+def test_write_toml_dict_is_never_briefly_world_readable(tmp_path: Path) -> None:
+    # Regression: write_text() then chmod() leaves a real window (and, on
+    # a crash between the two calls, a permanent state) where this file --
+    # now holding a relay password -- sits at the process umask's default
+    # mode rather than operator-only. Same pattern app/home_warden_auth.py
+    # already avoids for the session secret.
+    path = tmp_path / "config.toml"
+    original_umask = os.umask(0o022)  # a typical default, deliberately loose
+    try:
+        save_smtp_config(_update(), path)
+    finally:
+        os.umask(original_umask)
+
+    assert (path.stat().st_mode & 0o777) == 0o600
+
+
 def test_smtp_send_ready_requires_host_domain_and_from_address() -> None:
     assert smtp_send_ready(None) is False
     assert smtp_send_ready(SmtpConfig()) is False
@@ -142,6 +173,22 @@ def test_save_smtp_config_refuses_to_overwrite_malformed_file(tmp_path: Path) ->
 
     # Must not have been overwritten -- a partial/guessed rewrite here
     # would permanently drop the fqdn key this module doesn't own.
+    assert path.read_text() == original
+
+
+def test_save_smtp_config_refuses_to_write_unsupported_value_type(tmp_path: Path) -> None:
+    # Regression: a config.toml that parses cleanly but holds a type this
+    # writer can't re-serialize (a float, an array, a date, ...) used to
+    # raise a bare TypeError out of save_smtp_config -- an untranslated
+    # 500 at the route layer instead of the same 409-refuse-to-overwrite
+    # contract every other unwritable-file case gets.
+    path = tmp_path / "config.toml"
+    original = "alert_days = 1.5\n"  # a float -- valid TOML, unsupported by this writer
+    path.write_text(original)
+
+    with pytest.raises(SmtpConfigStorageError):
+        save_smtp_config(_update(), path)
+
     assert path.read_text() == original
 
 
