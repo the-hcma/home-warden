@@ -294,6 +294,7 @@ def validate_service(service: dict) -> dict:
     kind = candidate["kind"]
     name = candidate["name"]
 
+    _optional_bool(candidate, "forward_client_ip")
     _optional_bool(candidate, "forward_host_header")
     _optional_bool(candidate, "gzip")
     _optional_bool(candidate, "websocket")

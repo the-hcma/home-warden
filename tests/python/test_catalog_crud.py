@@ -461,6 +461,7 @@ def test_validate_service_strips_required_string_fields() -> None:
         ({"kind": "proxy", "name": "broken", "server_name": "broken.example.com"}, "upstream object"),
         ({"kind": "static", "name": "broken", "server_name": "broken.example.com"}, "static object"),
         (_proxy_service("broken", allow_cidrs="10.0.0.0/24"), "list of strings"),
+        (_proxy_service("broken", forward_client_ip="false"), "must be a boolean"),
     ],
 )
 def test_validate_service_rejects_malformed_entries(service: dict, expected: str) -> None:
