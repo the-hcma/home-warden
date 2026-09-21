@@ -211,7 +211,7 @@ jobs:
       # Corepack from web/packageManager + pnpm store cache (mirrors
       # the-hcma/domesti-bot's own web-build job, the-hcma/home-warden#55's
       # adopted structural model).
-      - uses: the-hcma/repository-helpers/actions/setup-pnpm-corepack@cde3063aa1e030fcac59bbf215131a3bd25d7908
+      - uses: the-hcma/repository-helpers/actions/setup-pnpm-corepack@999844287d1b2684baa91c3e8a5b62eda9f4915e
         with:
           working-directory: web
 
