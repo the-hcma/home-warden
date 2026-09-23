@@ -226,6 +226,7 @@ def test_zone_apexes_from_records() -> None:
 def test_bucket_into_zones_places_records_under_matching_apex() -> None:
     records = [
         ParsedRecord(owner="example.com", rtype="soa", content="soa-content", ttl=3600),
+        ParsedRecord(owner="113.0.203.in-addr.arpa", rtype="soa", content="soa-content", ttl=3600),
         ParsedRecord(owner="web.example.com", rtype="a", content="203.0.113.5", ttl=86400),
         ParsedRecord(owner="2.113.0.203.in-addr.arpa", rtype="ptr", content="app.example.com.", ttl=86400),
     ]
@@ -239,25 +240,57 @@ def test_bucket_into_zones_places_records_under_matching_apex() -> None:
 def test_bucket_into_zones_picks_longest_matching_apex() -> None:
     # A record for app.sub.example.com must land in the more specific
     # sub.example.com zone, not the broader example.com one.
-    records = [ParsedRecord(owner="app.sub.example.com", rtype="a", content="203.0.113.10", ttl=None)]
+    records = [
+        ParsedRecord(owner="example.com", rtype="soa", content="soa-content", ttl=3600),
+        ParsedRecord(owner="sub.example.com", rtype="soa", content="soa-content", ttl=3600),
+        ParsedRecord(owner="app.sub.example.com", rtype="a", content="203.0.113.10", ttl=None),
+    ]
     zones = bucket_into_zones(records, ["example.com", "sub.example.com"])
     assert "app.sub.example.com" in zones["sub.example.com"].records
-    assert zones["example.com"].records == {}
+    assert zones["example.com"].records == {"example.com": {"soa": [RecordValue("soa-content", 3600)]}}
 
 
 def test_bucket_into_zones_apex_itself_matches() -> None:
-    records = [ParsedRecord(owner="example.com", rtype="txt", content="hello", ttl=None)]
+    records = [
+        ParsedRecord(owner="example.com", rtype="soa", content="soa-content", ttl=3600),
+        ParsedRecord(owner="example.com", rtype="txt", content="hello", ttl=None),
+    ]
     zones = bucket_into_zones(records, ["example.com"])
     assert zones["example.com"].records["example.com"]["txt"] == [RecordValue("hello")]
 
 
 def test_bucket_into_zones_unmatched_owner_raises() -> None:
-    records = [ParsedRecord(owner="app.unrelated.com", rtype="a", content="203.0.113.10", ttl=None)]
+    records = [
+        ParsedRecord(owner="example.com", rtype="soa", content="soa-content", ttl=3600),
+        ParsedRecord(owner="app.unrelated.com", rtype="a", content="203.0.113.10", ttl=None),
+    ]
     try:
         bucket_into_zones(records, ["example.com"])
         raise AssertionError("expected ValueError")
     except ValueError as e:
         assert "no zone apex matches" in str(e)
+
+
+def test_bucket_into_zones_soa_with_no_ttl_raises() -> None:
+    # No invented fallback default -- a zone whose SOA carries no explicit
+    # ttl must fail loudly rather than silently pick a made-up number
+    # (an earlier version of this function assumed 3600, unverified
+    # against tinydns's actual behavior).
+    records = [ParsedRecord(owner="example.com", rtype="soa", content="soa-content", ttl=None)]
+    try:
+        bucket_into_zones(records, ["example.com"])
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "no explicit ttl" in str(e)
+
+
+def test_bucket_into_zones_missing_soa_entirely_raises() -> None:
+    records = [ParsedRecord(owner="app.example.com", rtype="a", content="203.0.113.10", ttl=None)]
+    try:
+        bucket_into_zones(records, ["example.com"])
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "no explicit ttl" in str(e)
 
 
 def test_bucket_into_zones_soa_ttl_sets_zone_default_ttl() -> None:
@@ -270,6 +303,7 @@ def test_bucket_into_zones_preserves_multiple_record_types_for_same_owner() -> N
     # #16's own documented oddity: a name can carry an A record (from NS
     # glue) and later a CNAME too -- both must survive, not overwrite.
     records = [
+        ParsedRecord(owner="example.com", rtype="soa", content="soa-content", ttl=3600),
         ParsedRecord(owner="app.example.com", rtype="a", content="203.0.113.1", ttl=86400),
         ParsedRecord(owner="app.example.com", rtype="cname", content="alias.example.com.", ttl=86400),
     ]
@@ -295,7 +329,10 @@ def test_bucket_into_zones_preserves_per_record_ttl_distinct_from_zone_default()
 
 
 def test_bucket_into_zones_no_explicit_ttl_leaves_record_value_ttl_none() -> None:
-    records = [ParsedRecord(owner="app.example.com", rtype="a", content="203.0.113.10", ttl=None)]
+    records = [
+        ParsedRecord(owner="example.com", rtype="soa", content="soa-content", ttl=3600),
+        ParsedRecord(owner="app.example.com", rtype="a", content="203.0.113.10", ttl=None),
+    ]
     zones = bucket_into_zones(records, ["example.com"])
     assert zones["example.com"].records["app.example.com"]["a"] == [RecordValue("203.0.113.10", None)]
 

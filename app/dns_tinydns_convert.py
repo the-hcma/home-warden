@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-DEFAULT_TTL = 3600
 GENERIC_SRV_TYPE = "33"
 
 
@@ -56,8 +55,26 @@ def bucket_into_zones(records: list[ParsedRecord], zone_apexes: list[str]) -> di
     whose owner matches no known apex is an error: silently dropping it
     would produce a zone file missing data the source file clearly
     intended to serve.
+
+    Every zone's default ttl comes from its own SOA line -- there is no
+    invented fallback constant. tinydns has its own default for a blank
+    ttl field, but it isn't necessarily 3600 (an earlier version of this
+    function assumed exactly that, unverified); rather than risk migrating
+    every ttl-less record in a zone to a wrong, made-up number, a zone
+    whose SOA carries no explicit ttl is a loud error here -- the same
+    "don't silently invent or drop data" contract this module applies
+    everywhere else.
     """
-    zones = {apex: Zone(apex=apex, ttl=DEFAULT_TTL) for apex in zone_apexes}
+    soa_ttls: dict[str, int | None] = dict.fromkeys(zone_apexes)
+    for rec in records:
+        if rec.rtype == "soa" and rec.owner in soa_ttls and rec.ttl is not None:
+            soa_ttls[rec.owner] = rec.ttl
+    zone_default_ttls: dict[str, int] = {apex: ttl for apex, ttl in soa_ttls.items() if ttl is not None}
+    missing_ttl = sorted(set(zone_apexes) - zone_default_ttls.keys())
+    if missing_ttl:
+        raise ValueError(f"zone(s) {missing_ttl} have an SOA line with no explicit ttl -- cannot derive a zone default")
+
+    zones = {apex: Zone(apex=apex, ttl=zone_default_ttls[apex]) for apex in zone_apexes}
     sorted_apexes = sorted(zone_apexes, key=len, reverse=True)
 
     for rec in records:
@@ -66,8 +83,6 @@ def bucket_into_zones(records: list[ParsedRecord], zone_apexes: list[str]) -> di
             raise ValueError(f"no zone apex matches owner {rec.owner!r} (known zones: {zone_apexes})")
         owner_records = zones[apex].records.setdefault(rec.owner, {})
         owner_records.setdefault(rec.rtype, []).append(RecordValue(rec.content, rec.ttl))
-        if rec.rtype == "soa" and rec.ttl is not None:
-            zones[apex].ttl = rec.ttl
 
     return zones
 

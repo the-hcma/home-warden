@@ -37,6 +37,7 @@ Zexample.com:ns1.example.com:hostmaster.example.com:1:16384:2048:1048576:2560:36
 Cwww.example.com:app.example.com:86400
 '_kerberos.example.com:EXAMPLE.COM:86400
 :_ldap._tcp.example.com:33:\000\000\000\144\000\130\003ipa\007example\003com\000:86400
++plain.example.com:203.0.113.20
 Z10.113.0.203.in-addr.arpa:ns1.example.com:hostmaster.example.com:1:16384:2048:1048576:2560:3600
 &10.113.0.203.in-addr.arpa::ns1.example.com:86400
 EOF
@@ -94,6 +95,11 @@ check "app.example.com" "A" "203.0.113.10"
 check "www.example.com" "CNAME" "app.example.com"
 check "_kerberos.example.com" "TXT" '"EXAMPLE.COM"'
 check "_ldap._tcp.example.com" "SRV" "0 100 88 ipa.example.com"
+# No explicit ttl on this fixture line -- exercises render_zones_yaml's
+# plain-scalar form ({a: "..."}), not just the expanded {content, ttl}
+# form every other record here happens to use. A shape regression
+# confined to this form would otherwise leave CI green.
+check "plain.example.com" "A" "203.0.113.20"
 check "10.113.0.203.in-addr.arpa" "PTR" "app.example.com"
 
 exit "${fail}"

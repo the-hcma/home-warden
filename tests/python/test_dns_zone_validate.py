@@ -10,9 +10,10 @@ test with no live process.
 
 from __future__ import annotations
 
+import gzip
 import shutil
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -20,6 +21,8 @@ from app.dns_tinydns_convert import RecordValue, Zone
 from app.dns_zone_validate import (
     REQUIRED_BINARIES,
     _describe_mismatch,
+    _read_schema_sql,
+    _start_server_with_retry,
     render_bind_zonefile,
     validate_via_sqlite_backend,
 )
@@ -94,6 +97,73 @@ def test_validate_via_sqlite_backend_missing_schema_raises(tmp_path: Path) -> No
     ):
         with pytest.raises(RuntimeError, match="schema.sqlite3.sql"):
             validate_via_sqlite_backend(zones, workdir=tmp_path)
+
+
+# --- _read_schema_sql --------------------------------------------------------
+
+
+def test_read_schema_sql_plain_file(tmp_path: Path) -> None:
+    schema_path = tmp_path / "schema.sqlite3.sql"
+    schema_path.write_bytes(b"CREATE TABLE domains (id INTEGER);")
+    assert _read_schema_sql(schema_path) == b"CREATE TABLE domains (id INTEGER);"
+
+
+def test_read_schema_sql_gzip_compressed_file(tmp_path: Path) -> None:
+    # Debian/Ubuntu's doc-compression policy commonly ships one of the
+    # schema.sqlite3.sql* glob's matches gzipped -- passing the raw
+    # (compressed) bytes to sqlite3 would fail before validation starts.
+    schema_path = tmp_path / "schema.sqlite3.sql.gz"
+    schema_path.write_bytes(gzip.compress(b"CREATE TABLE domains (id INTEGER);"))
+    assert _read_schema_sql(schema_path) == b"CREATE TABLE domains (id INTEGER);"
+
+
+# --- _start_server_with_retry ------------------------------------------------
+
+
+def test_start_server_with_retry_succeeds_first_try(tmp_path: Path) -> None:
+    fake_proc = MagicMock()
+    with (
+        patch("app.dns_zone_validate._free_udp_port", side_effect=[12345]),
+        patch("app.dns_zone_validate.subprocess.Popen", return_value=fake_proc) as mock_popen,
+        patch("app.dns_zone_validate._wait_for_server_ready"),
+    ):
+        proc, port = _start_server_with_retry(tmp_path, "example.com", startup_timeout=1.0, max_attempts=3)
+    assert proc is fake_proc
+    assert port == 12345
+    assert mock_popen.call_count == 1
+    fake_proc.terminate.assert_not_called()
+
+
+def test_start_server_with_retry_retries_on_bind_race(tmp_path: Path) -> None:
+    # First port "loses" the TOCTOU race (another process bound it first,
+    # simulated here as _wait_for_server_ready never seeing it come up);
+    # the second attempt on a fresh port succeeds.
+    first_proc, second_proc = MagicMock(), MagicMock()
+    with (
+        patch("app.dns_zone_validate._free_udp_port", side_effect=[111, 222]),
+        patch("app.dns_zone_validate.subprocess.Popen", side_effect=[first_proc, second_proc]),
+        patch(
+            "app.dns_zone_validate._wait_for_server_ready",
+            side_effect=[RuntimeError("did not come up in time"), None],
+        ),
+    ):
+        proc, port = _start_server_with_retry(tmp_path, "example.com", startup_timeout=1.0, max_attempts=3)
+    assert proc is second_proc
+    assert port == 222
+    first_proc.terminate.assert_called_once()
+    second_proc.terminate.assert_not_called()
+
+
+def test_start_server_with_retry_exhausts_attempts_raises(tmp_path: Path) -> None:
+    fake_proc = MagicMock()
+    with (
+        patch("app.dns_zone_validate._free_udp_port", side_effect=[1, 2]),
+        patch("app.dns_zone_validate.subprocess.Popen", return_value=fake_proc),
+        patch("app.dns_zone_validate._wait_for_server_ready", side_effect=RuntimeError("never came up")),
+    ):
+        with pytest.raises(RuntimeError, match="never came up"):
+            _start_server_with_retry(tmp_path, "example.com", startup_timeout=1.0, max_attempts=2)
+    assert fake_proc.terminate.call_count == 2
 
 
 # --- _describe_mismatch -----------------------------------------------------
