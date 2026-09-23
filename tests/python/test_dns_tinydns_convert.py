@@ -117,6 +117,41 @@ def test_parse_txt_escapes_internal_quote() -> None:
     assert records[0].content == '"say \\"hi\\""'
 
 
+def test_parse_txt_escapes_literal_backslash() -> None:
+    # \134 = octal 134 = decimal 92 = '\' -- a literal backslash byte in
+    # the decoded text must itself be escaped in the quoted content.
+    # Order matters here (escape backslashes before quotes, or an
+    # already-escaped backslash gets double-escaped by the quote pass) --
+    # every other TXT test enters via an octal escape that decodes to a
+    # non-backslash byte, so none of them exercise this branch at all.
+    line = r"'app.example.com:a\134b:86400"
+    records = parse_tinydns_data(line)
+    expected = '"' + "a" + "\\\\" + "b" + '"'
+    assert records[0].content == expected
+
+
+def test_render_zones_yaml_preserves_txt_backslash_escaping_round_trip() -> None:
+    # Same case as test_parse_txt_escapes_literal_backslash, carried all
+    # the way through bucket_into_zones + render_zones_yaml + a real YAML
+    # parse -- pins that the escaping survives the full pipeline, not
+    # just the parse step.
+    text = "\n".join(
+        [
+            "Zexample.com:ns1.example.com:hostmaster.example.com:1:16384:2048:1048576:2560:3600",
+            r"'app.example.com:a\134b:86400",
+        ]
+    )
+    records = parse_tinydns_data(text)
+    apexes = zone_apexes_from_records(records)
+    zones = bucket_into_zones(records, apexes)
+    parsed = yaml.safe_load(render_zones_yaml(zones))
+    txt_entry = next(
+        v for entry in parsed["domains"][0]["records"]["app.example.com"] for k, v in entry.items() if k == "txt"
+    )
+    content = txt_entry["content"] if isinstance(txt_entry, dict) else txt_entry
+    assert content == '"' + "a" + "\\\\" + "b" + '"'
+
+
 def test_parse_srv() -> None:
     # 0 100 88 -> priority=0 weight=100 port=88, target ipa.example.com.
     # Wire rdata: 2-byte prio, 2-byte weight, 2-byte port, then
@@ -128,6 +163,20 @@ def test_parse_srv() -> None:
     assert records == [
         ParsedRecord(owner="_ldap._tcp.example.com", rtype="srv", content="0 100 88 ipa.example.com.", ttl=86400)
     ]
+
+
+def test_parse_srv_label_length_exceeds_remaining_rdata_raises() -> None:
+    # A length byte of 5 promises 5 more bytes, but only "ab" (2) remain
+    # before the rdata ends -- must fail loudly, not silently slice a
+    # truncated/garbage label into the emitted target name (Python slicing
+    # doesn't raise past the end of a bytes object on its own).
+    rdata = "\\000\\000\\000\\000\\000\\000\\005ab"
+    line = f":app.example.com:33:{rdata}:86400"
+    try:
+        parse_tinydns_data(line)
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "truncated wire-format name" in str(e)
 
 
 def test_parse_generic_unsupported_type_raises() -> None:

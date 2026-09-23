@@ -209,6 +209,8 @@ def _decode_wire_name(data: bytes, offset: int) -> tuple[str, int]:
         i += 1
         if length == 0:
             break
+        if i + length > len(data):
+            raise ValueError("truncated wire-format name (label runs past end of rdata)")
         labels.append(data[i : i + length].decode("ascii"))
         i += length
     return ".".join(labels) + ".", i
