@@ -58,11 +58,21 @@ def test_cli_writes_zones_yaml_and_pdns_conf(monkeypatch, tmp_path: Path, capsys
     zones_yaml = (outdir / "zones.yml").read_text()
     parsed = yaml.safe_load(zones_yaml)
     assert parsed["domains"][0]["domain"] == "example.com"
-    assert parsed["domains"][0]["records"]["app.example.com"] == [{"a": "203.0.113.10"}]
+    # 86400 is an explicit per-line ttl distinct from the zone's own
+    # default (3600, from the SOA line) -- must render in the backend's
+    # expanded form, not collapse to the zone default.
+    assert parsed["domains"][0]["records"]["app.example.com"] == [{"a": {"content": "203.0.113.10", "ttl": 86400}}]
 
     pdns_conf = (outdir / "pdns.conf").read_text()
     assert "launch=geoip" in pdns_conf
     assert str((outdir / "zones.yml").resolve()) in pdns_conf
+    # The auth server must never bind beyond loopback -- per #16's design,
+    # the recursor (not this server) answers the real, LAN/public-facing
+    # :53. A regression here would expose it, and nothing else asserts
+    # this (the CI harness deliberately overrides the port for its own
+    # unprivileged smoke test).
+    assert "local-address=127.0.0.1" in pdns_conf
+    assert "local-port=853" in pdns_conf
 
 
 def test_cli_default_outdir_is_cwd(monkeypatch, tmp_path: Path, capsys) -> None:

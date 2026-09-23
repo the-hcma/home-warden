@@ -30,13 +30,21 @@ class ParsedRecord:
     ttl: int | None = None
 
 
+@dataclass(frozen=True)
+class RecordValue:
+    content: str
+    # A line's own explicit ttl field, distinct from the zone's default --
+    # None means "no per-record override was given," not "ttl is zero."
+    ttl: int | None = None
+
+
 @dataclass
 class Zone:
     apex: str
     ttl: int
-    # owner -> rtype -> list[content] (soa/cname are single-valued but
+    # owner -> rtype -> list[RecordValue] (soa/cname are single-valued but
     # still stored as a one-element list; render_zones_yaml unwraps them).
-    records: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    records: dict[str, dict[str, list[RecordValue]]] = field(default_factory=dict)
 
 
 def bucket_into_zones(records: list[ParsedRecord], zone_apexes: list[str]) -> dict[str, Zone]:
@@ -57,7 +65,7 @@ def bucket_into_zones(records: list[ParsedRecord], zone_apexes: list[str]) -> di
         if apex is None:
             raise ValueError(f"no zone apex matches owner {rec.owner!r} (known zones: {zone_apexes})")
         owner_records = zones[apex].records.setdefault(rec.owner, {})
-        owner_records.setdefault(rec.rtype, []).append(rec.content)
+        owner_records.setdefault(rec.rtype, []).append(RecordValue(rec.content, rec.ttl))
         if rec.rtype == "soa" and rec.ttl is not None:
             zones[apex].ttl = rec.ttl
 
@@ -119,18 +127,27 @@ def render_zones_yaml(zones: dict[str, Zone]) -> str:
     .github/ci/dns-catalog-validate caught it against a real pdns_server
     (the backend answered every query with an empty response, not an
     error) -- exactly the class of mistake that CI job exists to catch.
+
+    A `RecordValue` with its own explicit `ttl` (the tinydns line carried
+    one) renders the backend's expanded per-record form
+    (`{type: {content: ..., ttl: ...}}`) instead of the plain scalar --
+    otherwise a source line's own ttl would silently collapse to the
+    zone's single default `ttl:`, changing what's actually served.
     """
     import yaml
 
     domains = []
     for apex in sorted(zones):
         zone = zones[apex]
-        owner_map: dict[str, list[dict[str, str]]] = {}
+        owner_map: dict[str, list[dict[str, object]]] = {}
         for owner in sorted(zone.records):
-            entries: list[dict[str, str]] = []
+            entries: list[dict[str, object]] = []
             for rtype in sorted(zone.records[owner]):
                 for value in zone.records[owner][rtype]:
-                    entries.append({rtype: value})
+                    if value.ttl is not None:
+                        entries.append({rtype: {"content": value.content, "ttl": value.ttl}})
+                    else:
+                        entries.append({rtype: value.content})
             owner_map[owner] = entries
         domains.append({"domain": apex, "ttl": zone.ttl, "records": owner_map})
 

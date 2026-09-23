@@ -16,7 +16,18 @@ set -euo pipefail
 bash .github/ci/setup-python
 
 work_dir="$(mktemp -d)"
-trap 'kill "${server_pid:-0}" 2>/dev/null || true; rm -rf "${work_dir}"' EXIT
+# shellcheck disable=SC2329 # invoked indirectly via `trap cleanup EXIT` below
+cleanup() {
+  # server_pid is unset until pdns_server actually starts; kill "0" (the
+  # process-group form) would SIGTERM this whole step's process group,
+  # not a no-op, if an earlier failure (setup-python, the converter)
+  # fires this trap first.
+  if [[ -n "${server_pid:-}" ]]; then
+    kill "${server_pid}" 2>/dev/null || true
+  fi
+  rm -rf "${work_dir}"
+}
+trap cleanup EXIT
 
 fixture_data="${work_dir}/data"
 cat >"${fixture_data}" <<'EOF'

@@ -23,7 +23,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from app.dns_tinydns_convert import Zone
+from app.dns_tinydns_convert import RecordValue, Zone
 
 REQUIRED_BINARIES = ("pdns_server", "pdnsutil", "sqlite3", "dig")
 SCHEMA_SEARCH_PATHS = (
@@ -40,12 +40,14 @@ def render_bind_zonefile(zone: Zone) -> str:
     """Render `zone` as a standard BIND-presentation-format zone file --
     a validation-only intermediate (not part of this repo's shipped
     output, which is GeoIP YAML) that `pdnsutil zone load` can consume
-    directly, letting any pdns backend serve the same record data.
+    directly, letting any pdns backend serve the same record data. A
+    RecordValue's own explicit ttl (when present) is emitted as BIND's
+    optional per-record TTL field; otherwise the record inherits `$TTL`.
     """
     lines = [f"$TTL {zone.ttl}"]
     soa_values = zone.records.get(zone.apex, {}).get("soa")
     if soa_values:
-        lines.append(f"{zone.apex}. IN SOA {soa_values[0]}")
+        lines.append(f"{zone.apex}. {_bind_ttl_field(soa_values[0])}IN SOA {soa_values[0].content}")
     for owner in sorted(zone.records):
         for rtype in sorted(zone.records[owner]):
             if owner == zone.apex and rtype == "soa":
@@ -54,7 +56,7 @@ def render_bind_zonefile(zone: Zone) -> str:
             for value in zone.records[owner][rtype]:
                 # TXT content already carries its own quotes (see
                 # dns_tinydns_convert._parse_txt) -- no extra quoting here.
-                lines.append(f"{owner}. IN {bind_type} {value}")
+                lines.append(f"{owner}. {_bind_ttl_field(value)}IN {bind_type} {value.content}")
     return "\n".join(lines) + "\n"
 
 
@@ -122,7 +124,7 @@ def validate_via_sqlite_backend(
                     if rtype == "soa":
                         continue  # SOA content round-trips through pdns's own serial handling; not asserted here.
                     answers = _dig(owner, rtype.upper(), port, timeout=query_timeout)
-                    mismatch = _describe_mismatch(owner, rtype, values, answers)
+                    mismatch = _describe_mismatch(owner, rtype, [v.content for v in values], answers)
                     if mismatch is not None:
                         mismatches.append(mismatch)
         return mismatches
@@ -133,6 +135,10 @@ def validate_via_sqlite_backend(
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=startup_timeout)
+
+
+def _bind_ttl_field(value: RecordValue) -> str:
+    return f"{value.ttl} " if value.ttl is not None else ""
 
 
 def _describe_mismatch(owner: str, rtype: str, expected_values: list[str], answers: list[str]) -> str | None:

@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
-from app.dns_tinydns_convert import Zone
+from app.dns_tinydns_convert import RecordValue, Zone
 from app.dns_zone_validate import (
     REQUIRED_BINARIES,
     _describe_mismatch,
@@ -37,8 +37,11 @@ def test_render_bind_zonefile_puts_soa_first() -> None:
         apex="example.com",
         ttl=3600,
         records={
-            "www.example.com": {"a": ["203.0.113.10"]},
-            "example.com": {"soa": ["ns1.example.com. host.example.com. 1 2 3 4 5"], "ns": ["ns1.example.com."]},
+            "www.example.com": {"a": [RecordValue("203.0.113.10")]},
+            "example.com": {
+                "soa": [RecordValue("ns1.example.com. host.example.com. 1 2 3 4 5")],
+                "ns": [RecordValue("ns1.example.com.")],
+            },
         },
     )
     text = render_bind_zonefile(zone)
@@ -50,17 +53,27 @@ def test_render_bind_zonefile_puts_soa_first() -> None:
 def test_render_bind_zonefile_txt_content_not_double_quoted() -> None:
     # Content already carries its own quotes (dns_tinydns_convert._parse_txt
     # produces it that way) -- the renderer must not add a second layer.
-    zone = Zone(apex="example.com", ttl=3600, records={"app.example.com": {"txt": ['"hello world"']}})
+    zone = Zone(apex="example.com", ttl=3600, records={"app.example.com": {"txt": [RecordValue('"hello world"')]}})
     text = render_bind_zonefile(zone)
     assert 'app.example.com. IN TXT "hello world"' in text
     assert '""hello world""' not in text
 
 
 def test_render_bind_zonefile_multi_value_emits_one_line_each() -> None:
-    zone = Zone(apex="example.com", ttl=3600, records={"example.com": {"ns": ["ns1.example.com.", "ns2.example.com."]}})
+    zone = Zone(
+        apex="example.com",
+        ttl=3600,
+        records={"example.com": {"ns": [RecordValue("ns1.example.com."), RecordValue("ns2.example.com.")]}},
+    )
     text = render_bind_zonefile(zone)
     assert "example.com. IN NS ns1.example.com." in text
     assert "example.com. IN NS ns2.example.com." in text
+
+
+def test_render_bind_zonefile_explicit_ttl_emitted_as_bind_ttl_field() -> None:
+    zone = Zone(apex="example.com", ttl=3600, records={"app.example.com": {"a": [RecordValue("203.0.113.10", ttl=60)]}})
+    text = render_bind_zonefile(zone)
+    assert "app.example.com. 60 IN A 203.0.113.10" in text
 
 
 # --- validate_via_sqlite_backend: environment errors ------------------------
@@ -120,13 +133,13 @@ def test_validate_via_sqlite_backend_real_server_no_mismatches(tmp_path: Path) -
             ttl=3600,
             records={
                 "example.com": {
-                    "soa": ["ns1.example.com. host.example.com. 1 16384 2048 1048576 2560"],
-                    "ns": ["ns1.example.com."],
+                    "soa": [RecordValue("ns1.example.com. host.example.com. 1 16384 2048 1048576 2560")],
+                    "ns": [RecordValue("ns1.example.com.")],
                 },
-                "ns1.example.com": {"a": ["203.0.113.1"]},
-                "app.example.com": {"a": ["203.0.113.10"], "txt": ['"hello world"']},
-                "www.example.com": {"cname": ["app.example.com."]},
-                "_svc._tcp.example.com": {"srv": ["0 100 88 app.example.com."]},
+                "ns1.example.com": {"a": [RecordValue("203.0.113.1")]},
+                "app.example.com": {"a": [RecordValue("203.0.113.10", ttl=60)], "txt": [RecordValue('"hello world"')]},
+                "www.example.com": {"cname": [RecordValue("app.example.com.")]},
+                "_svc._tcp.example.com": {"srv": [RecordValue("0 100 88 app.example.com.")]},
             },
         )
     }
