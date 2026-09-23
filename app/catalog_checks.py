@@ -432,10 +432,19 @@ def sync_dns_record(
     if cf_headers is None:
         return SyncResult(name, "skip", "no Cloudflare credentials configured")
 
+    # Normalize target to the canonical form every later comparison
+    # (noop check, read-back, dig) needs to agree with -- Cloudflare stores
+    # (and dig answers with) canonical IPv6 and a bare CNAME target, so a
+    # non-canonical --target (mixed case, uncompressed, or a trailing dot)
+    # would otherwise never converge: every run sees a "mismatch" against
+    # its own previous write and keeps reporting failed.
     try:
-        record_type = "AAAA" if isinstance(ipaddress.ip_address(target), ipaddress.IPv6Address) else "A"
+        parsed_ip = ipaddress.ip_address(target)
+        record_type = "AAAA" if isinstance(parsed_ip, ipaddress.IPv6Address) else "A"
+        target = str(parsed_ip)
     except ValueError:
         record_type = "CNAME"
+        target = target.rstrip(".")
 
     zone_id: str | None = None
     zone_name = ""

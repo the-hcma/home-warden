@@ -857,6 +857,58 @@ def test_sync_dns_record_update_success() -> None:
     assert write_call.kwargs["data"]["content"] == "203.0.113.10"
 
 
+def test_sync_dns_record_proxied_mismatch_triggers_update_not_noop() -> None:
+    # Content already matches but the orange-cloud state doesn't -- must
+    # still PUT, not report noop and leave the live record's proxy state
+    # wrong with a success status.
+    service = {"server_name": "app.example.com"}
+    with (
+        patch(
+            "app.catalog_checks._cf_request",
+            side_effect=[
+                {"result": [{"id": "zone123", "name_servers": ["ns1.example.net"]}]},
+                {"result": [{"id": "rec9", "type": "A", "content": "203.0.113.10", "proxied": False}]},
+                {"result": {"id": "rec9"}},
+                {"result": [{"type": "A", "content": "203.0.113.10"}]},
+            ],
+        ) as mock_cf,
+        patch("app.catalog_checks._resolve_via_authoritative_ns"),
+    ):
+        result = sync_dns_record("svc", service, "203.0.113.10", {"x": "y"}, timeout=5, max_retries=1, proxied=True)
+    assert result.status == "updated"
+    write_call = mock_cf.call_args_list[2]
+    assert write_call.kwargs["data"]["proxied"] is True
+
+
+def test_sync_dns_record_normalizes_noncanonical_ipv6_target() -> None:
+    # dig -- and Cloudflare's own stored content -- always report IPv6 in
+    # RFC 5952 canonical form; a non-canonical --target must still
+    # converge to noop against it instead of "mismatch" forever.
+    service = {"server_name": "app.example.com"}
+    with patch(
+        "app.catalog_checks._cf_request",
+        side_effect=[
+            {"result": [{"id": "zone123"}]},
+            {"result": [{"id": "r1", "type": "AAAA", "content": "2001:db8::1", "proxied": False}]},
+        ],
+    ):
+        result = sync_dns_record("svc", service, "2001:DB8:0000::1", {"x": "y"}, timeout=5, max_retries=1)
+    assert result.status == "noop"
+
+
+def test_sync_dns_record_normalizes_trailing_dot_cname_target() -> None:
+    service = {"server_name": "app.example.com"}
+    with patch(
+        "app.catalog_checks._cf_request",
+        side_effect=[
+            {"result": [{"id": "zone123"}]},
+            {"result": [{"id": "r1", "type": "CNAME", "content": "front.example.net", "proxied": False}]},
+        ],
+    ):
+        result = sync_dns_record("svc", service, "front.example.net.", {"x": "y"}, timeout=5, max_retries=1)
+    assert result.status == "noop"
+
+
 def test_sync_dns_record_create_write_fails() -> None:
     service = {"server_name": "example.com"}
     with patch(
