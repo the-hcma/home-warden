@@ -36,30 +36,37 @@ cat "${work_dir}/pdns.conf"
 echo "--- generated zones.yml ---"
 cat "${work_dir}/zones.yml"
 
-# --socket-dir overrides the generated pdns.conf (which doesn't set one --
-# a real deployment's systemd unit provides a writable RuntimeDirectory=
-# instead) purely so this CI harness can run unprivileged; the shipped
-# zones.yml/pdns.conf content itself is validated unmodified.
-pdns_server "--config-dir=${work_dir}" --daemon=no --guardian=no "--socket-dir=${work_dir}" &
+# local-port and --socket-dir override the generated pdns.conf (which
+# correctly ships local-port=853 -- a privileged port, per #16's design,
+# the auth server never answers the public :53 directly -- and doesn't
+# set socket-dir at all, left to a real deployment's systemd
+# RuntimeDirectory=) purely so this CI harness can run unprivileged. The
+# shipped zones.yml content -- what this script actually validates -- is
+# used unmodified; binding port 853 itself is #108's systemd-wiring
+# follow-up's concern, not this converter's.
+test_port="$(python3 -c 'import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+pdns_server \
+  "--config-dir=${work_dir}" --daemon=no --guardian=no \
+  "--socket-dir=${work_dir}" "--local-port=${test_port}" &
 server_pid=$!
 
 ready=0
 for _ in $(seq 1 40); do
-  if [[ -n "$(dig +short -p 853 @127.0.0.1 example.com SOA 2>/dev/null)" ]]; then
+  if [[ -n "$(dig +short -p "${test_port}" @127.0.0.1 example.com SOA 2>/dev/null)" ]]; then
     ready=1
     break
   fi
   sleep 0.25
 done
 if [[ "${ready}" -ne 1 ]]; then
-  echo "pdns_server on 127.0.0.1:853 did not come up in time" >&2
+  echo "pdns_server on 127.0.0.1:${test_port} did not come up in time" >&2
   exit 1
 fi
 
 fail=0
 check() {
   local name="$1" rtype="$2" expected="$3" got
-  got="$(dig +short -p 853 @127.0.0.1 "${name}" "${rtype}")"
+  got="$(dig +short -p "${test_port}" @127.0.0.1 "${name}" "${rtype}")"
   got="${got%.}"
   expected="${expected%.}"
   if [[ "${got}" != "${expected}" ]]; then
