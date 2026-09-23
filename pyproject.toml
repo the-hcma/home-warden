@@ -35,6 +35,7 @@ dependencies = [
 ]
 
 [project.scripts]
+catalog-dns-sync = "app.catalog_dns_sync_cli:main"
 catalog-health-check = "app.catalog_health_cli:main"
 render-catalog = "app.catalog_render_cli:main"
 

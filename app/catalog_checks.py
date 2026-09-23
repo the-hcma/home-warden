@@ -21,10 +21,12 @@ app.api.catalog_health_routes (on-demand HTTP, for the future web UI).
 from __future__ import annotations
 
 import datetime
+import ipaddress
 import json
 import random
 import socket
 import ssl
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -42,6 +44,14 @@ class CheckResult:
     service: str
     dimension: str  # "cert" | "dns" | "upstream"
     status: str  # "ok" | "fail" | "skip"
+    detail: str
+
+
+@dataclass
+class SyncResult:
+    service: str
+    # "created" | "updated" | "noop" | "would-create" | "would-update" | "failed" | "skip"
+    status: str
     detail: str
 
 
@@ -115,18 +125,36 @@ def parse_cloudflare_credentials(path: Path) -> dict[str, str] | None:
     )
 
 
-def _cf_request(url: str, headers: dict[str, str], timeout: float, max_retries: int) -> dict:
-    """GET a Cloudflare API URL with bounded, jittered-backoff retries.
+def _cf_request(
+    url: str,
+    headers: dict[str, str],
+    timeout: float,
+    max_retries: int,
+    *,
+    method: str = "GET",
+    data: dict | None = None,
+) -> dict:
+    """Call a Cloudflare API URL with bounded, jittered-backoff retries.
     Only retries transient failures (network errors, 5xx) -- never a 4xx.
     `max_retries` is clamped to at least 1 attempt -- "don't retry" (0)
     still means try once, not "crash with an assertion error and get
     reported as a false DNS failure."
+
+    GET/PUT/PATCH/DELETE are idempotent -- safe to retry here directly.
+    POST (record creation) is NOT idempotent on Cloudflare's side (no
+    dedupe key; a duplicate POST can create a second record) -- callers
+    creating a record must pass max_retries=1 here. See sync_dns_record's
+    docstring for why re-invoking the *outer* function, rather than
+    retrying the POST itself, is the safe retry path (per
+    .agents/rules/remote-timeouts-retries.md's "do not retry
+    non-idempotent writes unless the API contract is safe" rule).
     """
+    body = json.dumps(data).encode("utf-8") if data is not None else None
     last_err: Exception | None = None
     for attempt in range(max(1, max_retries)):
         if attempt:
             time.sleep(min(2**attempt, 8) + random.uniform(0, 0.5))
-        req = urllib.request.Request(url, headers=headers)
+        req = urllib.request.Request(url, headers=headers, method=method, data=body)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode("utf-8"))
@@ -138,6 +166,32 @@ def _cf_request(url: str, headers: dict[str, str], timeout: float, max_retries: 
             last_err = e
     assert last_err is not None
     raise last_err
+
+
+def _resolve_via_authoritative_ns(domain: str, record_type: str, nameserver: str, timeout: float) -> list[str] | None:
+    """Query `nameserver` directly for `domain`'s `record_type` records via
+    `dig`, bypassing any resolver cache -- a zone's own authoritative
+    nameservers answer a just-written record immediately, with none of a
+    public resolver's propagation/TTL-caching delay to account for.
+
+    Returns the list of answer values, or None when `dig` itself isn't
+    available in this environment -- an environment limitation, not a DNS
+    failure; callers should treat None as "couldn't verify," distinct
+    from an empty list, which means "asked and got no answer."
+    """
+    try:
+        proc = subprocess.run(
+            ["dig", "+short", f"@{nameserver}", domain, record_type],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
 def candidate_zone_names(domain: str):
@@ -328,3 +382,138 @@ def run_all(
         if not skip_upstream:
             results.append(check_upstream(name, service, timeout))
     return results
+
+
+def sync_dns_record(
+    name: str,
+    service: dict,
+    target: str,
+    cf_headers: dict[str, str] | None,
+    timeout: float,
+    max_retries: int,
+    *,
+    proxied: bool = False,
+    dry_run: bool = False,
+    verify_resolution: bool = True,
+) -> SyncResult:
+    """Idempotent create-or-update of a Cloudflare A/AAAA/CNAME record for
+    `service["server_name"]`, pointed at `target` (this host's own public
+    IP, or a shared front-door hostname). home-warden fronts every public
+    service from the one host, so there is deliberately no per-service
+    target field in the catalog schema -- every synced record points at
+    the same place. `target` being a literal IPv4/IPv6 address picks
+    A/AAAA; anything else is treated as a CNAME target.
+
+    Does not touch an existing record of a *different* type at the same
+    name (e.g. a hand-created CNAME where this call wants an A record) --
+    reports that as a failure needing a human decision, rather than
+    silently deleting and replacing it.
+
+    Create is a single attempt, not a retry loop: Cloudflare's create
+    endpoint isn't idempotent (no dedupe key), so blindly retrying a POST
+    risks a duplicate record if a prior attempt actually landed but its
+    response was lost. The safe retry path is calling this function
+    again -- it always starts by re-reading existing records, so a
+    previously-successful create is detected as already-correct (`noop`)
+    on the next call, never re-POSTed. Update (PUT to a specific record
+    id) is idempotent and retried directly via `_cf_request`.
+
+    Validates the outcome for real before reporting success (see
+    the-hcma/home-warden#109): reads the record back via the Cloudflare
+    API, and -- unless `verify_resolution=False` or `dig` isn't available
+    in this environment -- also resolves it against the zone's own
+    authoritative nameservers. A write the API accepted that doesn't come
+    back clean on either check is `"failed"`, not a success with a
+    warning.
+    """
+    domain = service.get("server_name")
+    if not domain:
+        return SyncResult(name, "skip", "no server_name on this catalog entry")
+    if cf_headers is None:
+        return SyncResult(name, "skip", "no Cloudflare credentials configured")
+
+    try:
+        record_type = "AAAA" if isinstance(ipaddress.ip_address(target), ipaddress.IPv6Address) else "A"
+    except ValueError:
+        record_type = "CNAME"
+
+    zone_id: str | None = None
+    zone_name = ""
+    nameservers: list[str] = []
+    try:
+        for candidate in candidate_zone_names(domain):
+            zone_url = f"{CF_API_BASE}/zones?name={urllib.parse.quote(candidate)}"
+            zone_data = _cf_request(zone_url, cf_headers, timeout, max_retries)
+            zone_results = zone_data.get("result") or []
+            if zone_results:
+                zone_id = zone_results[0]["id"]
+                zone_name = candidate
+                nameservers = zone_results[0].get("name_servers") or []
+                break
+    except Exception as e:
+        return SyncResult(name, "failed", f"Cloudflare zone lookup error: {e}")
+
+    if zone_id is None:
+        return SyncResult(name, "failed", f"no Cloudflare zone found for {domain}")
+
+    rec_url = f"{CF_API_BASE}/zones/{zone_id}/dns_records?name={urllib.parse.quote(domain)}"
+    try:
+        rec_data = _cf_request(rec_url, cf_headers, timeout, max_retries)
+    except Exception as e:
+        return SyncResult(name, "failed", f"Cloudflare record lookup error: {e}")
+
+    existing = [r for r in (rec_data.get("result") or []) if r.get("type") in ("A", "AAAA", "CNAME")]
+    same_type = [r for r in existing if r.get("type") == record_type]
+    other_type = [r for r in existing if r.get("type") != record_type]
+
+    if other_type:
+        kinds = ", ".join(f"{r['type']}={r.get('content')}" for r in other_type)
+        return SyncResult(
+            name,
+            "failed",
+            f"existing {kinds} record for {domain} has a different type than "
+            f"{record_type} -- refusing to replace it automatically",
+        )
+
+    desired = {"type": record_type, "name": domain, "content": target, "proxied": proxied}
+
+    if same_type and same_type[0].get("content") == target and same_type[0].get("proxied", False) == proxied:
+        return SyncResult(name, "noop", f"{record_type}={target} already correct in zone {zone_name}")
+
+    action = "update" if same_type else "create"
+    if dry_run:
+        verb = "would-update" if action == "update" else "would-create"
+        return SyncResult(name, verb, f"{verb.split('-')[1]} {record_type} {domain} -> {target} in zone {zone_name}")
+
+    try:
+        if action == "update":
+            record_id = same_type[0]["id"]
+            write_url = f"{CF_API_BASE}/zones/{zone_id}/dns_records/{record_id}"
+            _cf_request(write_url, cf_headers, timeout, max_retries, method="PUT", data=desired)
+        else:
+            write_url = f"{CF_API_BASE}/zones/{zone_id}/dns_records"
+            _cf_request(write_url, cf_headers, timeout, 1, method="POST", data=desired)
+    except Exception as e:
+        return SyncResult(name, "failed", f"Cloudflare write failed: {e}")
+
+    try:
+        confirm = _cf_request(rec_url, cf_headers, timeout, max_retries)
+    except Exception as e:
+        return SyncResult(name, "failed", f"write accepted but read-back failed: {e}")
+    confirmed = [
+        r for r in (confirm.get("result") or []) if r.get("type") == record_type and r.get("content") == target
+    ]
+    if not confirmed:
+        return SyncResult(name, "failed", f"write accepted but {record_type}={target} not found on read-back")
+
+    if verify_resolution and nameservers:
+        answers = _resolve_via_authoritative_ns(domain, record_type, nameservers[0], timeout)
+        if answers is not None and target not in answers:
+            return SyncResult(
+                name,
+                "failed",
+                f"write accepted and read back but {nameservers[0]} answers {answers}, not {target}",
+            )
+
+    verb = "updated" if action == "update" else "created"
+    return SyncResult(name, verb, f"{verb} {record_type} {domain} -> {target} in zone {zone_name}")
