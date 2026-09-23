@@ -491,6 +491,20 @@ def sync_dns_record(
             f"{record_type} -- refusing to replace it automatically",
         )
 
+    if len(same_type) > 1:
+        # A name can legitimately carry several A/AAAA records (Cloudflare
+        # round-robin) -- picking same_type[0] alone risks reporting noop
+        # while a stale sibling keeps answering, or fixing only one of
+        # several. No different from the other_type guard above: refuse
+        # to silently pick one rather than build round-robin reconciliation.
+        contents = ", ".join(r.get("content", "?") for r in same_type)
+        return SyncResult(
+            name,
+            "failed",
+            f"multiple existing {record_type} records for {domain} ({contents}) -- "
+            "refusing to pick one automatically; round-robin records aren't supported",
+        )
+
     desired = {"type": record_type, "name": domain, "content": target, "proxied": proxied}
 
     if same_type and same_type[0].get("content") == target and same_type[0].get("proxied", False) == proxied:

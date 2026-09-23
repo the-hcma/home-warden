@@ -761,6 +761,66 @@ def test_sync_dns_record_other_type_conflict() -> None:
     assert "different type" in result.detail
 
 
+def test_sync_dns_record_ignores_non_address_record_types() -> None:
+    # An MX/TXT record at the same name is the ordinary case, not a
+    # different-type conflict -- only A/AAAA/CNAME are this dimension's
+    # concern; the filter that excludes them from `existing` is what this
+    # pins.
+    service = {"server_name": "example.com"}
+    with (
+        patch(
+            "app.catalog_checks._cf_request",
+            side_effect=[
+                {"result": [{"id": "zone123", "name_servers": ["ns1.example.net"]}]},
+                {"result": [{"id": "mx1", "type": "MX", "content": "mail.example.com"}]},
+                {"result": {"id": "rec1"}},
+                {"result": [{"type": "A", "content": "203.0.113.10"}]},
+            ],
+        ),
+        patch("app.catalog_checks._resolve_via_authoritative_ns", return_value=["203.0.113.10"]),
+    ):
+        result = sync_dns_record("svc", service, "203.0.113.10", {"x": "y"}, timeout=5, max_retries=1)
+    assert result.status == "created"
+
+
+def test_sync_dns_record_multiple_same_type_records_refuses_to_pick_one() -> None:
+    # A name can legitimately carry several A records (round-robin) --
+    # inspecting only the first risks reporting noop while a stale sibling
+    # keeps answering, or fixing only one of several.
+    service = {"server_name": "example.com"}
+    with patch(
+        "app.catalog_checks._cf_request",
+        side_effect=[
+            {"result": [{"id": "zone123"}]},
+            {
+                "result": [
+                    {"id": "r1", "type": "A", "content": "198.51.100.1", "proxied": False},
+                    {"id": "r2", "type": "A", "content": "203.0.113.10", "proxied": False},
+                ]
+            },
+        ],
+    ):
+        result = sync_dns_record("svc", service, "203.0.113.10", {"x": "y"}, timeout=5, max_retries=1)
+    assert result.status == "failed"
+    assert "multiple existing A records" in result.detail
+
+
+def test_sync_dns_record_readback_exception_is_failure() -> None:
+    service = {"server_name": "example.com"}
+    with patch(
+        "app.catalog_checks._cf_request",
+        side_effect=[
+            {"result": [{"id": "zone123"}]},
+            {"result": []},
+            {"result": {"id": "rec1"}},
+            _http_error(500, "server error"),
+        ],
+    ):
+        result = sync_dns_record("svc", service, "203.0.113.10", {"x": "y"}, timeout=5, max_retries=1)
+    assert result.status == "failed"
+    assert "read-back failed" in result.detail
+
+
 def test_sync_dns_record_noop_already_correct() -> None:
     service = {"server_name": "app.example.com"}
     with patch(
