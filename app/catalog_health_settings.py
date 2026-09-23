@@ -27,6 +27,15 @@ def cloudflare_credentials_path() -> Path:
     return Path(os.environ.get("CLOUDFLARE_CREDENTIALS", str(REPO_ROOT / "conf" / "cloudflare.ini")))
 
 
+def dns_sync_target() -> str | None:
+    """The IP/hostname every synced DNS record should point at -- no
+    default, since every service shares this one value (home-warden fronts
+    every public service from the one host); missing means the operator
+    hasn't configured it yet, not a stale/wrong guess.
+    """
+    return os.environ.get("DNS_SYNC_TARGET")
+
+
 def alert_days() -> int:
     return int(os.environ.get("ALERT_DAYS", "10"))
 

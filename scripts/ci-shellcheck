@@ -10,6 +10,10 @@ scripts=()
 shebang=""
 file=""
 while IFS= read -r -d '' file; do
+  # GNU find's `-executable` isn't portable to BSD/macOS find, so the
+  # executable-bit test is done here in bash instead (`[[ -x ]]` works
+  # identically on both) rather than as a `find` primary.
+  [[ -x "${file}" ]] || continue
   [[ "$(basename "${file}")" == "ci-shellcheck" ]] && continue
   read -r shebang <"${file}" || shebang=""
   if [[ "${shebang}" == "#!/usr/bin/env bash" ]]; then
@@ -20,7 +24,7 @@ while IFS= read -r -d '' file; do
     # not silently dropped from coverage.
     echo "ci-shellcheck: unrecognized shebang '${shebang}' in ${file} -- not checked" >&2
   fi
-done < <(find scripts -type f -executable -print0 | sort -z)
+done < <(find scripts -type f -print0 | sort -z)
 
 if [[ ${#scripts[@]} -eq 0 ]]; then
   echo "No executable bash scripts under scripts/" >&2

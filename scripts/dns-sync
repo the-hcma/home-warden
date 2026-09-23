@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Create/update Cloudflare DNS records for home-warden catalog services.
+# Thin wrapper around the app.catalog_dns_sync_cli console script -- see
+# that module's docstring for env vars, flags, and exit codes.
+# See the-hcma/home-warden#109.
+#
+# Usage:
+#   ./scripts/dns-sync --target 203.0.113.10
+#   ./scripts/dns-sync --target 203.0.113.10 --dry-run
+#   DNS_SYNC_TARGET=203.0.113.10 ./scripts/dns-sync
+
+set -euo pipefail
+
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_dir}"
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "dns-sync: install uv (https://docs.astral.sh/uv/) or run 'uv sync' in ${repo_dir}" >&2
+  exit 1
+fi
+
+exec uv run catalog-dns-sync "$@"
