@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# ci/dns-catalog-validate — convert a CI-only tinydns fixture, then run the
+# real PowerDNS GeoIP backend against the generated zones.yml/pdns.conf and
+# dig-verify every record type the-hcma/home#16's mapping table handles.
+# See the-hcma/home-warden#108 ("validate by actually running it, not just
+# by generating plausible YAML") and .github/ci/catalog-render-validate for
+# the render-then-validate-for-real pattern this mirrors.
+#
+# Uses the real `pdns-backend-geoip` Ubuntu package -- the one thing
+# app.dns_zone_validate's sqlite-backend path (used for local dev, since
+# Homebrew's pdns bottle used on macOS lacks the geoip module) cannot
+# exercise. That local path still validates the parsed *record data* is
+# DNS-correct; this script is the actual acceptance test for the GeoIP
+# YAML shape itself.
+set -euo pipefail
+bash .github/ci/setup-python
+
+work_dir="$(mktemp -d)"
+trap 'kill "${server_pid:-0}" 2>/dev/null || true; rm -rf "${work_dir}"' EXIT
+
+fixture_data="${work_dir}/data"
+cat >"${fixture_data}" <<'EOF'
+Zexample.com:ns1.example.com:hostmaster.example.com:1:16384:2048:1048576:2560:3600
+&example.com:203.0.113.1:ns1.example.com:86400
+=app.example.com:203.0.113.10:86400
+Cwww.example.com:app.example.com:86400
+'_kerberos.example.com:EXAMPLE.COM:86400
+:_ldap._tcp.example.com:33:\000\000\000\144\000\130\003ipa\007example\003com\000:86400
+Z10.113.0.203.in-addr.arpa:ns1.example.com:hostmaster.example.com:1:16384:2048:1048576:2560:3600
+&10.113.0.203.in-addr.arpa::ns1.example.com:86400
+EOF
+
+uv run dns-tinydns-convert "${fixture_data}" --outdir "${work_dir}"
+echo "--- generated pdns.conf ---"
+cat "${work_dir}/pdns.conf"
+echo "--- generated zones.yml ---"
+cat "${work_dir}/zones.yml"
+
+# --socket-dir overrides the generated pdns.conf (which doesn't set one --
+# a real deployment's systemd unit provides a writable RuntimeDirectory=
+# instead) purely so this CI harness can run unprivileged; the shipped
+# zones.yml/pdns.conf content itself is validated unmodified.
+pdns_server "--config-dir=${work_dir}" --daemon=no --guardian=no "--socket-dir=${work_dir}" &
+server_pid=$!
+
+ready=0
+for _ in $(seq 1 40); do
+  if [[ -n "$(dig +short -p 853 @127.0.0.1 example.com SOA 2>/dev/null)" ]]; then
+    ready=1
+    break
+  fi
+  sleep 0.25
+done
+if [[ "${ready}" -ne 1 ]]; then
+  echo "pdns_server on 127.0.0.1:853 did not come up in time" >&2
+  exit 1
+fi
+
+fail=0
+check() {
+  local name="$1" rtype="$2" expected="$3" got
+  got="$(dig +short -p 853 @127.0.0.1 "${name}" "${rtype}")"
+  got="${got%.}"
+  expected="${expected%.}"
+  if [[ "${got}" != "${expected}" ]]; then
+    echo "MISMATCH: ${name} ${rtype}: expected '${expected}', got '${got}'" >&2
+    fail=1
+  else
+    echo "OK: ${name} ${rtype} = ${got}"
+  fi
+}
+
+check "example.com" "NS" "ns1.example.com"
+check "ns1.example.com" "A" "203.0.113.1"
+check "app.example.com" "A" "203.0.113.10"
+check "www.example.com" "CNAME" "app.example.com"
+check "_kerberos.example.com" "TXT" '"EXAMPLE.COM"'
+check "_ldap._tcp.example.com" "SRV" "0 100 88 ipa.example.com"
+check "10.113.0.203.in-addr.arpa" "PTR" "app.example.com"
+
+exit "${fail}"

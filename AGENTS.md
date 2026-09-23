@@ -272,6 +272,57 @@ vhosts. See [#54](https://github.com/the-hcma/home-warden/issues/54).
 
 ---
 
+## Local DNS (PowerDNS)
+
+home-warden runs the local authoritative PowerDNS tooling (`pdns-server` +
+`pdns-recursor`, per PLAN.md's "Vision beyond v1") that `thehcma/home`
+previously hand-rolled — this repo owns the converter/runtime tooling, not
+the served zone data (which stays in `thehcma/home` under `dns/`, the same
+split this repo already uses for nginx's own served config). See
+[#108](https://github.com/the-hcma/home-warden/issues/108) and the design
+work in `thehcma/home#16` (private repo) it relocates.
+
+- **Converter**: `app/dns_tinydns_convert.py` (CLI: `dns-tinydns-convert`,
+  wrapper: `scripts/dns-tinydns-convert`) is a one-off migration tool —
+  parses tinydns-format zone data (exactly the record types SOA `Z`, NS
+  `&` with optional glue A, A+PTR `=`, A-only `+`, TXT `'`, CNAME `C`, and
+  SRV via the generic `:` record type `33`; fails loudly on anything
+  else) and renders PowerDNS's GeoIP-backend `zones.yml` + a matching
+  `pdns.conf`. TXT record `content` always includes literal surrounding
+  quotes — confirmed by actually running a converted record through a
+  real `pdns_server` (see Validation below), not assumed from docs.
+- **Design ported from `thehcma/home#16`**: `launch=geoip` backend, no
+  MaxMind/geo expansions (plain `records:` only), and the authoritative
+  server listens on **loopback:853 only** — the (separately maintained)
+  recursor is what answers the real `:53`, forwarding queries for these
+  zones to loopback:853. DNSSEC and geo-routing are explicitly out of
+  scope, matching #16.
+- **Validation — two tiers**, per this repo's "validate by actually
+  running it" standard (mirrors Service Catalog Renderer's `nginx -t`,
+  not just schema checks):
+  - `app/dns_zone_validate.py`'s `validate_via_sqlite_backend` is
+    backend-independent: it loads parsed records into an ephemeral
+    `pdns_server` (gsqlite3 backend, via `pdnsutil zone load`) and
+    dig-verifies every record. Runs anywhere `pdns_server`/`pdnsutil`/
+    `sqlite3`/`dig` are installed, including local dev on macOS via
+    `brew install pdns` — proves the *record data* is DNS-correct, not
+    the exact GeoIP-YAML shape (Homebrew's `pdns` bottle doesn't ship the
+    `geoip` module).
+  - `.github/ci/dns-catalog-validate` is the real acceptance test for the
+    GeoIP YAML shape itself: installs the actual `pdns-server` +
+    `pdns-backend-geoip` Ubuntu packages, converts a CI-only tinydns
+    fixture, runs the genuinely-generated `zones.yml`/`pdns.conf` through
+    a real `pdns_server`, and `dig`-verifies every record type. Wired as
+    its own `dns-catalog-validate` CI job.
+- **Ongoing zone edits** (not just the one-off migration) should run
+  through the same validation before `pdns_control reload` on the live
+  host — see #108 for the reload-wiring/systemd follow-up this converter
+  work unblocks.
+- Full usage, the record-mapping reference table, and the validation
+  workflow: [docs/dns-tinydns-migration.md](./docs/dns-tinydns-migration.md).
+
+---
+
 ## Web UI
 
 home-warden's first-party admin web UI
@@ -389,6 +440,9 @@ CI lives in `.github/workflows/ci.yml`:
 - Nginx security lint (`.github/ci/nginx-security-lint` — Gixy-Next, see above)
 - Catalog render validate (`.github/ci/catalog-render-validate` — renders a
   fixture catalog, runs `nginx -t` + Gixy-Next against it, see above)
+- DNS catalog validate (`.github/ci/dns-catalog-validate` — converts a
+  tinydns fixture, runs the real `pdns-backend-geoip` + `dig` against it,
+  see Local DNS above)
 - Web (`.github/ci/web-build` — pnpm typecheck + esbuild build, see Web UI above)
 
 No PR may be merged with a failing CI check.
@@ -406,6 +460,11 @@ No PR may be merged with a failing CI check.
       `HOME_NGINX_CONF`) changed
 - [ ] `uv run render-catalog` output still round-trips through
       `crossplane.parse()` clean when `app/catalog_render.py` changed
+- [ ] `uv run pytest tests/python/test_dns_zone_validate.py -v` shows the
+      real-`pdns_server` tests actually ran (not skipped) when
+      `app/dns_tinydns_convert.py` or `app/dns_zone_validate.py` changed
+      (install PowerDNS locally — `brew install pdns` on macOS — if they
+      show as skipped)
 - [ ] `pnpm run check` (typecheck + build) clean from `web/` when
       `web/` changed
 - [ ] No certs, keys, or secrets in the diff

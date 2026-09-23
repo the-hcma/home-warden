@@ -30,6 +30,7 @@ dependencies = [
     "fastapi>=0.141.1",
     "itsdangerous>=2.2.0",
     "python-pam>=2.0.2",
+    "pyyaml>=6.0.3",
     "six>=1.17.0",
     "uvicorn[standard]>=0.52.4",
 ]
@@ -37,6 +38,7 @@ dependencies = [
 [project.scripts]
 catalog-dns-sync = "app.catalog_dns_sync_cli:main"
 catalog-health-check = "app.catalog_health_cli:main"
+dns-tinydns-convert = "app.dns_tinydns_convert_cli:main"
 render-catalog = "app.catalog_render_cli:main"
 
 [project.urls]
