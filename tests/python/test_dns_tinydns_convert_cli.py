@@ -70,8 +70,11 @@ def test_cli_writes_zones_yaml_and_pdns_conf(monkeypatch, tmp_path: Path, capsys
     # the recursor (not this server) answers the real, LAN/public-facing
     # :53. A regression here would expose it, and nothing else asserts
     # this (the CI harness deliberately overrides the port for its own
-    # unprivileged smoke test).
-    assert "local-address=127.0.0.1" in pdns_conf
+    # unprivileged smoke test). Both address families must be listed --
+    # PowerDNS's own default is local-address=0.0.0.0, :: (every
+    # interface); an IPv4-only value here would leave IPv6 at that
+    # wildcard default.
+    assert "local-address=127.0.0.1, ::1" in pdns_conf
     assert "local-port=853" in pdns_conf
 
 

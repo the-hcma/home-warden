@@ -89,9 +89,30 @@ check() {
   fi
 }
 
+check_ttl() {
+  # `dig +short` (used by check() above) never prints a TTL, so a
+  # correct-content/wrong-ttl regression in render_zones_yaml's expanded
+  # {content, ttl} form -- the whole point of that form over the plain
+  # scalar -- would otherwise leave every check() line green.
+  local name="$1" rtype="$2" expected_ttl="$3" line ttl
+  line="$(dig +noall +answer -p "${test_port}" @127.0.0.1 "${name}" "${rtype}")"
+  ttl="$(awk '{print $2; exit}' <<<"${line}")"
+  if [[ "${ttl}" != "${expected_ttl}" ]]; then
+    echo "MISMATCH: ${name} ${rtype} ttl: expected '${expected_ttl}', got '${ttl}'" >&2
+    fail=1
+  else
+    echo "OK: ${name} ${rtype} ttl = ${ttl}"
+  fi
+}
+
 check "example.com" "NS" "ns1.example.com"
 check "ns1.example.com" "A" "203.0.113.1"
 check "app.example.com" "A" "203.0.113.10"
+# 86400 is app.example.com's own fixture-line ttl, distinct from the
+# zone's default (3600, from the SOA line) -- proves the expanded
+# {content, ttl} form's ttl is what's actually served, not just present
+# in zones.yml.
+check_ttl "app.example.com" "A" "86400"
 check "www.example.com" "CNAME" "app.example.com"
 check "_kerberos.example.com" "TXT" '"EXAMPLE.COM"'
 check "_ldap._tcp.example.com" "SRV" "0 100 88 ipa.example.com"
@@ -100,6 +121,8 @@ check "_ldap._tcp.example.com" "SRV" "0 100 88 ipa.example.com"
 # form every other record here happens to use. A shape regression
 # confined to this form would otherwise leave CI green.
 check "plain.example.com" "A" "203.0.113.20"
+# No explicit ttl on this record -- must inherit the zone default (3600).
+check_ttl "plain.example.com" "A" "3600"
 check "10.113.0.203.in-addr.arpa" "PTR" "app.example.com"
 
 exit "${fail}"

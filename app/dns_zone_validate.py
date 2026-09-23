@@ -121,10 +121,21 @@ def validate_via_sqlite_backend(
                 for rtype, values in type_map.items():
                     if rtype == "soa":
                         continue  # SOA content round-trips through pdns's own serial handling; not asserted here.
-                    answers = _dig(owner, rtype.upper(), port, timeout=query_timeout)
-                    mismatch = _describe_mismatch(owner, rtype, [v.content for v in values], answers)
+                    answered = _dig_with_ttl(owner, rtype.upper(), port, timeout=query_timeout)
+                    mismatch = _describe_mismatch(owner, rtype, [v.content for v in values], [c for c, _ in answered])
                     if mismatch is not None:
                         mismatches.append(mismatch)
+                        continue  # content already wrong; a ttl mismatch on top is just noise.
+                    # Every RecordValue with no ttl of its own inherits the
+                    # zone default -- that's what must actually be served,
+                    # not just what render_bind_zonefile happened to write.
+                    expected_ttls = {v.ttl if v.ttl is not None else zone.ttl for v in values}
+                    served_ttls = {ttl for _, ttl in answered}
+                    if served_ttls != expected_ttls:
+                        mismatches.append(
+                            f"{owner} {rtype.upper()}: expected ttl(s) {sorted(expected_ttls)}, "
+                            f"got {sorted(served_ttls)}"
+                        )
         return mismatches
     finally:
         proc.terminate()
@@ -170,6 +181,39 @@ def _dig(name: str, rtype: str, port: int, *, timeout: float) -> list[str]:
     except subprocess.TimeoutExpired:
         return []
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _dig_with_ttl(name: str, rtype: str, port: int, *, timeout: float) -> list[tuple[str, int]]:
+    """Like `_dig`, but also captures the served TTL -- `+short` prints
+    content only, which would let a record's ttl (the whole point of
+    render_zones_yaml's expanded {content, ttl} form, per #108) go
+    unverified even though the content check passes. Uses `+noall
+    +answer` and parses each answer line's own TTL column rather than
+    trusting the zone's declared default.
+    """
+    try:
+        proc = subprocess.run(
+            ["dig", "+noall", "+answer", "-p", str(port), "@127.0.0.1", name, rtype],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return []
+    results: list[tuple[str, int]] = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line or line.startswith(";"):
+            continue
+        # "<name> <ttl> <class> <type> <rdata...>" -- rdata itself may
+        # contain internal whitespace (SRV, a quoted TXT string), so it
+        # is never split further than this one boundary.
+        parts = line.split(None, 4)
+        if len(parts) < 5 or not parts[1].isdigit():
+            continue
+        results.append((parts[4].strip(), int(parts[1])))
+    return results
 
 
 def _find_sqlite_schema() -> Path:

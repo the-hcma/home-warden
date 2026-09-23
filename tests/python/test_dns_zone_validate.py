@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import gzip
 import shutil
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -21,6 +22,7 @@ from app.dns_tinydns_convert import RecordValue, Zone
 from app.dns_zone_validate import (
     REQUIRED_BINARIES,
     _describe_mismatch,
+    _dig_with_ttl,
     _read_schema_sql,
     _start_server_with_retry,
     render_bind_zonefile,
@@ -190,6 +192,48 @@ def test_describe_mismatch_no_answer_at_all_is_reported() -> None:
     # for agreement.
     result = _describe_mismatch("app.example.com", "a", ["203.0.113.10"], [])
     assert result is not None
+
+
+# --- _dig_with_ttl ------------------------------------------------------------
+
+
+def _fake_dig_output(stdout: str) -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+
+
+def test_dig_with_ttl_parses_real_answer_format() -> None:
+    # Real `dig +noall +answer` output is tab-separated -- captured from
+    # an actual pdns_server response, not guessed.
+    stdout = "app.example.com.\t86400\tIN\tA\t203.0.113.10\n"
+    with patch("subprocess.run", return_value=_fake_dig_output(stdout)):
+        answers = _dig_with_ttl("app.example.com", "A", 25356, timeout=1.0)
+    assert answers == [("203.0.113.10", 86400)]
+
+
+def test_dig_with_ttl_preserves_internal_whitespace_in_rdata() -> None:
+    # A quoted TXT string's internal space must survive -- the line is
+    # split at most 4 times, not on every whitespace run.
+    stdout = 'app.example.com.\t3600\tIN\tTXT\t"hello world"\n'
+    with patch("subprocess.run", return_value=_fake_dig_output(stdout)):
+        answers = _dig_with_ttl("app.example.com", "TXT", 25356, timeout=1.0)
+    assert answers == [('"hello world"', 3600)]
+
+
+def test_dig_with_ttl_empty_output_returns_empty_list() -> None:
+    with patch("subprocess.run", return_value=_fake_dig_output("")):
+        assert _dig_with_ttl("app.example.com", "A", 25356, timeout=1.0) == []
+
+
+def test_dig_with_ttl_ignores_comment_lines() -> None:
+    stdout = ";; ANSWER SECTION:\napp.example.com.\t60\tIN\tA\t203.0.113.10\n"
+    with patch("subprocess.run", return_value=_fake_dig_output(stdout)):
+        answers = _dig_with_ttl("app.example.com", "A", 25356, timeout=1.0)
+    assert answers == [("203.0.113.10", 60)]
+
+
+def test_dig_with_ttl_timeout_returns_empty_list() -> None:
+    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="dig", timeout=1.0)):
+        assert _dig_with_ttl("app.example.com", "A", 25356, timeout=1.0) == []
 
 
 # --- validate_via_sqlite_backend: real server -------------------------------
