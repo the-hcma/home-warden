@@ -180,6 +180,76 @@ def test_cli_service_filter_limits_to_named_services(monkeypatch, tmp_path: Path
     assert [r["service"] for r in out] == ["svc-b"]
 
 
+def test_cli_service_filter_unknown_name_exits_2(monkeypatch, tmp_path: Path, capsys) -> None:
+    # A misspelled/renamed --service value must fail loudly (exit 2), not
+    # silently filter the catalog down to an empty list and exit 0 --
+    # every other input error in this module (a bad catalog, missing
+    # credentials) already fails loudly the same way.
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": [{"name": "svc-a", "server_name": "a.example.com"}]}))
+    creds = _write_credentials(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "catalog-dns-sync",
+            "--target",
+            "203.0.113.10",
+            "--services-json",
+            str(catalog_path),
+            "--cloudflare-credentials",
+            str(creds),
+            "--service",
+            "svc-typo",
+        ],
+    )
+    monkeypatch.setattr("app.catalog_dns_sync_cli.enforce_host_guard", lambda caller: True)
+    assert main() == 2
+    assert "svc-typo" in capsys.readouterr().err
+
+
+def test_cli_wires_flags_into_sync_dns_record(monkeypatch, tmp_path: Path, capsys) -> None:
+    # A swapped wire-up (e.g. proxied=args.dry_run) would silently change
+    # live write behavior with every other CLI test still passing, since
+    # they all discard the kwargs sync_dns_record was actually called
+    # with -- capture them here instead of just returning a fixed result.
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": [{"name": "svc-a", "server_name": "a.example.com"}]}))
+    creds = _write_credentials(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "catalog-dns-sync",
+            "--target",
+            "203.0.113.10",
+            "--services-json",
+            str(catalog_path),
+            "--cloudflare-credentials",
+            str(creds),
+            "--proxied",
+            "--no-verify-resolution",
+            "--max-retries",
+            "7",
+        ],
+    )
+    monkeypatch.setattr("app.catalog_dns_sync_cli.enforce_host_guard", lambda caller: True)
+    captured: dict = {}
+
+    def _capture(name, *a, **kw):
+        captured["args"] = a
+        captured["kwargs"] = kw
+        return SyncResult(name, "noop", "already correct")
+
+    monkeypatch.setattr("app.catalog_dns_sync_cli.sync_dns_record", _capture)
+    main()
+    assert captured["kwargs"]["proxied"] is True
+    assert captured["kwargs"]["verify_resolution"] is False
+    # (service, target, cf_headers, timeout, max_retries) -- max_retries is
+    # passed positionally, not as a kwarg.
+    assert captured["args"][4] == 7
+
+
 def test_cli_dns_sync_target_env_default(monkeypatch, tmp_path: Path, capsys) -> None:
     catalog_path = tmp_path / "services.json"
     catalog_path.write_text(json.dumps({"services": []}))

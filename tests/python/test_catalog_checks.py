@@ -705,18 +705,46 @@ def test_sync_dns_record_zone_lookup_exception() -> None:
     with patch("app.catalog_checks._cf_request", side_effect=_http_error(403, "forbidden")):
         result = sync_dns_record("svc", service, "203.0.113.10", {"x": "y"}, timeout=5, max_retries=1)
     assert result.status == "failed"
-    assert "Cloudflare zone lookup error" in result.detail
+    assert "Cloudflare lookup error" in result.detail
 
 
 def test_sync_dns_record_record_lookup_exception() -> None:
-    service = {"server_name": "app.example.com"}
+    service = {"server_name": "example.com"}
     with patch(
         "app.catalog_checks._cf_request",
         side_effect=[{"result": [{"id": "zone123"}]}, _http_error(500, "server error")],
     ):
         result = sync_dns_record("svc", service, "203.0.113.10", {"x": "y"}, timeout=5, max_retries=1)
     assert result.status == "failed"
-    assert "Cloudflare record lookup error" in result.detail
+    assert "Cloudflare lookup error" in result.detail
+
+
+def test_sync_dns_record_falls_back_to_more_specific_zone_when_parent_has_no_record() -> None:
+    # Account holds both example.com and app.example.com as separate
+    # zones; neither has an existing record yet, so the record must be
+    # created in the more specific (child) zone -- not the first
+    # (parent) zone merely because it happens to exist. Mirrors
+    # check_dns's own test_check_dns_falls_back_to_more_specific_nested_zone.
+    service = {"server_name": "app.example.com"}
+    with (
+        patch(
+            "app.catalog_checks._cf_request",
+            side_effect=[
+                {"result": [{"id": "parent-zone", "name_servers": ["ns-parent.example.net"]}]},
+                {"result": []},  # no existing record in the parent zone
+                {"result": [{"id": "child-zone", "name_servers": ["ns-child.example.net"]}]},
+                {"result": []},  # no existing record in the child zone either
+                {"result": {"id": "rec1"}},  # POST write
+                {"result": [{"type": "A", "content": "203.0.113.10"}]},  # read-back confirm
+            ],
+        ) as mock_cf,
+        patch("app.catalog_checks._resolve_via_authoritative_ns", return_value=["203.0.113.10"]),
+    ):
+        result = sync_dns_record("svc", service, "203.0.113.10", {"x": "y"}, timeout=5, max_retries=1)
+    assert result.status == "created"
+    assert "zone app.example.com" in result.detail
+    write_call = mock_cf.call_args_list[4]
+    assert "zones/child-zone/dns_records" in write_call.args[0]
 
 
 def test_sync_dns_record_other_type_conflict() -> None:
@@ -747,7 +775,7 @@ def test_sync_dns_record_noop_already_correct() -> None:
 
 
 def test_sync_dns_record_dry_run_create() -> None:
-    service = {"server_name": "app.example.com"}
+    service = {"server_name": "example.com"}
     with patch(
         "app.catalog_checks._cf_request",
         side_effect=[{"result": [{"id": "zone123"}]}, {"result": []}],
@@ -770,7 +798,11 @@ def test_sync_dns_record_dry_run_update() -> None:
 
 
 def test_sync_dns_record_create_success() -> None:
-    service = {"server_name": "app.example.com"}
+    # max_retries=3 (not 1) deliberately: proves the create write forwards
+    # a hardcoded 1 regardless of the caller's own retry budget (the
+    # non-idempotent-POST safety property), while the zone/record/read-back
+    # GETs forward the caller's real value.
+    service = {"server_name": "example.com"}
     with (
         patch(
             "app.catalog_checks._cf_request",
@@ -783,13 +815,22 @@ def test_sync_dns_record_create_success() -> None:
         ) as mock_cf,
         patch("app.catalog_checks._resolve_via_authoritative_ns", return_value=["203.0.113.10"]),
     ):
-        result = sync_dns_record("svc", service, "203.0.113.10", {"x": "y"}, timeout=5, max_retries=1)
+        result = sync_dns_record("svc", service, "203.0.113.10", {"x": "y"}, timeout=5, max_retries=3)
     assert result.status == "created"
     assert "203.0.113.10" in result.detail
-    # POST write call used method="POST" -- pin the create path took the
-    # single-attempt (max_retries=1) branch, not the retry-loop one.
     write_call = mock_cf.call_args_list[2]
     assert write_call.kwargs["method"] == "POST"
+    # Single-attempt invariant: create must always pass max_retries=1 to
+    # _cf_request (the 4th positional arg), never the caller's own value --
+    # that's what keeps a transient 5xx from ever re-POSTing and risking a
+    # duplicate record.
+    assert write_call.args[3] == 1
+    assert write_call.kwargs["data"] == {
+        "type": "A",
+        "name": "example.com",
+        "content": "203.0.113.10",
+        "proxied": False,
+    }
 
 
 def test_sync_dns_record_update_success() -> None:
@@ -806,14 +847,18 @@ def test_sync_dns_record_update_success() -> None:
         ) as mock_cf,
         patch("app.catalog_checks._resolve_via_authoritative_ns", return_value=["203.0.113.10"]),
     ):
-        result = sync_dns_record("svc", service, "203.0.113.10", {"x": "y"}, timeout=5, max_retries=1)
+        result = sync_dns_record("svc", service, "203.0.113.10", {"x": "y"}, timeout=5, max_retries=3)
     assert result.status == "updated"
     write_call = mock_cf.call_args_list[2]
     assert write_call.kwargs["method"] == "PUT"
+    # Update is idempotent (PUT to a specific record id) -- it forwards the
+    # caller's own max_retries, unlike create's hardcoded single attempt.
+    assert write_call.args[3] == 3
+    assert write_call.kwargs["data"]["content"] == "203.0.113.10"
 
 
 def test_sync_dns_record_create_write_fails() -> None:
-    service = {"server_name": "app.example.com"}
+    service = {"server_name": "example.com"}
     with patch(
         "app.catalog_checks._cf_request",
         side_effect=[
@@ -830,7 +875,7 @@ def test_sync_dns_record_create_write_fails() -> None:
 def test_sync_dns_record_write_succeeds_but_readback_missing() -> None:
     # The write API can return 200 without the record actually being
     # correct yet -- must not report success on that alone.
-    service = {"server_name": "app.example.com"}
+    service = {"server_name": "example.com"}
     with patch(
         "app.catalog_checks._cf_request",
         side_effect=[
@@ -848,7 +893,7 @@ def test_sync_dns_record_write_succeeds_but_readback_missing() -> None:
 def test_sync_dns_record_resolution_mismatch_is_failure() -> None:
     # Read-back via the API can look correct while the authoritative
     # nameserver still answers something else -- both checks must pass.
-    service = {"server_name": "app.example.com"}
+    service = {"server_name": "example.com"}
     with (
         patch(
             "app.catalog_checks._cf_request",
@@ -866,8 +911,95 @@ def test_sync_dns_record_resolution_mismatch_is_failure() -> None:
     assert "ns1.example.net answers" in result.detail
 
 
+def test_sync_dns_record_dig_unavailable_still_succeeds() -> None:
+    # No `dig` on this host (or environment can't run it) is a couldn't-
+    # verify limitation, not a DNS failure -- must not turn every dig-less
+    # host into a false "failed" (see _resolve_via_authoritative_ns's own
+    # None-vs-[] contract).
+    service = {"server_name": "example.com"}
+    with (
+        patch(
+            "app.catalog_checks._cf_request",
+            side_effect=[
+                {"result": [{"id": "zone123", "name_servers": ["ns1.example.net"]}]},
+                {"result": []},
+                {"result": {"id": "rec1"}},
+                {"result": [{"type": "A", "content": "203.0.113.10"}]},
+            ],
+        ),
+        patch("app.catalog_checks._resolve_via_authoritative_ns", return_value=None),
+    ):
+        result = sync_dns_record("svc", service, "203.0.113.10", {"x": "y"}, timeout=5, max_retries=1)
+    assert result.status == "created"
+
+
+def test_sync_dns_record_dig_empty_answer_is_failure() -> None:
+    # Distinct from the None case above: dig ran and got a real answer --
+    # an empty one -- which is a genuine mismatch, not a skip.
+    service = {"server_name": "example.com"}
+    with (
+        patch(
+            "app.catalog_checks._cf_request",
+            side_effect=[
+                {"result": [{"id": "zone123", "name_servers": ["ns1.example.net"]}]},
+                {"result": []},
+                {"result": {"id": "rec1"}},
+                {"result": [{"type": "A", "content": "203.0.113.10"}]},
+            ],
+        ),
+        patch("app.catalog_checks._resolve_via_authoritative_ns", return_value=[]),
+    ):
+        result = sync_dns_record("svc", service, "203.0.113.10", {"x": "y"}, timeout=5, max_retries=1)
+    assert result.status == "failed"
+    assert "answers []" in result.detail
+
+
+def test_sync_dns_record_cname_dig_answer_trailing_dot_is_normalized() -> None:
+    # dig prints CNAME answers as FQDNs with a trailing dot; target never
+    # carries one -- a naive exact-string compare would report every
+    # correct CNAME write as failed.
+    service = {"server_name": "example.com"}
+    with (
+        patch(
+            "app.catalog_checks._cf_request",
+            side_effect=[
+                {"result": [{"id": "zone123", "name_servers": ["ns1.example.net"]}]},
+                {"result": []},
+                {"result": {"id": "rec1"}},
+                {"result": [{"type": "CNAME", "content": "front.example.net"}]},
+            ],
+        ),
+        patch("app.catalog_checks._resolve_via_authoritative_ns", return_value=["front.example.net."]),
+    ):
+        result = sync_dns_record("svc", service, "front.example.net", {"x": "y"}, timeout=5, max_retries=1)
+    assert result.status == "created"
+
+
+def test_sync_dns_record_proxied_skips_dig_verification() -> None:
+    # A proxied record's authoritative answer is Cloudflare's anycast edge
+    # (or nothing), never the origin content just written -- dig
+    # verification must be skipped entirely for proxied=True, not just
+    # normalized, or every proxied write would report failed.
+    service = {"server_name": "example.com"}
+    with (
+        patch(
+            "app.catalog_checks._cf_request",
+            side_effect=[
+                {"result": [{"id": "zone123", "name_servers": ["ns1.example.net"]}]},
+                {"result": []},
+                {"result": {"id": "rec1"}},
+                {"result": [{"type": "A", "content": "203.0.113.10"}]},
+            ],
+        ),
+        patch("app.catalog_checks._resolve_via_authoritative_ns") as mock_resolve,
+    ):
+        result = sync_dns_record("svc", service, "203.0.113.10", {"x": "y"}, timeout=5, max_retries=1, proxied=True)
+    assert result.status == "created"
+    mock_resolve.assert_not_called()
+
+
 def test_sync_dns_record_verify_resolution_false_skips_dig() -> None:
-    service = {"server_name": "app.example.com"}
+    service = {"server_name": "example.com"}
     with (
         patch(
             "app.catalog_checks._cf_request",

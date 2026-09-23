@@ -440,29 +440,36 @@ def sync_dns_record(
     zone_id: str | None = None
     zone_name = ""
     nameservers: list[str] = []
+    rec_url = ""
+    existing: list[dict] = []
     try:
         for candidate in candidate_zone_names(domain):
             zone_url = f"{CF_API_BASE}/zones?name={urllib.parse.quote(candidate)}"
             zone_data = _cf_request(zone_url, cf_headers, timeout, max_retries)
             zone_results = zone_data.get("result") or []
-            if zone_results:
-                zone_id = zone_results[0]["id"]
-                zone_name = candidate
-                nameservers = zone_results[0].get("name_servers") or []
+            if not zone_results:
+                continue
+            # Remember the most specific existing zone seen so far, not just
+            # the first one that exists: an account can hold both a parent
+            # zone and a more specific delegated zone (see check_dns above),
+            # and a record created in the wrong one is silently unreachable.
+            # Keep walking candidates (apex-first) until one actually holds
+            # the record; if none do, the last (most specific) existing zone
+            # is where a new record belongs.
+            zone_id = zone_results[0]["id"]
+            zone_name = candidate
+            nameservers = zone_results[0].get("name_servers") or []
+            rec_url = f"{CF_API_BASE}/zones/{zone_id}/dns_records?name={urllib.parse.quote(domain)}"
+            rec_data = _cf_request(rec_url, cf_headers, timeout, max_retries)
+            existing = [r for r in (rec_data.get("result") or []) if r.get("type") in ("A", "AAAA", "CNAME")]
+            if existing:
                 break
     except Exception as e:
-        return SyncResult(name, "failed", f"Cloudflare zone lookup error: {e}")
+        return SyncResult(name, "failed", f"Cloudflare lookup error: {e}")
 
     if zone_id is None:
         return SyncResult(name, "failed", f"no Cloudflare zone found for {domain}")
 
-    rec_url = f"{CF_API_BASE}/zones/{zone_id}/dns_records?name={urllib.parse.quote(domain)}"
-    try:
-        rec_data = _cf_request(rec_url, cf_headers, timeout, max_retries)
-    except Exception as e:
-        return SyncResult(name, "failed", f"Cloudflare record lookup error: {e}")
-
-    existing = [r for r in (rec_data.get("result") or []) if r.get("type") in ("A", "AAAA", "CNAME")]
     same_type = [r for r in existing if r.get("type") == record_type]
     other_type = [r for r in existing if r.get("type") != record_type]
 
@@ -506,9 +513,16 @@ def sync_dns_record(
     if not confirmed:
         return SyncResult(name, "failed", f"write accepted but {record_type}={target} not found on read-back")
 
-    if verify_resolution and nameservers:
+    # Skip for proxied records: a proxied name's authoritative answer is
+    # Cloudflare's anycast edge (or nothing, for a proxied CNAME), never the
+    # origin `content` just written -- the API read-back above is already
+    # this case's real validation.
+    if verify_resolution and nameservers and not proxied:
         answers = _resolve_via_authoritative_ns(domain, record_type, nameservers[0], timeout)
-        if answers is not None and target not in answers:
+        # dig prints CNAME/NS-style answers as FQDNs with a trailing dot;
+        # `target` never carries one -- normalize before comparing.
+        normalized = [a.rstrip(".") for a in answers] if answers is not None else None
+        if normalized is not None and target not in normalized:
             return SyncResult(
                 name,
                 "failed",

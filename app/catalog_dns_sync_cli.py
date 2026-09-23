@@ -84,7 +84,12 @@ def main() -> int:
 
     services = catalog.get("services") or []
     if args.services:
-        services = [s for s in services if s.get("name") in args.services]
+        matched = [s for s in services if s.get("name") in args.services]
+        unmatched = sorted(set(args.services) - {s.get("name") for s in matched})
+        if unmatched:
+            print(f"catalog-dns-sync: --service not found in catalog: {', '.join(unmatched)}", file=sys.stderr)
+            return 2
+        services = matched
 
     results = [
         sync_dns_record(
