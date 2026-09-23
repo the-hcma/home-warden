@@ -248,14 +248,17 @@ def test_render_zones_yaml_round_trips_and_has_expected_shape() -> None:
             "domain": "example.com",
             "ttl": 3600,
             "records": {
-                "example.com": {"soa": "ns1.example.com. hostmaster.example.com. 1 16384 2048 1048576 2560"},
-                "web.example.com": {"a": ["203.0.113.5"]},
+                "example.com": [{"soa": "ns1.example.com. hostmaster.example.com. 1 16384 2048 1048576 2560"}],
+                "web.example.com": [{"a": "203.0.113.5"}],
             },
         }
     ]
 
 
-def test_render_zones_yaml_multi_value_type_stays_a_list() -> None:
+def test_render_zones_yaml_repeated_type_is_separate_list_entries() -> None:
+    # The backend's real schema (confirmed by actually running a
+    # converted zone through it, see #108) wants two separate {ns: ...}
+    # list entries for two NS records -- never a single ns: [a, b] value.
     zones = {
         "example.com": Zone(
             apex="example.com",
@@ -264,15 +267,18 @@ def test_render_zones_yaml_multi_value_type_stays_a_list() -> None:
         )
     }
     parsed = yaml.safe_load(render_zones_yaml(zones))
-    assert parsed["domains"][0]["records"]["example.com"]["ns"] == ["ns1.example.com.", "ns2.example.com."]
+    assert parsed["domains"][0]["records"]["example.com"] == [
+        {"ns": "ns1.example.com."},
+        {"ns": "ns2.example.com."},
+    ]
 
 
-def test_render_zones_yaml_cname_is_single_string_not_list() -> None:
+def test_render_zones_yaml_cname_is_a_plain_string_value() -> None:
     zones = {
         "example.com": Zone(apex="example.com", ttl=3600, records={"www.example.com": {"cname": ["web.example.com."]}})
     }
     parsed = yaml.safe_load(render_zones_yaml(zones))
-    assert parsed["domains"][0]["records"]["www.example.com"]["cname"] == "web.example.com."
+    assert parsed["domains"][0]["records"]["www.example.com"] == [{"cname": "web.example.com."}]
 
 
 def test_render_zones_yaml_has_generated_header_comment() -> None:
@@ -314,13 +320,14 @@ def test_end_to_end_conversion() -> None:
     assert set(domains_by_name) == {"example.com", "113.0.203.in-addr.arpa"}
 
     forward = domains_by_name["example.com"]["records"]
-    assert forward["example.com"]["soa"].startswith("ns1.example.com. hostmaster.example.com.")
-    assert forward["example.com"]["ns"] == ["ns1.example.com."]
-    assert forward["ns1.example.com"]["a"] == ["203.0.113.1"]
-    assert forward["app.example.com"]["a"] == ["203.0.113.2"]
-    assert forward["www.example.com"]["cname"] == "app.example.com."
-    assert forward["_kerberos.example.com"]["txt"] == ['"EXAMPLE.COM"']
+    apex_soa = next(v for entry in forward["example.com"] for k, v in entry.items() if k == "soa")
+    assert apex_soa.startswith("ns1.example.com. hostmaster.example.com.")
+    assert {"ns": "ns1.example.com."} in forward["example.com"]
+    assert forward["ns1.example.com"] == [{"a": "203.0.113.1"}]
+    assert forward["app.example.com"] == [{"a": "203.0.113.2"}]
+    assert forward["www.example.com"] == [{"cname": "app.example.com."}]
+    assert forward["_kerberos.example.com"] == [{"txt": '"EXAMPLE.COM"'}]
 
     reverse = domains_by_name["113.0.203.in-addr.arpa"]["records"]
-    assert reverse["2.113.0.203.in-addr.arpa"]["ptr"] == ["app.example.com."]
-    assert reverse["113.0.203.in-addr.arpa"]["ns"] == ["ns1.example.com."]
+    assert reverse["2.113.0.203.in-addr.arpa"] == [{"ptr": "app.example.com."}]
+    assert {"ns": "ns1.example.com."} in reverse["113.0.203.in-addr.arpa"]

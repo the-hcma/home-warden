@@ -108,19 +108,30 @@ def render_zones_yaml(zones: dict[str, Zone]) -> str:
     `domains:` list, one entry per zone) -- imported lazily so a caller
     that only needs parsing/bucketing (e.g. the sqlite-backend validator)
     doesn't need PyYAML installed.
+
+    Each owner's records are a *list* of single-key `{type: content}`
+    dicts -- one list entry per record instance, even when the same type
+    repeats (two `ns:` entries stay two list items, never `ns: [a, b]`) --
+    per the backend's actual documented schema
+    (https://doc.powerdns.com/authoritative/backends/geoip.html), not the
+    type-grouped-dict shape an earlier version of this function assumed.
+    That assumption was wrong and shipped silently until
+    .github/ci/dns-catalog-validate caught it against a real pdns_server
+    (the backend answered every query with an empty response, not an
+    error) -- exactly the class of mistake that CI job exists to catch.
     """
     import yaml
 
     domains = []
     for apex in sorted(zones):
         zone = zones[apex]
-        owner_map: dict[str, dict[str, object]] = {}
+        owner_map: dict[str, list[dict[str, str]]] = {}
         for owner in sorted(zone.records):
-            type_map: dict[str, object] = {}
+            entries: list[dict[str, str]] = []
             for rtype in sorted(zone.records[owner]):
-                values = zone.records[owner][rtype]
-                type_map[rtype] = values[0] if rtype in ("soa", "cname") else values
-            owner_map[owner] = type_map
+                for value in zone.records[owner][rtype]:
+                    entries.append({rtype: value})
+            owner_map[owner] = entries
         domains.append({"domain": apex, "ttl": zone.ttl, "records": owner_map})
 
     header = (

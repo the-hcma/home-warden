@@ -58,7 +58,7 @@ def test_cli_writes_zones_yaml_and_pdns_conf(monkeypatch, tmp_path: Path, capsys
     zones_yaml = (outdir / "zones.yml").read_text()
     parsed = yaml.safe_load(zones_yaml)
     assert parsed["domains"][0]["domain"] == "example.com"
-    assert parsed["domains"][0]["records"]["app.example.com"]["a"] == ["203.0.113.10"]
+    assert parsed["domains"][0]["records"]["app.example.com"] == [{"a": "203.0.113.10"}]
 
     pdns_conf = (outdir / "pdns.conf").read_text()
     assert "launch=geoip" in pdns_conf
