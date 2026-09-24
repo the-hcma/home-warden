@@ -1,8 +1,8 @@
 # Oneshot: zones.yml syntax check then pdns_control reload.
 # Template: etc/systemd/home-warden-pdns-reload.service — same
-# @@PLACEHOLDER@@ convention as this repo's other unit templates, but not
-# yet wired into scripts/setup-service's automatic install flow -- see
-# docs/dns-tinydns-migration.md for the current manual install steps.
+# @@PLACEHOLDER@@ convention as this repo's other unit templates.
+# Installed/enabled by scripts/setup-service, opt-in via PDNS_ZONES_YAML --
+# see docs/dns-tinydns-migration.md.
 # No [Install] — activated only by home-warden-pdns-reload.path.
 
 [Unit]
