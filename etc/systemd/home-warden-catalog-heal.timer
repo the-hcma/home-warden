@@ -1,0 +1,14 @@
+# Quarter-hourly timer for home-warden-catalog-heal.service.
+# Template: etc/systemd/home-warden-catalog-heal.timer — expanded by scripts/setup-service.
+
+[Unit]
+Description=home-warden catalog auto-heal — every 15 minutes
+Documentation=https://github.com/the-hcma/home-warden/blob/main/docs/host-prerequisites.md
+
+[Timer]
+OnCalendar=*-*-* *:0/15:00
+Persistent=true
+Unit=home-warden-catalog-heal.service
+
+[Install]
+WantedBy=timers.target

@@ -526,6 +526,17 @@ dimensions as the trigger. See
   no recipient set, degrades to a loud stderr line — never silent.
 - Exit codes mirror `catalog-register`: 0 nothing needs attention, 1
   something failed/alert-only/cooling down, 2 usage/config error.
+- **Cadence**: `scripts/setup-service` installs and enables
+  `home-warden-catalog-heal.timer`/`.service` (every 15 minutes, always
+  `--apply`) automatically, opt-in via `SERVICES_JSON_PATH` — skipped, not
+  an error, when unset and the default `~/.config/home-warden/services.json`
+  doesn't exist either, mirroring `PDNS_ZONES_YAML`'s opt-in shape above.
+  `HOME_WARDEN_RELOAD=0` plus an `ExecStartPost` reload matches
+  `home-warden-certbot.service`'s own shape, since a cert heal invokes
+  `scripts/cert-renewer` the same way. External-DNS healing needs
+  `DNS_SYNC_TARGET` set in `~/.config/home-warden-catalog-heal.env` (see
+  `etc/home-warden-catalog-heal.env.example`) — cert healing and
+  local-DNS/upstream alerting work without it.
 
 ---
 

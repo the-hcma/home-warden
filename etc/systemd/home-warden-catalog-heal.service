@@ -1,0 +1,39 @@
+# Oneshot: detect and heal catalog cert/external-DNS drift, alert on the
+# rest (home-warden#57).
+# Template: etc/systemd/home-warden-catalog-heal.service — expanded by scripts/setup-service.
+#
+# No [Install] — activated only by home-warden-catalog-heal.timer (or manual
+# `systemctl start home-warden-catalog-heal.service`).
+#
+# Optional env: ~/.config/home-warden-catalog-heal.env (see
+# etc/home-warden-catalog-heal.env.example) -- set DNS_SYNC_TARGET there to
+# enable external-DNS healing, and CATALOG_HEAL_ALERT_TO (plus the
+# operator-saved SMTP settings) to receive mail instead of log-only alerts.
+
+[Unit]
+Description=home-warden catalog auto-heal (oneshot)
+Documentation=https://github.com/the-hcma/home-warden/blob/main/docs/host-prerequisites.md
+After=network-online.target home-warden.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@@OWNER@@
+Group=@@OWNER@@
+WorkingDirectory=@@REPO_DIR@@
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# %h resolves to the service *manager's* home (root, in system scope) not
+# @@OWNER@@'s -- set it explicitly so scripts/lib/host-guard finds the pin
+# under the operator's ~/.config, not /root/.config.
+Environment=HOME=@@HOME_DIR@@
+Environment=SCRATCH_DIR=@@SCRATCH_DIR@@
+Environment=CONF_DIR=@@CONF_DIR@@
+Environment=CERTBOT_CONFIG_DIR=@@CONF_DIR@@/certs
+Environment=HOME_WARDEN_RELOAD=0
+EnvironmentFile=-@@HOME_DIR@@/.config/home-warden-catalog-heal.env
+ExecStart=@@REPO_DIR@@/scripts/catalog-heal --apply
+ExecStartPost=-+/usr/bin/systemctl try-reload-or-restart home-warden.service
+TimeoutStartSec=1h
+TimeoutStopSec=2min
+StandardOutput=append:@@SCRATCH_DIR@@/catalog-heal.log
+StandardError=append:@@SCRATCH_DIR@@/catalog-heal.log
