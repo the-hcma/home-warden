@@ -12,18 +12,19 @@ import yaml
 
 
 def load_zones_yaml(path: Path) -> dict:
-    """Returns {} for a missing file, unreadable YAML, or a non-mapping
-    top level -- the DNS view degrades to "not configured" for every
-    service rather than failing the whole page when local PowerDNS isn't
-    set up on this host (mirrors #108's own opt-in design), or when a
-    hand-edit has broken the file (that's `dns-zones-yaml-check`'s job
-    to catch before reload, not this read-only view's).
+    """Returns {} for a missing file, unreadable/undecodable file, invalid
+    YAML, or a non-mapping top level -- the DNS view degrades to "not
+    configured" for every service rather than failing the whole page
+    when local PowerDNS isn't set up on this host (mirrors #108's own
+    opt-in design), or when a hand-edit has broken the file (that's
+    `dns-zones-yaml-check`'s job to catch before reload, not this
+    read-only view's).
     """
     if not path.is_file():
         return {}
     try:
         data = yaml.safe_load(path.read_text())
-    except yaml.YAMLError:
+    except (yaml.YAMLError, OSError, UnicodeDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
 

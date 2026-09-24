@@ -178,8 +178,9 @@ type DnsRecordEntry = {
   ttl: null | number;
   type: string;
 };
-type DnsRecordSetStatus = "missing" | "not_applicable" | "not_configured" | "ok";
+type DnsRecordSetStatus = "error" | "missing" | "not_applicable" | "not_configured" | "ok";
 type DnsRecordSet = {
+  detail: null | string;
   records: DnsRecordEntry[] | null;
   status: DnsRecordSetStatus;
 };
@@ -1930,7 +1931,7 @@ function mountDnsView(root: HTMLElement): () => void {
   }
 
   function renderDnsTable(data: DnsRecordsResponse): HTMLElement {
-    const services = [...data.services].sort((left, right) => left.name.localeCompare(right.name));
+    const services = [...data.services].sort((left, right) => (left.name ?? "").localeCompare(right.name ?? ""));
 
     if (services.length === 0) {
       const empty = document.createElement("p");
@@ -1989,6 +1990,15 @@ function mountDnsView(root: HTMLElement): () => void {
       const span = document.createElement("span");
       span.classList.add("badge--skip");
       span.textContent = "Not configured";
+      cell.append(span);
+      return cell;
+    }
+
+    if (recordSet.status === "error") {
+      const span = document.createElement("span");
+      span.classList.add("badge--fail");
+      span.textContent = "Error";
+      span.title = recordSet.detail ?? "";
       cell.append(span);
       return cell;
     }

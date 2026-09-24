@@ -9,6 +9,8 @@ pass/fail. Read-only: this route never writes to zones.yml or Cloudflare.
 
 from __future__ import annotations
 
+import ipaddress
+
 from fastapi import APIRouter, HTTPException
 
 from app.catalog_checks import list_cloudflare_records, load_catalog, parse_cloudflare_credentials
@@ -62,7 +64,10 @@ def get_dns_records() -> dict:
 def _service_dns_entry(
     service: dict, *, zones_data: dict, cf_headers: dict[str, str] | None, timeout: float, max_retries: int
 ) -> dict:
-    name = service.get("name")
+    # Matches run_all's own service.get("name", "<unnamed>") default --
+    # load_catalog doesn't require a "name" key, and a raw None here
+    # crashes the web UI's client-side sort.
+    name = service.get("name", "<unnamed>")
     server_name = service.get("server_name")
     upstream = service.get("upstream") or {}
     host = upstream.get("host")
@@ -80,21 +85,36 @@ def _external_record_set(
     domain: str | None, cf_headers: dict[str, str] | None, timeout: float, max_retries: int
 ) -> dict:
     if not domain:
-        return {"status": "not_applicable", "records": None}
+        return {"status": "not_applicable", "records": None, "detail": None}
     if cf_headers is None:
-        return {"status": "not_configured", "records": None}
-    records = list_cloudflare_records(domain, cf_headers, timeout, max_retries)
-    if records is None:
-        return {"status": "missing", "records": None}
-    return {"status": "ok", "records": records}
+        return {"status": "not_configured", "records": None, "detail": None}
+    try:
+        records = list_cloudflare_records(domain, cf_headers, timeout, max_retries)
+    except Exception as e:
+        # Distinct from "missing" (a genuine absent record) -- an auth
+        # failure or a persistent 5xx must not read as a DNS gap.
+        return {"status": "error", "records": None, "detail": str(e)}
+    if not records:
+        return {"status": "missing", "records": None, "detail": None}
+    return {"status": "ok", "records": records, "detail": None}
 
 
 def _local_record_set(host: str | None, zones_data: dict) -> dict:
     if not host:
-        return {"status": "not_applicable", "records": None}
+        return {"status": "not_applicable", "records": None, "detail": None}
+    try:
+        ipaddress.ip_address(host)
+        # A literal IP needs no DNS at all -- mirrors check_local_dns's
+        # own guard so this view doesn't contradict #57's semantics.
+        return {"status": "not_applicable", "records": None, "detail": None}
+    except ValueError:
+        pass
     if not zones_data:
-        return {"status": "not_configured", "records": None}
+        return {"status": "not_configured", "records": None, "detail": None}
     records = local_records_for_owner(zones_data, host)
-    if records is None:
-        return {"status": "missing", "records": None}
-    return {"status": "ok", "records": records}
+    if not records:
+        # Folds a present-but-empty entries list (representable per
+        # local_records_for_owner's own docstring) into "missing" too --
+        # there's nothing to show either way, and the two must agree.
+        return {"status": "missing", "records": None, "detail": None}
+    return {"status": "ok", "records": records, "detail": None}

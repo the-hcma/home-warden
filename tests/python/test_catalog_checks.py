@@ -779,9 +779,18 @@ def test_list_cloudflare_records_no_zone_found_returns_none() -> None:
 
 
 def test_list_cloudflare_records_no_matching_record_returns_none() -> None:
+    # candidate_zone_names("app.example.com") tries "example.com" then
+    # "app.example.com" -- both must resolve to keep this exercising "zone
+    # found, no matching record type" rather than falling through to a
+    # StopIteration the broad exception handling used to mask.
     with patch(
         "app.catalog_checks._cf_request",
-        side_effect=[{"result": [{"id": "zone123"}]}, {"result": []}],
+        side_effect=[
+            {"result": [{"id": "zone123"}]},
+            {"result": []},
+            {"result": [{"id": "zone456"}]},
+            {"result": []},
+        ],
     ):
         result = list_cloudflare_records("app.example.com", {"x": "y"}, timeout=5, max_retries=1)
     assert result is None
@@ -816,11 +825,16 @@ def test_list_cloudflare_records_filters_irrelevant_types() -> None:
     assert result == [{"type": "A", "content": "203.0.113.10", "ttl": 300, "proxied": False}]
 
 
-def test_list_cloudflare_records_exception_returns_none() -> None:
-    # One Cloudflare hiccup must not crash the whole DNS view page.
-    with patch("app.catalog_checks._cf_request", side_effect=_http_error(500, "server error")):
-        result = list_cloudflare_records("app.example.com", {"x": "y"}, timeout=5, max_retries=1)
-    assert result is None
+def test_list_cloudflare_records_propagates_api_errors() -> None:
+    # A genuine Cloudflare API error (auth failure, persistent 5xx) must
+    # not be swallowed into None -- that would be indistinguishable from
+    # a real absent record. Callers (app.api.dns_view_routes) catch this
+    # themselves to report a distinct "error" status.
+    with (
+        patch("app.catalog_checks._cf_request", side_effect=_http_error(500, "server error")),
+        pytest.raises(urllib.error.HTTPError),
+    ):
+        list_cloudflare_records("app.example.com", {"x": "y"}, timeout=5, max_retries=1)
 
 
 # --- run_all -------------------------------------------------------------
