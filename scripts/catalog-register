@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Drive local DNS, external DNS, cert, and nginx validation for one
+# catalog service. Thin wrapper around the app.catalog_register_cli
+# console script -- see that module's docstring for env vars, flags, and
+# exit codes.
+# See the-hcma/home-warden#110.
+#
+# Usage:
+#   ./scripts/catalog-register --service my-service --target 203.0.113.10
+#   ./scripts/catalog-register --service my-service --target 203.0.113.10 --apply
+
+set -euo pipefail
+
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_dir}"
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "catalog-register: install uv (https://docs.astral.sh/uv/) or run 'uv sync' in ${repo_dir}" >&2
+  exit 1
+fi
+
+exec uv run catalog-register "$@"

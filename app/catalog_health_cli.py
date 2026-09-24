@@ -26,6 +26,7 @@ from app.catalog_health_settings import (
     certs_live_dir,
     cloudflare_credentials_path,
     enforce_host_guard,
+    local_pdns_port,
     max_retries,
     services_json_path,
     timeout_seconds,
@@ -34,17 +35,19 @@ from app.catalog_health_settings import (
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Validate a home-warden service catalog's cert/DNS/internal-upstream health."
+        description="Validate a home-warden service catalog's cert/DNS/local-DNS/internal-upstream health."
     )
     parser.add_argument("--services-json", type=Path, default=services_json_path())
     parser.add_argument("--certs-live-dir", type=Path, default=certs_live_dir())
     parser.add_argument("--alert-days", type=int, default=alert_days())
     parser.add_argument("--cloudflare-credentials", type=Path, default=cloudflare_credentials_path())
+    parser.add_argument("--local-dns-port", type=int, default=local_pdns_port())
     parser.add_argument("--timeout", type=float, default=timeout_seconds())
     parser.add_argument("--max-retries", type=int, default=max_retries())
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--skip-cert", action="store_true")
     parser.add_argument("--skip-dns", action="store_true")
+    parser.add_argument("--skip-local-dns", action="store_true")
     parser.add_argument("--skip-upstream", action="store_true")
     return parser
 
@@ -76,10 +79,12 @@ def main() -> int:
             certs_live_dir=args.certs_live_dir,
             alert_days=args.alert_days,
             cf_headers=cf_headers,
+            local_dns_port=args.local_dns_port,
             timeout=args.timeout,
             max_retries=args.max_retries,
             skip_cert=args.skip_cert,
             skip_dns=args.skip_dns,
+            skip_local_dns=args.skip_local_dns,
             skip_upstream=args.skip_upstream,
         )
     except (FileNotFoundError, ValueError) as e:
