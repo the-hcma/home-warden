@@ -37,6 +37,7 @@ dependencies = [
 
 [project.scripts]
 catalog-dns-sync = "app.catalog_dns_sync_cli:main"
+catalog-heal = "app.catalog_heal_cli:main"
 catalog-health-check = "app.catalog_health_cli:main"
 catalog-register = "app.catalog_register_cli:main"
 dns-tinydns-convert = "app.dns_tinydns_convert_cli:main"

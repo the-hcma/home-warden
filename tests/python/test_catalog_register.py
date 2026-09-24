@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from app.catalog_checks import CheckResult, SyncResult
 from app.catalog_crud import CatalogNotFoundError, CatalogValidationError, GixyResult, NginxTestResult, PreviewResult
-from app.catalog_register import RegisterStepResult, _append_domain, _read_domains, register_service
+from app.catalog_register import RegisterStepResult, append_domain, read_domains, register_service
 
 CATALOG = {"services": [{"name": "svc", "kind": "proxy", "server_name": "app.example.com"}]}
 LOCAL_DNS_FAIL = CheckResult("svc", "local_dns", "fail", "no record")
@@ -112,7 +112,7 @@ def test_register_service_stops_at_failed_external_dns() -> None:
         patch("app.catalog_register.check_local_dns", return_value=LOCAL_DNS_OK),
         patch("app.catalog_register.check_upstream", return_value=UPSTREAM_OK),
         patch("app.catalog_register.sync_dns_record", return_value=SyncResult("svc", "failed", "Cloudflare error")),
-        patch("app.catalog_register._ensure_cert") as mock_cert,
+        patch("app.catalog_register.ensure_cert") as mock_cert,
     ):
         results = register_service("svc", CATALOG, **_base_kwargs())
     mock_cert.assert_not_called()
@@ -167,8 +167,8 @@ def test_register_service_cert_renewer_failure_stops_before_nginx() -> None:
         patch("app.catalog_register.check_local_dns", return_value=LOCAL_DNS_OK),
         patch("app.catalog_register.check_upstream", return_value=UPSTREAM_OK),
         patch("app.catalog_register.sync_dns_record", return_value=SyncResult("svc", "created", "created")),
-        patch("app.catalog_register._read_domains", return_value=set()),
-        patch("app.catalog_register._append_domain"),
+        patch("app.catalog_register.read_domains", return_value=set()),
+        patch("app.catalog_register.append_domain"),
         patch("subprocess.run", return_value=completed),
         patch("app.catalog_register.render_preview") as mock_render,
     ):
@@ -185,8 +185,8 @@ def test_register_service_cert_renewer_timeout_is_failed() -> None:
         patch("app.catalog_register.check_local_dns", return_value=LOCAL_DNS_OK),
         patch("app.catalog_register.check_upstream", return_value=UPSTREAM_OK),
         patch("app.catalog_register.sync_dns_record", return_value=SyncResult("svc", "created", "created")),
-        patch("app.catalog_register._read_domains", return_value=set()),
-        patch("app.catalog_register._append_domain"),
+        patch("app.catalog_register.read_domains", return_value=set()),
+        patch("app.catalog_register.append_domain"),
         patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="cert-renewer", timeout=600)),
     ):
         results = register_service("svc", CATALOG, **_base_kwargs(apply=True))
@@ -205,8 +205,8 @@ def test_register_service_cert_renewer_permission_error_is_failed_not_raised() -
         patch("app.catalog_register.check_local_dns", return_value=LOCAL_DNS_OK),
         patch("app.catalog_register.check_upstream", return_value=UPSTREAM_OK),
         patch("app.catalog_register.sync_dns_record", return_value=SyncResult("svc", "created", "created")),
-        patch("app.catalog_register._read_domains", return_value=set()),
-        patch("app.catalog_register._append_domain"),
+        patch("app.catalog_register.read_domains", return_value=set()),
+        patch("app.catalog_register.append_domain"),
         patch("subprocess.run", side_effect=PermissionError("[Errno 13] Permission denied")),
     ):
         results = register_service("svc", CATALOG, **_base_kwargs(apply=True))
@@ -221,8 +221,8 @@ def test_register_service_apply_appends_domain_only_when_not_already_listed() ->
         patch("app.catalog_register.check_local_dns", return_value=LOCAL_DNS_OK),
         patch("app.catalog_register.check_upstream", return_value=UPSTREAM_OK),
         patch("app.catalog_register.sync_dns_record", return_value=SyncResult("svc", "created", "created")),
-        patch("app.catalog_register._read_domains", return_value={"app.example.com"}),
-        patch("app.catalog_register._append_domain") as mock_append,
+        patch("app.catalog_register.read_domains", return_value={"app.example.com"}),
+        patch("app.catalog_register.append_domain") as mock_append,
         patch("subprocess.run", return_value=completed),
         patch("app.catalog_register.render_preview", return_value=OK_PREVIEW),
     ):
@@ -245,8 +245,8 @@ def test_register_service_apply_wires_dry_run_and_appends_missing_domain() -> No
         # verification, after cert-renewer "ran") sees the appended one --
         # a fixed return_value would either always fail the post-check or
         # never exercise it.
-        patch("app.catalog_register._read_domains", side_effect=[set(), {"app.example.com"}]),
-        patch("app.catalog_register._append_domain") as mock_append,
+        patch("app.catalog_register.read_domains", side_effect=[set(), {"app.example.com"}]),
+        patch("app.catalog_register.append_domain") as mock_append,
         patch("subprocess.run", return_value=completed) as mock_run,
         patch("app.catalog_register.render_preview", return_value=OK_PREVIEW),
     ):
@@ -280,8 +280,8 @@ def test_register_service_cert_reports_failed_when_domain_lost_after_run() -> No
         patch("app.catalog_register.check_local_dns", return_value=LOCAL_DNS_OK),
         patch("app.catalog_register.check_upstream", return_value=UPSTREAM_OK),
         patch("app.catalog_register.sync_dns_record", return_value=SyncResult("svc", "created", "created")),
-        patch("app.catalog_register._read_domains", side_effect=[set(), set()]),
-        patch("app.catalog_register._append_domain"),
+        patch("app.catalog_register.read_domains", side_effect=[set(), set()]),
+        patch("app.catalog_register.append_domain"),
         patch("subprocess.run", return_value=completed),
         patch("app.catalog_register.render_preview") as mock_render,
     ):
@@ -298,7 +298,7 @@ def test_register_service_nginx_validation_failure_is_reported() -> None:
         patch("app.catalog_register.check_local_dns", return_value=LOCAL_DNS_OK),
         patch("app.catalog_register.check_upstream", return_value=UPSTREAM_OK),
         patch("app.catalog_register.sync_dns_record", return_value=SyncResult("svc", "noop", "already correct")),
-        patch("app.catalog_register._ensure_cert") as mock_cert,
+        patch("app.catalog_register.ensure_cert") as mock_cert,
         patch("app.catalog_register.render_preview", return_value=FAILED_PREVIEW),
     ):
         mock_cert.return_value = RegisterStepResult("cert", "applied", "cert ok")
@@ -317,7 +317,7 @@ def test_register_service_nginx_step_fails_on_gixy_findings_even_when_nginx_t_pa
         patch("app.catalog_register.check_local_dns", return_value=LOCAL_DNS_OK),
         patch("app.catalog_register.check_upstream", return_value=UPSTREAM_OK),
         patch("app.catalog_register.sync_dns_record", return_value=SyncResult("svc", "noop", "already correct")),
-        patch("app.catalog_register._ensure_cert") as mock_cert,
+        patch("app.catalog_register.ensure_cert") as mock_cert,
         patch("app.catalog_register.render_preview", return_value=GIXY_FINDINGS_PREVIEW),
     ):
         mock_cert.return_value = RegisterStepResult("cert", "applied", "cert ok")
@@ -338,7 +338,7 @@ def test_register_service_nginx_step_reports_invalid_catalog_instead_of_raising(
         patch("app.catalog_register.check_local_dns", return_value=LOCAL_DNS_OK),
         patch("app.catalog_register.check_upstream", return_value=UPSTREAM_OK),
         patch("app.catalog_register.sync_dns_record", return_value=SyncResult("svc", "noop", "already correct")),
-        patch("app.catalog_register._ensure_cert") as mock_cert,
+        patch("app.catalog_register.ensure_cert") as mock_cert,
         patch("app.catalog_register.render_preview", side_effect=CatalogValidationError("service 'x' bad")),
     ):
         mock_cert.return_value = RegisterStepResult("cert", "applied", "cert ok")
@@ -348,23 +348,23 @@ def test_register_service_nginx_step_reports_invalid_catalog_instead_of_raising(
     assert "service 'x' bad" in nginx_result.detail
 
 
-# --- _read_domains / _append_domain -----------------------------------------
+# --- read_domains / append_domain -----------------------------------------
 
 
 def test_read_domains_missing_file_is_empty_set() -> None:
-    assert _read_domains(Path("/nonexistent/certbot-domains")) == set()
+    assert read_domains(Path("/nonexistent/certbot-domains")) == set()
 
 
 def test_read_domains_skips_comments_and_blank_lines(tmp_path: Path) -> None:
     path = tmp_path / "certbot-domains"
     path.write_text("# comment\n\napp.example.com\n  other.example.com  \n")
-    assert _read_domains(path) == {"app.example.com", "other.example.com"}
+    assert read_domains(path) == {"app.example.com", "other.example.com"}
 
 
 def test_append_domain_creates_parent_and_appends(tmp_path: Path) -> None:
     path = tmp_path / "conf" / "certbot-domains"
-    _append_domain(path, "app.example.com")
-    _append_domain(path, "other.example.com")
+    append_domain(path, "app.example.com")
+    append_domain(path, "other.example.com")
     assert path.read_text() == "app.example.com\nother.example.com\n"
 
 
@@ -374,5 +374,5 @@ def test_append_domain_inserts_missing_leading_newline(tmp_path: Path) -> None:
     # domain merged with the appended one into one bogus line.
     path = tmp_path / "certbot-domains"
     path.write_text("app.example.com")
-    _append_domain(path, "other.example.com")
+    append_domain(path, "other.example.com")
     assert path.read_text() == "app.example.com\nother.example.com\n"

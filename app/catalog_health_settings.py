@@ -77,6 +77,62 @@ def max_retries() -> int:
     return int(os.environ.get("CATALOG_HEALTH_MAX_RETRIES", "3"))
 
 
+def scratch_dir() -> Path:
+    """Mirrors scripts/healthcheck's own SCRATCH_DIR resolution (and
+    app.catalog_crud's _default_preview_conf_path) -- one env var, one
+    default, for every home-warden component that keeps local runtime
+    state.
+    """
+    return Path(os.environ.get("SCRATCH_DIR", str(Path.home() / "scratch" / "home-warden")))
+
+
+def heal_state_path() -> Path:
+    """Per (service, dimension) flap-protection + alert-resend state for
+    app.catalog_heal (#57) -- same KEY=VALUE-state-file *concept* as
+    scripts/healthcheck's healthcheck.state, JSON here since this side is
+    already Python.
+    """
+    return Path(os.environ.get("CATALOG_HEAL_STATE_FILE", str(scratch_dir() / "catalog-heal.state.json")))
+
+
+def heal_cooldown_seconds() -> float:
+    """Minimum time between real (--apply) heal attempts for the same
+    service+dimension -- see .cursor/rules/remote-timeouts-retries.mdc's
+    "never blindly re-issues a certificate" -- 1h default gives DNS-01
+    propagation and a transient Cloudflare/Let's Encrypt hiccup time to
+    clear before this tool tries again on its own.
+    """
+    return float(os.environ.get("CATALOG_HEAL_COOLDOWN_SEC", "3600"))
+
+
+def heal_attempt_window_seconds() -> float:
+    """Rolling window `heal_max_attempts_per_window` is counted over."""
+    return float(os.environ.get("CATALOG_HEAL_WINDOW_SEC", "86400"))
+
+
+def heal_max_attempts_per_window() -> int:
+    """Hard cap on real heal attempts per service+dimension per window --
+    the budget backstop so a persistently broken check can't burn Let's
+    Encrypt's issuance rate limit or hammer the Cloudflare API.
+    """
+    return int(os.environ.get("CATALOG_HEAL_MAX_ATTEMPTS", "3"))
+
+
+def heal_alert_resend_seconds() -> float:
+    """How often an ongoing (not newly-transitioned) failure re-alerts --
+    mirrors scripts/healthcheck's HEALTHCHECK_RESEND_SEC."""
+    return float(os.environ.get("CATALOG_HEAL_RESEND_SEC", str(6 * 3600)))
+
+
+def heal_alert_to() -> str | None:
+    """Operator address catalog-heal emails on failure/recovery -- no
+    default (unlike SMTP host/from, which come from the operator-saved
+    [smtp] config.toml table), since a wrong guess here would silently
+    alert nobody or the wrong person.
+    """
+    return os.environ.get("CATALOG_HEAL_ALERT_TO") or None
+
+
 def enforce_host_guard(caller: str) -> bool:
     """Refuse to act anywhere but the host pinned by
     `scripts/setup-service --confirm-host` -- shells out to the existing

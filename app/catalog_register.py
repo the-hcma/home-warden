@@ -21,6 +21,12 @@ before ever touching external DNS/certs/nginx, and a failure reports what
 to fix by hand rather than attempting a repair. `apply=False` (the
 default) previews every step without changing anything -- confirm-first,
 mirroring app.catalog_checks.sync_dns_record's own `dry_run`.
+
+`ensure_cert`/`append_domain`/`read_domains` are public (not
+module-private) because app.catalog_heal's auto-healing flow (#57) reuses
+them unchanged for its own cert-repair step -- the "add server_name to
+conf/certbot-domains, then invoke scripts/cert-renewer" mechanics are
+identical whether triggered by a new registration or a detected expiry.
 """
 
 from __future__ import annotations
@@ -90,7 +96,7 @@ def register_service(
     if external_dns.status == "failed":
         return results
 
-    cert = _ensure_cert(
+    cert = ensure_cert(
         service,
         certbot_domains_file,
         cert_renewer,
@@ -106,12 +112,12 @@ def register_service(
     return results
 
 
-def _append_domain(path: Path, domain: str) -> None:
+def append_domain(path: Path, domain: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # A pre-existing file whose last line has no trailing newline (a
     # printf-written file, or an editor that strips the final newline)
     # would otherwise merge with this append into one bogus domain that
-    # neither _read_domains nor scripts/cert-renewer's own line reader
+    # neither read_domains nor scripts/cert-renewer's own line reader
     # would ever match again.
     needs_leading_newline = False
     if path.is_file() and path.stat().st_size > 0:
@@ -124,7 +130,7 @@ def _append_domain(path: Path, domain: str) -> None:
         f.write(f"{domain}\n")
 
 
-def _ensure_cert(
+def ensure_cert(
     service: dict,
     certbot_domains_file: Path,
     cert_renewer: Path,
@@ -137,14 +143,14 @@ def _ensure_cert(
     if not domain:
         return RegisterStepResult("cert", "skip", "no server_name on this catalog entry")
 
-    already_listed = domain in _read_domains(certbot_domains_file)
+    already_listed = domain in read_domains(certbot_domains_file)
 
     if not apply:
         verb = "already listed" if already_listed else "would add"
         return RegisterStepResult("cert", "would-apply", f"{verb} {domain} in {certbot_domains_file}")
 
     if not already_listed:
-        _append_domain(certbot_domains_file, domain)
+        append_domain(certbot_domains_file, domain)
 
     try:
         proc = subprocess.run(
@@ -181,7 +187,7 @@ def _ensure_cert(
     # to the primary clone's copy whenever it finds a regular file at
     # that path, discarding the append above. A 0 exit code alone doesn't
     # prove *this* domain reached certbot; verify it survived.
-    if domain not in _read_domains(certbot_domains_file):
+    if domain not in read_domains(certbot_domains_file):
         return RegisterStepResult(
             "cert",
             "failed",
@@ -199,7 +205,7 @@ def _from_check_result(step: str, result: CheckResult) -> RegisterStepResult:
     return RegisterStepResult(step, status, result.detail)
 
 
-def _read_domains(path: Path) -> set[str]:
+def read_domains(path: Path) -> set[str]:
     if not path.is_file():
         return set()
     domains: set[str] = set()
