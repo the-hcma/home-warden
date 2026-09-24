@@ -34,8 +34,6 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly script_dir
-repo_dir="$(cd "${script_dir}/.." && pwd)"
-readonly repo_dir
 
 # shellcheck source=scripts/lib/host-guard
 source "${script_dir}/lib/host-guard"
@@ -66,11 +64,17 @@ if [[ ! -f "${pdns_zones_yaml}" ]]; then
 fi
 
 log "dns-zones-yaml-check ${pdns_zones_yaml}"
-if ! (cd "${repo_dir}" && uv run dns-zones-yaml-check "${pdns_zones_yaml}"); then
-  log "FAIL: zones.yml syntax check failed — refusing reload"
+if "${script_dir}/dns-zones-yaml-check" "${pdns_zones_yaml}"; then
+  log "syntax OK"
+else
+  wrapper_status=$?
+  if [[ ${wrapper_status} -eq 1 ]]; then
+    log "FAIL: dns-zones-yaml-check wrapper error (e.g. uv not found on PATH) — refusing reload"
+  else
+    log "FAIL: zones.yml syntax check failed — refusing reload"
+  fi
   exit 2
 fi
-log "syntax OK"
 
 if ! systemctl is-active --quiet "${pdns_service}" 2>/dev/null; then
   log "${pdns_service} not active — skip reload"

@@ -492,6 +492,27 @@ def test_validate_zones_yaml_syntax_accepts_well_formed_file(tmp_path: Path) -> 
     validate_zones_yaml_syntax(path)  # must not raise
 
 
+def test_validate_zones_yaml_syntax_accepts_real_render_zones_yaml_output(tmp_path: Path) -> None:
+    # Pins the render/validate contract: feeds validate_zones_yaml_syntax
+    # the actual output of parse -> bucket -> render_zones_yaml (not a
+    # hand-typed approximation), so a shape drift in the renderer would
+    # fail this test rather than only the `test_render_zones_yaml_*`
+    # assertions -- see the-hcma/home-warden#114 review.
+    text = "\n".join(
+        [
+            "Zexample.com:ns1.example.com:hostmaster.example.com:1:16384:2048:1048576:2560:3600",
+            "&example.com:203.0.113.1:ns1.example.com",
+            "+app.example.com:203.0.113.2:60",
+        ]
+    )
+    records = parse_tinydns_data(text)
+    apexes = zone_apexes_from_records(records)
+    zones = bucket_into_zones(records, apexes)
+    path = tmp_path / "zones.yml"
+    path.write_text(render_zones_yaml(zones))
+    validate_zones_yaml_syntax(path)  # must not raise
+
+
 def test_validate_zones_yaml_syntax_missing_file_raises(tmp_path: Path) -> None:
     try:
         validate_zones_yaml_syntax(tmp_path / "missing.yml")
