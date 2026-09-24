@@ -477,6 +477,58 @@ small subset of domesti-bot's, so adopt the shape, not its full scale.
 
 ---
 
+## Catalog Auto-Healing
+
+`app/catalog_heal.py` (CLI: `catalog-heal`, wrapper: `scripts/catalog-heal
+[--apply]`) detects and repairs drift across the catalog's cert/DNS/
+upstream health, reusing `app.catalog_checks.run_all`'s four existing
+dimensions as the trigger. See
+[#57](https://github.com/the-hcma/home-warden/issues/57).
+
+- **What actually gets healed, and what only gets alerted**:
+  - `cert` — repaired via `app.catalog_register.ensure_cert` (shared
+    unchanged with #110's registration flow: add `server_name` to
+    `conf/certbot-domains`, then invoke `scripts/cert-renewer`).
+  - `dns` (external, Cloudflare) — repaired via
+    `app.catalog_checks.sync_dns_record` (#109's write path, reused
+    as-is).
+  - `local_dns` and `upstream` are **alert-only, never healed**: #108
+    never grew a live "add a record to zones.yml" primitive (only
+    converter + verify + reload-on-edit), and an internal upstream's
+    health is a sibling service's own lifecycle home-warden doesn't
+    control (matching this issue's own non-goal and the Service
+    Registration Orchestration section's "never created here" stance for
+    local DNS above).
+- **Confirm-first, uniformly**: `apply=False` (the CLI default) previews
+  every dimension — including cert and DNS — without writing anything,
+  touching flap-protection state, or sending mail. Only a real `--apply`
+  run acts; a dry run is a manual look, not the scheduled pass.
+- **Flap protection**: `app.catalog_health_settings.heal_state_path()`
+  (default `$SCRATCH_DIR/catalog-heal.state.json`) tracks, per
+  service+dimension, a rolling attempt count and last-attempt time —
+  mirroring `scripts/healthcheck`'s own state-file concept, JSON here
+  since this side is already Python. A real heal attempt is blocked by
+  either a cooldown (`CATALOG_HEAL_COOLDOWN_SEC`, default 1h, since the
+  last attempt) or a hard cap (`CATALOG_HEAL_MAX_ATTEMPTS`, default 3 per
+  `CATALOG_HEAL_WINDOW_SEC`, default 24h) — the budget backstop against
+  burning Let's Encrypt's issuance rate limit or hammering the Cloudflare
+  API on a persistently broken check, per
+  `.cursor/rules/remote-timeouts-retries.mdc`.
+- **Alerting**: on any dimension needing attention (a failed heal attempt,
+  a cooldown/attempt-cap block, or an alert-only `local_dns`/`upstream`
+  failure), sends via the existing `app.smtp_service.send_email` +
+  operator-saved `[smtp]` config (#84) to `CATALOG_HEAL_ALERT_TO` (no
+  default — a wrong guess would silently alert nobody or the wrong
+  person). Alerts once per fail→ok transition, then resend at most every
+  `CATALOG_HEAL_RESEND_SEC` (default 6h) while still failing, plus one
+  recovery notice on ok→fail→ok — the same transition/resend shape as
+  `scripts/healthcheck`'s existing mail semantics. SMTP not configured, or
+  no recipient set, degrades to a loud stderr line — never silent.
+- Exit codes mirror `catalog-register`: 0 nothing needs attention, 1
+  something failed/alert-only/cooling down, 2 usage/config error.
+
+---
+
 ## Development
 
 ```bash
