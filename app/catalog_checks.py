@@ -317,11 +317,20 @@ def check_local_dns(name: str, service: dict, *, local_dns_port: int, timeout: f
     upstream.host -- the private/local name nginx's own proxy_pass
     depends on, distinct from server_name's public DNS (check_dns above).
 
-    Read-only like the other dimensions: a missing record is reported as
-    a failure to fix by hand (add it to thehcma/home's dns/zones.yml and
-    reload), never something this module creates -- whatever stands up
-    the backend owns registering its own local name, not catalog
-    registration (see #110).
+    upstream.host is not required to live in the local PowerDNS zone at
+    all -- a backend resolved by the host's real resolver (a public name,
+    or any zone this server doesn't serve) is valid per the catalog
+    schema. So this walks candidate zone apexes (apex-first, like
+    candidate_zone_names elsewhere in this module) querying each for its
+    own SOA: only once the local server proves *authoritative* for some
+    matching zone does an empty A/AAAA answer count as a real miss --
+    otherwise "not our zone" is reported as skip, not fail.
+
+    Read-only like the other dimensions: a missing record (in a zone this
+    server *is* authoritative for) is reported as a failure to fix by
+    hand (add it to thehcma/home's dns/zones.yml and reload), never
+    something this module creates -- whatever stands up the backend owns
+    registering its own local name, not catalog registration (see #110).
     """
     if service.get("kind") != "proxy":
         return CheckResult(name, "local_dns", "skip", f"kind={service.get('kind')!r}, no upstream to check")
@@ -337,17 +346,28 @@ def check_local_dns(name: str, service: dict, *, local_dns_port: int, timeout: f
     except ValueError:
         pass
 
-    answers = _resolve_via_authoritative_ns(host, "A", "127.0.0.1", timeout, port=local_dns_port)
-    if answers is None:
-        return CheckResult(name, "local_dns", "skip", "no local PowerDNS reachable on this host to verify against")
+    zone_found = False
+    for candidate in candidate_zone_names(host):
+        soa = _resolve_via_authoritative_ns(candidate, "SOA", "127.0.0.1", timeout, port=local_dns_port)
+        if soa is None:
+            return CheckResult(name, "local_dns", "skip", "no local PowerDNS reachable on this host to verify against")
+        if soa:
+            zone_found = True
+            break
+    if not zone_found:
+        return CheckResult(name, "local_dns", "skip", f"{host} is not served by the local PowerDNS zone")
+
+    a_answers = _resolve_via_authoritative_ns(host, "A", "127.0.0.1", timeout, port=local_dns_port) or []
+    aaaa_answers = _resolve_via_authoritative_ns(host, "AAAA", "127.0.0.1", timeout, port=local_dns_port) or []
+    answers = a_answers + aaaa_answers
     if not answers:
         return CheckResult(
             name,
             "local_dns",
             "fail",
-            f"no local A record for {host} -- add one to thehcma/home's dns/zones.yml and reload first",
+            f"no local A/AAAA record for {host} -- add one to thehcma/home's dns/zones.yml and reload first",
         )
-    return CheckResult(name, "local_dns", "ok", f"A={', '.join(answers)}")
+    return CheckResult(name, "local_dns", "ok", f"A/AAAA={', '.join(answers)}")
 
 
 def check_upstream(name: str, service: dict, timeout: float) -> CheckResult:

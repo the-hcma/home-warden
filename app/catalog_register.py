@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.catalog_checks import CheckResult, check_local_dns, check_upstream, sync_dns_record
-from app.catalog_crud import CatalogNotFoundError, get_service, render_preview
+from app.catalog_crud import CatalogNotFoundError, CatalogValidationError, get_service, render_preview
 
 
 @dataclass
@@ -175,7 +175,16 @@ def _read_domains(path: Path) -> set[str]:
 
 
 def _validate_nginx(catalog: dict, services_json_path: Path) -> RegisterStepResult:
-    preview = render_preview(catalog, current_catalog=catalog, current_services_path=services_json_path)
+    try:
+        preview = render_preview(catalog, current_catalog=catalog, current_services_path=services_json_path)
+    except CatalogValidationError as e:
+        # A shape-valid-JSON but renderer-invalid catalog (this entry or
+        # any sibling -- e.g. a static service missing "static", a proxy
+        # missing "upstream") raises out of render_catalog; sibling
+        # consumers (render-catalog, the catalog CRUD routes) already
+        # catch this as a config error -- this step must too, rather than
+        # letting it escape and lose the "which step failed" contract.
+        return RegisterStepResult("nginx", "failed", f"catalog is invalid: {e}")
     if not preview.can_apply:
         detail = preview.nginx_test.output or preview.gixy.output or "nginx validation failed"
         return RegisterStepResult("nginx", "failed", detail)

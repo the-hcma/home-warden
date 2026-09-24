@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.catalog_checks import CheckResult, SyncResult
-from app.catalog_crud import CatalogNotFoundError, GixyResult, NginxTestResult, PreviewResult
+from app.catalog_crud import CatalogNotFoundError, CatalogValidationError, GixyResult, NginxTestResult, PreviewResult
 from app.catalog_register import RegisterStepResult, _append_domain, _read_domains, register_service
 
 CATALOG = {"services": [{"name": "svc", "kind": "proxy", "server_name": "app.example.com"}]}
@@ -266,6 +266,27 @@ def test_register_service_nginx_step_fails_on_gixy_findings_even_when_nginx_t_pa
     nginx_result = next(r for r in results if r.step == "nginx")
     assert nginx_result.status == "failed"
     assert "version disclosure" in nginx_result.detail
+
+
+def test_register_service_nginx_step_reports_invalid_catalog_instead_of_raising() -> None:
+    # render_preview raises CatalogValidationError for a shape-valid-JSON
+    # but renderer-invalid catalog (this entry or any sibling) -- sibling
+    # consumers (render-catalog, the catalog CRUD routes) already map
+    # this to a config error; this step must too, not let it escape and
+    # lose the "which step failed" contract the CLI depends on.
+    with (
+        patch("app.catalog_register.get_service", return_value=CATALOG["services"][0]),
+        patch("app.catalog_register.check_local_dns", return_value=LOCAL_DNS_OK),
+        patch("app.catalog_register.check_upstream", return_value=UPSTREAM_OK),
+        patch("app.catalog_register.sync_dns_record", return_value=SyncResult("svc", "noop", "already correct")),
+        patch("app.catalog_register._ensure_cert") as mock_cert,
+        patch("app.catalog_register.render_preview", side_effect=CatalogValidationError("service 'x' bad")),
+    ):
+        mock_cert.return_value = RegisterStepResult("cert", "applied", "cert ok")
+        results = register_service("svc", CATALOG, **_base_kwargs())
+    nginx_result = next(r for r in results if r.step == "nginx")
+    assert nginx_result.status == "failed"
+    assert "service 'x' bad" in nginx_result.detail
 
 
 # --- _read_domains / _append_domain -----------------------------------------
