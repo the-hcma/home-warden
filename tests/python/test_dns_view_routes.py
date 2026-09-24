@@ -256,6 +256,39 @@ def test_dns_records_external_ok(tmp_path: Path) -> None:
     }
 
 
+def test_dns_records_external_not_applicable_without_server_name(tmp_path: Path) -> None:
+    # load_catalog doesn't require server_name -- a service without one
+    # has nothing to look up externally.
+    catalog_path = _write_catalog(tmp_path, [{"name": "svc", "kind": "static"}])
+    client = make_client()
+    with (
+        patch("app.api.dns_view_routes.enforce_host_guard", return_value=True),
+        patch("app.api.dns_view_routes.services_json_path", return_value=catalog_path),
+        patch("app.api.dns_view_routes.parse_cloudflare_credentials", return_value={"x": "y"}),
+        patch("app.api.dns_view_routes.load_zones_yaml", return_value={}),
+        patch("app.api.dns_view_routes.list_cloudflare_records") as mock_list,
+    ):
+        resp = client.get("/dns/records")
+    mock_list.assert_not_called()
+    entry = resp.json()["services"][0]
+    assert entry["external"] == {"status": "not_applicable", "records": None, "detail": None}
+
+
+def test_dns_records_external_missing_record(tmp_path: Path) -> None:
+    catalog_path = _write_catalog(tmp_path, [{"name": "svc", "kind": "static", "server_name": "app.example.com"}])
+    client = make_client()
+    with (
+        patch("app.api.dns_view_routes.enforce_host_guard", return_value=True),
+        patch("app.api.dns_view_routes.services_json_path", return_value=catalog_path),
+        patch("app.api.dns_view_routes.parse_cloudflare_credentials", return_value={"x": "y"}),
+        patch("app.api.dns_view_routes.load_zones_yaml", return_value={}),
+        patch("app.api.dns_view_routes.list_cloudflare_records", return_value=None),
+    ):
+        resp = client.get("/dns/records")
+    entry = resp.json()["services"][0]
+    assert entry["external"] == {"status": "missing", "records": None, "detail": None}
+
+
 def test_dns_records_external_api_error_is_distinct_from_missing(tmp_path: Path) -> None:
     # An auth failure or persistent 5xx must not read as a genuine absent
     # record -- see #122 review.
