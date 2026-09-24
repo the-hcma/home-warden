@@ -201,6 +201,23 @@ def test_alert_sent_on_new_failure(tmp_path: Path) -> None:
     mock_send.assert_called_once()
 
 
+def test_alert_sent_on_cooldown_block(tmp_path: Path) -> None:
+    # _ALERT_WORTHY_ACTIONS includes "cooldown" alongside "alert-only" and
+    # "failed" -- exercise it explicitly (both prior heal-flow tests run
+    # with smtp_config=None) so dropping "cooldown" from that set can't
+    # keep the whole suite green while silencing a real flap alert.
+    state_path = tmp_path / "state.json"
+    with patch("app.catalog_heal.ensure_cert", return_value=RegisterStepResult("cert", "applied", "renewed")):
+        with patch("app.catalog_heal.send_email") as mock_send:
+            _heal([CERT_FAIL], apply=True, state_path=state_path, smtp_config=SMTP_READY, cooldown_seconds=3600)
+        mock_send.assert_not_called()  # first attempt heals cleanly, nothing to alert on yet
+        with patch("app.catalog_heal.send_email") as mock_send:
+            _heal([CERT_FAIL], apply=True, state_path=state_path, smtp_config=SMTP_READY, cooldown_seconds=3600)
+    mock_send.assert_called_once()
+    state = _load_state(state_path)
+    assert state["svc:cert:alert"]["last_status"] == "bad"
+
+
 def test_alert_not_resent_before_resend_window(tmp_path: Path) -> None:
     state_path = tmp_path / "state.json"
     with patch("app.catalog_heal.send_email") as mock_send:

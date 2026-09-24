@@ -94,6 +94,10 @@ def main() -> int:
         print(f"catalog-heal: --timeout must be positive, got {args.timeout}", file=sys.stderr)
         return 2
 
+    if args.alert_days < 0:
+        print(f"catalog-heal: --alert-days must be non-negative, got {args.alert_days}", file=sys.stderr)
+        return 2
+
     if not (1 <= args.local_dns_port <= 65535):
         print(f"catalog-heal: --local-dns-port must be between 1 and 65535, got {args.local_dns_port}", file=sys.stderr)
         return 2

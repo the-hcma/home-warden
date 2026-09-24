@@ -43,6 +43,16 @@ def test_cli_out_of_range_local_dns_port_exits_2(monkeypatch, capsys) -> None:
     assert "--local-dns-port" in capsys.readouterr().err
 
 
+def test_cli_negative_alert_days_exits_2(monkeypatch, capsys) -> None:
+    # Without this guard, a negative --alert-days (or ALERT_DAYS=-1 in the
+    # environment) reaches run_all's own `if alert_days < 0: raise
+    # ValueError(...)` unguarded -- an uncaught traceback and exit 1, not
+    # the documented exit 2 usage-error contract every other flag here has.
+    monkeypatch.setattr(sys, "argv", ["catalog-heal", "--alert-days", "-1"])
+    assert main() == 2
+    assert "--alert-days" in capsys.readouterr().err
+
+
 def test_cli_host_guard_refused(monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", ["catalog-heal"])
     monkeypatch.setattr("app.catalog_heal_cli.enforce_host_guard", lambda caller: False)
@@ -91,6 +101,47 @@ def test_cli_exits_1_when_something_needs_attention(monkeypatch, tmp_path: Path,
     out = json.loads(capsys.readouterr().out)
     assert exit_code == 1
     assert out[0]["action"] == "alert-only"
+
+
+def test_cli_exits_1_on_cooldown_result(monkeypatch, tmp_path: Path, capsys) -> None:
+    # _NEEDS_ATTENTION has three members ("alert-only", "cooldown",
+    # "failed") -- exercise the other two explicitly so dropping one from
+    # that set can't keep the whole suite green.
+    catalog_path = _write_catalog(tmp_path)
+    creds = _write_credentials(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["catalog-heal", "--services-json", str(catalog_path), "--cloudflare-credentials", str(creds)],
+    )
+    monkeypatch.setattr("app.catalog_heal_cli.enforce_host_guard", lambda caller: True)
+    monkeypatch.setattr(
+        "app.catalog_heal_cli.heal_catalog",
+        lambda *a, **kw: [HealStepResult("svc", "cert", "cooldown", "cooling down")],
+    )
+    exit_code = main()
+    out = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert out[0]["action"] == "cooldown"
+
+
+def test_cli_exits_1_on_failed_result(monkeypatch, tmp_path: Path, capsys) -> None:
+    catalog_path = _write_catalog(tmp_path)
+    creds = _write_credentials(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["catalog-heal", "--services-json", str(catalog_path), "--cloudflare-credentials", str(creds)],
+    )
+    monkeypatch.setattr("app.catalog_heal_cli.enforce_host_guard", lambda caller: True)
+    monkeypatch.setattr(
+        "app.catalog_heal_cli.heal_catalog",
+        lambda *a, **kw: [HealStepResult("svc", "dns", "failed", "zone not found")],
+    )
+    exit_code = main()
+    out = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert out[0]["action"] == "failed"
 
 
 def test_cli_wires_apply_and_target_into_heal_catalog(monkeypatch, tmp_path: Path) -> None:
