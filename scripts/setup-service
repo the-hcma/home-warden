@@ -3,7 +3,7 @@
 # Expands etc/systemd templates into /etc/systemd/system/ with sudo.
 #
 # Placeholders: @@OWNER@@ @@SCRATCH_DIR@@ @@CONF_DIR@@ @@HOME_NGINX_CONF@@ @@HOME_DIR@@
-#               @@PDNS_ZONES_YAML@@ @@PDNS_ZONES_YAML_DIR@@
+#               @@PDNS_ZONES_YAML@@ @@PDNS_ZONES_YAML_DIR@@ @@SERVICES_JSON_PATH@@
 # Injects ConditionHost=|<machine-id> and ConditionHost=|<hostname> (OR).
 #
 # Flow (non-dry-run):
@@ -511,6 +511,7 @@ expand_unit() {
       -e "s|@@HOME_NGINX_CONF_DIR@@|${home_nginx_conf_dir}|g" \
       -e "s|@@PDNS_ZONES_YAML@@|${pdns_zones_yaml}|g" \
       -e "s|@@PDNS_ZONES_YAML_DIR@@|${pdns_zones_yaml_dir}|g" \
+      -e "s|@@SERVICES_JSON_PATH@@|${services_json}|g" \
       -e "s|@@REPO_DIR@@|${repo_dir}|g" \
       -e "s|@@HOME_DIR@@|${HOME}|g" \
       -e "s|@@DEPLOYED_COMMIT@@|${deployed_commit}|g" \

@@ -21,7 +21,10 @@ Type=oneshot
 User=@@OWNER@@
 Group=@@OWNER@@
 WorkingDirectory=@@REPO_DIR@@
-Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# @@HOME_DIR@@/.local/bin first: the astral.sh uv installer's default
+# per-user install location (this unit is the first to exec a uv-backed
+# wrapper) -- a system-wide /usr/local/bin/uv still resolves too.
+Environment=PATH=@@HOME_DIR@@/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # %h resolves to the service *manager's* home (root, in system scope) not
 # @@OWNER@@'s -- set it explicitly so scripts/lib/host-guard finds the pin
 # under the operator's ~/.config, not /root/.config.
@@ -29,10 +32,17 @@ Environment=HOME=@@HOME_DIR@@
 Environment=SCRATCH_DIR=@@SCRATCH_DIR@@
 Environment=CONF_DIR=@@CONF_DIR@@
 Environment=CERTBOT_CONFIG_DIR=@@CONF_DIR@@/certs
+Environment=SERVICES_JSON_PATH=@@SERVICES_JSON_PATH@@
 Environment=HOME_WARDEN_RELOAD=0
 EnvironmentFile=-@@HOME_DIR@@/.config/home-warden-catalog-heal.env
 ExecStart=@@REPO_DIR@@/scripts/catalog-heal --apply
-ExecStartPost=-+/usr/bin/systemctl try-reload-or-restart home-warden.service
+# ExecStopPost (not ExecStartPost): catalog-heal exits 1 on any routine
+# alert-only/cooldown/failed dimension (e.g. one unrelated service's
+# upstream being down), not just on a real run failure -- ExecStartPost
+# only fires after a oneshot's ExecStart exits 0, so gating the reload on
+# it would skip reloading a genuinely renewed cert whenever anything else
+# in the catalog also needed attention. ExecStopPost always runs.
+ExecStopPost=-+/usr/bin/systemctl try-reload-or-restart home-warden.service
 TimeoutStartSec=1h
 TimeoutStopSec=2min
 StandardOutput=append:@@SCRATCH_DIR@@/catalog-heal.log

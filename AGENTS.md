@@ -531,9 +531,15 @@ dimensions as the trigger. See
   `--apply`) automatically, opt-in via `SERVICES_JSON_PATH` — skipped, not
   an error, when unset and the default `~/.config/home-warden/services.json`
   doesn't exist either, mirroring `PDNS_ZONES_YAML`'s opt-in shape above.
-  `HOME_WARDEN_RELOAD=0` plus an `ExecStartPost` reload matches
-  `home-warden-certbot.service`'s own shape, since a cert heal invokes
-  `scripts/cert-renewer` the same way. External-DNS healing needs
+  `HOME_WARDEN_RELOAD=0` disables `scripts/cert-renewer`'s own reload
+  (same as `home-warden-certbot.service`), but the reload trigger itself
+  is `ExecStopPost` rather than that unit's `ExecStartPost`: unlike
+  cert-renewer (which only runs one command and fails only on a real
+  error), `catalog-heal --apply` routinely exits 1 on an unrelated
+  alert-only/cooldown dimension even when it also healed a cert —
+  `ExecStartPost` only fires after a oneshot's `ExecStart` exits 0, so it
+  would skip the reload in exactly that case; `ExecStopPost` always runs.
+  External-DNS healing needs
   `DNS_SYNC_TARGET` set in `~/.config/home-warden-catalog-heal.env` (see
   `etc/home-warden-catalog-heal.env.example`) — cert healing and
   local-DNS/upstream alerting work without it.
