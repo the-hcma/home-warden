@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -69,6 +69,29 @@ def test_health_catalog_ok(tmp_path: Path) -> None:
     body = resp.json()
     assert body["healthy"] is True
     assert body["checks"][0]["service"] == "svc"
+
+
+def test_health_catalog_wires_skip_local_dns_and_port_into_run_all(tmp_path: Path) -> None:
+    # A deleted/dropped kwarg here would silently disable the query flag
+    # and stop passing local_dns_port -- every other test mocks run_all's
+    # return value only, never its call args, so this is the only test
+    # that would catch that regression.
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": []}))
+
+    mock_run_all = MagicMock(return_value=[])
+    client = make_client()
+    with (
+        patch("app.api.catalog_health_routes.enforce_host_guard", return_value=True),
+        patch("app.api.catalog_health_routes.services_json_path", return_value=catalog_path),
+        patch("app.api.catalog_health_routes.run_all", mock_run_all),
+        patch("app.api.catalog_health_routes.local_pdns_port", return_value=853),
+    ):
+        resp = client.get("/health/catalog?skip_local_dns=true")
+
+    assert resp.status_code == 200
+    assert mock_run_all.call_args.kwargs["skip_local_dns"] is True
+    assert mock_run_all.call_args.kwargs["local_dns_port"] == 853
 
 
 def test_health_catalog_invalid_json_returns_500(tmp_path: Path) -> None:

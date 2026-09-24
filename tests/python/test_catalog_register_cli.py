@@ -41,6 +41,19 @@ def test_cli_missing_target_exits_2(monkeypatch, capsys) -> None:
     assert "--target" in capsys.readouterr().err
 
 
+def test_cli_non_positive_timeout_exits_2(monkeypatch, capsys) -> None:
+    # Without this, a non-positive --timeout reaches socket.settimeout()
+    # unvalidated: -1 raises an uncaught ValueError (no JSON plan, no exit
+    # 2), and 0 makes the upstream probe non-blocking and misreport a live
+    # backend as unreachable -- see run_all's identical guard for the
+    # health-check path.
+    monkeypatch.setattr(
+        sys, "argv", ["catalog-register", "--service", "svc", "--target", "203.0.113.10", "--timeout", "0"]
+    )
+    assert main() == 2
+    assert "--timeout" in capsys.readouterr().err
+
+
 def test_cli_host_guard_refused(monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", ["catalog-register", "--service", "svc", "--target", "203.0.113.10"])
     monkeypatch.setattr("app.catalog_register_cli.enforce_host_guard", lambda caller: False)

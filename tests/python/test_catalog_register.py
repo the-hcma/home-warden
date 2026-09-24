@@ -34,6 +34,13 @@ FAILED_PREVIEW = PreviewResult(
     nginx_test=NginxTestResult(exit_code=1, ok=False, output="nginx: [emerg] bad directive", status="failed"),
     rendered="",
 )
+GIXY_FINDINGS_PREVIEW = PreviewResult(
+    can_apply=True,
+    diff="",
+    gixy=GixyResult(exit_code=1, output="server_tokens: version disclosure", status="findings"),
+    nginx_test=NginxTestResult(exit_code=0, ok=True, output="syntax ok", status="ok"),
+    rendered="",
+)
 
 
 def _base_kwargs(**overrides) -> dict:
@@ -123,7 +130,7 @@ def test_register_service_preview_mode_reaches_nginx_step() -> None:
         patch(
             "app.catalog_register.sync_dns_record",
             return_value=SyncResult("svc", "would-create", "would create A app.example.com -> 203.0.113.10"),
-        ),
+        ) as mock_sync,
         patch("app.catalog_register.render_preview", return_value=OK_PREVIEW),
     ):
         results = register_service("svc", CATALOG, **_base_kwargs())
@@ -131,6 +138,11 @@ def test_register_service_preview_mode_reaches_nginx_step() -> None:
     assert results[3].status == "would-apply"
     assert results[4].status == "ok"
     assert not any(r.status == "failed" for r in results)
+    # This is the only thing that makes apply=False non-mutating -- pin
+    # the polarity, not just the returned result, so a swapped
+    # dry_run=apply would fail here instead of only in production.
+    assert mock_sync.call_args.kwargs["dry_run"] is True
+    assert mock_sync.call_args.kwargs["proxied"] is False
 
 
 def test_register_service_cert_skip_when_no_server_name() -> None:
@@ -197,6 +209,30 @@ def test_register_service_apply_appends_domain_only_when_not_already_listed() ->
     mock_append.assert_not_called()
 
 
+def test_register_service_apply_wires_dry_run_and_appends_missing_domain() -> None:
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+    certbot_domains_file = Path("/nonexistent/certbot-domains")
+    with (
+        patch("app.catalog_register.get_service", return_value=CATALOG["services"][0]),
+        patch("app.catalog_register.check_local_dns", return_value=LOCAL_DNS_OK),
+        patch("app.catalog_register.check_upstream", return_value=UPSTREAM_OK),
+        patch(
+            "app.catalog_register.sync_dns_record", return_value=SyncResult("svc", "created", "created")
+        ) as mock_sync,
+        patch("app.catalog_register._read_domains", return_value=set()),
+        patch("app.catalog_register._append_domain") as mock_append,
+        patch("subprocess.run", return_value=completed) as mock_run,
+        patch("app.catalog_register.render_preview", return_value=OK_PREVIEW),
+    ):
+        register_service(
+            "svc", CATALOG, **_base_kwargs(apply=True, proxied=True, certbot_domains_file=certbot_domains_file)
+        )
+    assert mock_sync.call_args.kwargs["dry_run"] is False
+    assert mock_sync.call_args.kwargs["proxied"] is True
+    mock_append.assert_called_once_with(certbot_domains_file, "app.example.com")
+    assert mock_run.call_args.kwargs["env"]["CERTBOT_DOMAINS_FILE"] == str(certbot_domains_file)
+
+
 def test_register_service_nginx_validation_failure_is_reported() -> None:
     with (
         patch("app.catalog_register.get_service", return_value=CATALOG["services"][0]),
@@ -211,6 +247,25 @@ def test_register_service_nginx_validation_failure_is_reported() -> None:
     nginx_result = next(r for r in results if r.step == "nginx")
     assert nginx_result.status == "failed"
     assert "bad directive" in nginx_result.detail
+
+
+def test_register_service_nginx_step_fails_on_gixy_findings_even_when_nginx_t_passes() -> None:
+    # preview.can_apply reflects nginx -t alone (app.catalog_crud's own
+    # gate) -- a Gixy finding must not be silently folded into an "ok"
+    # "both pass" claim just because can_apply itself doesn't see it.
+    with (
+        patch("app.catalog_register.get_service", return_value=CATALOG["services"][0]),
+        patch("app.catalog_register.check_local_dns", return_value=LOCAL_DNS_OK),
+        patch("app.catalog_register.check_upstream", return_value=UPSTREAM_OK),
+        patch("app.catalog_register.sync_dns_record", return_value=SyncResult("svc", "noop", "already correct")),
+        patch("app.catalog_register._ensure_cert") as mock_cert,
+        patch("app.catalog_register.render_preview", return_value=GIXY_FINDINGS_PREVIEW),
+    ):
+        mock_cert.return_value = RegisterStepResult("cert", "applied", "cert ok")
+        results = register_service("svc", CATALOG, **_base_kwargs())
+    nginx_result = next(r for r in results if r.step == "nginx")
+    assert nginx_result.status == "failed"
+    assert "version disclosure" in nginx_result.detail
 
 
 # --- _read_domains / _append_domain -----------------------------------------
@@ -229,5 +284,15 @@ def test_read_domains_skips_comments_and_blank_lines(tmp_path: Path) -> None:
 def test_append_domain_creates_parent_and_appends(tmp_path: Path) -> None:
     path = tmp_path / "conf" / "certbot-domains"
     _append_domain(path, "app.example.com")
+    _append_domain(path, "other.example.com")
+    assert path.read_text() == "app.example.com\nother.example.com\n"
+
+
+def test_append_domain_inserts_missing_leading_newline(tmp_path: Path) -> None:
+    # A file whose last line has no trailing newline (e.g. printf-written,
+    # or an editor that strips the final newline) must not have its last
+    # domain merged with the appended one into one bogus line.
+    path = tmp_path / "certbot-domains"
+    path.write_text("app.example.com")
     _append_domain(path, "other.example.com")
     assert path.read_text() == "app.example.com\nother.example.com\n"

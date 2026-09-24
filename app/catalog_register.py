@@ -25,6 +25,7 @@ mirroring app.catalog_checks.sync_dns_record's own `dry_run`.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -99,7 +100,19 @@ def register_service(
 
 def _append_domain(path: Path, domain: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    # A pre-existing file whose last line has no trailing newline (a
+    # printf-written file, or an editor that strips the final newline)
+    # would otherwise merge with this append into one bogus domain that
+    # neither _read_domains nor scripts/cert-renewer's own line reader
+    # would ever match again.
+    needs_leading_newline = False
+    if path.is_file() and path.stat().st_size > 0:
+        with path.open("rb") as f:
+            f.seek(-1, os.SEEK_END)
+            needs_leading_newline = f.read(1) != b"\n"
     with path.open("a", encoding="utf-8") as f:
+        if needs_leading_newline:
+            f.write("\n")
         f.write(f"{domain}\n")
 
 
@@ -126,6 +139,11 @@ def _ensure_cert(
             text=True,
             timeout=cert_timeout,
             check=False,
+            # Without this, an explicit --certbot-domains-file diverging
+            # from cert-renewer's own default/env resolution means the
+            # domain this step just appended is never the one
+            # cert-renewer actually reads -- see #110 review.
+            env={**os.environ, "CERTBOT_DOMAINS_FILE": str(certbot_domains_file)},
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         return RegisterStepResult("cert", "failed", f"{cert_renewer} failed to run: {e}")
@@ -161,4 +179,11 @@ def _validate_nginx(catalog: dict, services_json_path: Path) -> RegisterStepResu
     if not preview.can_apply:
         detail = preview.nginx_test.output or preview.gixy.output or "nginx validation failed"
         return RegisterStepResult("nginx", "failed", detail)
+    # preview.can_apply reflects nginx -t alone (app.catalog_crud's own
+    # gate) -- Gixy-Next is fail-closed per AGENTS.md, so a "findings" or
+    # "error" status here must not be folded into an "ok" claim of both
+    # passing, even though can_apply itself doesn't see it.
+    if preview.gixy.status != "ok":
+        detail = preview.gixy.output or f"Gixy-Next status={preview.gixy.status!r}"
+        return RegisterStepResult("nginx", "failed", f"nginx -t passed but Gixy-Next did not: {detail}")
     return RegisterStepResult("nginx", "ok", "nginx -t and Gixy-Next both pass against the full catalog")

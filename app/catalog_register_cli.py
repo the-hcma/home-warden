@@ -73,6 +73,10 @@ def main() -> int:
         print("catalog-register: --target is required (or set DNS_SYNC_TARGET)", file=sys.stderr)
         return 2
 
+    if args.timeout <= 0:
+        print(f"catalog-register: --timeout must be positive, got {args.timeout}", file=sys.stderr)
+        return 2
+
     if not enforce_host_guard("catalog-register"):
         return 2
 

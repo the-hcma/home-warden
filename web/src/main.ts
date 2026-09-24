@@ -160,7 +160,7 @@ type DashboardState = {
 };
 type HealthCheck = {
   detail: string;
-  dimension: "cert" | "dns" | "upstream";
+  dimension: "cert" | "dns" | "local_dns" | "upstream";
   service: string;
   status: "fail" | "ok" | "skip";
 };
@@ -462,6 +462,7 @@ function groupHealthChecks(checks: HealthCheck[]): HealthGroup[] {
         checks: {
           cert: null,
           dns: null,
+          local_dns: null,
           upstream: null,
         },
         service: check.service,
@@ -1685,7 +1686,7 @@ function mountHealthDashboard(root: HTMLElement): () => void {
     const headerRow = document.createElement("tr");
 
     styleTable(table);
-    for (const title of ["Service", "Cert", "DNS", "Upstream"]) {
+    for (const title of ["Service", "Cert", "DNS", "Local DNS", "Upstream"]) {
       const cell = document.createElement("th");
       cell.textContent = title;
       styleTableCell(cell, true);
@@ -1696,20 +1697,23 @@ function mountHealthDashboard(root: HTMLElement): () => void {
     for (const group of groups) {
       const certCell = document.createElement("td");
       const dnsCell = document.createElement("td");
+      const localDnsCell = document.createElement("td");
       const row = document.createElement("tr");
       const serviceCell = document.createElement("td");
       const upstreamCell = document.createElement("td");
 
       certCell.append(renderCheckCell(group.checks.cert));
       dnsCell.append(renderCheckCell(group.checks.dns));
+      localDnsCell.append(renderCheckCell(group.checks.local_dns));
       serviceCell.textContent = group.service;
       upstreamCell.append(renderCheckCell(group.checks.upstream));
       styleTableCell(certCell);
       styleTableCell(dnsCell);
+      styleTableCell(localDnsCell);
       styleTableCell(serviceCell);
       styleTableCell(upstreamCell);
 
-      row.append(serviceCell, certCell, dnsCell, upstreamCell);
+      row.append(serviceCell, certCell, dnsCell, localDnsCell, upstreamCell);
       table.append(row);
     }
 
