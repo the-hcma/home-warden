@@ -56,6 +56,15 @@ def local_pdns_port() -> int:
     return int(os.environ.get("LOCAL_PDNS_PORT", "853"))
 
 
+def pdns_zones_yaml_path() -> Path:
+    """Mirrors scripts/setup-service's PDNS_ZONES_YAML resolution (#108)
+    -- the thehcma/home dns/zones.yml checkout path the local PowerDNS
+    zone reads. Same env var name and default (~/home/dns/zones.yml) as
+    that script's own opt-in resolution, so one env var configures both.
+    """
+    return Path(os.environ.get("PDNS_ZONES_YAML", str(Path.home() / "home" / "dns" / "zones.yml")))
+
+
 def alert_days() -> int:
     return int(os.environ.get("ALERT_DAYS", "10"))
 
