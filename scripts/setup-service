@@ -3,7 +3,7 @@
 # Expands etc/systemd templates into /etc/systemd/system/ with sudo.
 #
 # Placeholders: @@OWNER@@ @@SCRATCH_DIR@@ @@CONF_DIR@@ @@HOME_NGINX_CONF@@ @@HOME_DIR@@
-#               @@PDNS_ZONES_YAML@@ @@PDNS_ZONES_YAML_DIR@@
+#               @@PDNS_ZONES_YAML@@ @@PDNS_ZONES_YAML_DIR@@ @@SERVICES_JSON_PATH@@
 # Injects ConditionHost=|<machine-id> and ConditionHost=|<hostname> (OR).
 #
 # Flow (non-dry-run):
@@ -20,17 +20,22 @@
 #   ./scripts/setup-service --repin-host     # move the pin to this host
 #   HOME_NGINX_CONF=/path/to/home/nginx/server/nginx.conf ./scripts/setup-service
 #   PDNS_ZONES_YAML=/path/to/home/dns/zones.yml ./scripts/setup-service
+#   SERVICES_JSON_PATH=/path/to/services.json ./scripts/setup-service
 #
 # Env overrides:
-#   HOME_NGINX_CONF  Absolute path to thehcma/home nginx.conf
-#   PDNS_ZONES_YAML  Absolute path to thehcma/home dns/zones.yml — opt-in:
-#                    enables the pdns reload-on-edit path unit (see
-#                    docs/dns-tinydns-migration.md, #108) when set or when
-#                    the default path below exists; skipped otherwise
-#   OWNER            Service user (default: current user)
-#   SCRATCH_DIR      Runtime prefix for nginx -p (default: ~/scratch/home-warden)
-#   CONF_DIR         Durable SSL material (default: ~/conf/home-warden)
-#   XDG_CONFIG_HOME  Base dir for ~/.config-style files (default: ~/.config)
+#   HOME_NGINX_CONF     Absolute path to thehcma/home nginx.conf
+#   PDNS_ZONES_YAML     Absolute path to thehcma/home dns/zones.yml — opt-in:
+#                       enables the pdns reload-on-edit path unit (see
+#                       docs/dns-tinydns-migration.md, #108) when set or when
+#                       the default path below exists; skipped otherwise
+#   SERVICES_JSON_PATH  Absolute path to the service catalog — opt-in:
+#                       enables the catalog-heal timer (see AGENTS.md's
+#                       Catalog Auto-Healing section, #57) when set or when
+#                       the default path below exists; skipped otherwise
+#   OWNER               Service user (default: current user)
+#   SCRATCH_DIR         Runtime prefix for nginx -p (default: ~/scratch/home-warden)
+#   CONF_DIR            Durable SSL material (default: ~/conf/home-warden)
+#   XDG_CONFIG_HOME     Base dir for ~/.config-style files (default: ~/.config)
 
 set -euo pipefail
 
@@ -65,6 +70,8 @@ conf_dir="${CONF_DIR:-${HOME}/conf/home-warden}"
 home_nginx_conf="${HOME_NGINX_CONF:-}"
 pdns_zones_yaml="${PDNS_ZONES_YAML:-}"
 pdns_enabled=0
+services_json="${SERVICES_JSON_PATH:-}"
+catalog_heal_enabled=0
 deployed_commit="${DEPLOYED_COMMIT:-}"
 owner_home="$(getent passwd "${owner}" | cut -d: -f6 || true)"
 readonly owner_home
@@ -76,6 +83,7 @@ preview_helper_source="${repo_dir}/scripts/nginx-test-candidate"
 readonly preview_helper_source
 readonly default_home_nginx_conf="${HOME}/home/nginx/server/nginx.conf"
 readonly default_pdns_zones_yaml="${HOME}/home/dns/zones.yml"
+readonly default_services_json="${HOME}/.config/home-warden/services.json"
 
 confirm_host=0
 dry_run=0
@@ -89,7 +97,9 @@ Usage: setup-service [--status] [--dry-run] [--confirm-host] [--repin-host] [-h|
 Install/enable home-warden.socket + home-warden.service into /etc/systemd/system,
 plus certbot timer, conf-watch path unit, and healthcheck timer. Also installs
 the pdns zones.yml reload-on-edit path unit when PDNS_ZONES_YAML is set (or
-its default path exists) — skipped otherwise; see #108.
+its default path exists) — skipped otherwise; see #108. Also installs the
+catalog-heal timer when SERVICES_JSON_PATH is set (or its default path
+exists) — skipped otherwise; see #57.
 Prompts for sudo, validates nginx -t, then starts the service when validation passes.
 
   --status        Show resolved paths and unit state; do not install
@@ -195,6 +205,22 @@ resolve_pdns_zones_yaml() {
   fi
   if [[ -f "${default_pdns_zones_yaml}" ]]; then
     printf '%s\n' "${default_pdns_zones_yaml}"
+    return 0
+  fi
+  return 1
+}
+
+# Opt-in like resolve_pdns_zones_yaml: not every host necessarily renders
+# nginx from a services.json catalog (see #57's catalog-heal), so an
+# unresolvable path is not an error here -- callers treat return 1 as "skip
+# catalog-heal wiring".
+resolve_services_json() {
+  if [[ -n "${services_json}" ]]; then
+    printf '%s\n' "${services_json}"
+    return 0
+  fi
+  if [[ -f "${default_services_json}" ]]; then
+    printf '%s\n' "${default_services_json}"
     return 0
   fi
   return 1
@@ -350,6 +376,20 @@ check_prerequisites() {
     echo "ERROR: missing healthcheck unit templates under ${unit_template_dir}" >&2
     missing=1
   fi
+  if ((catalog_heal_enabled)); then
+    if [[ ! -f "${services_json}" ]]; then
+      echo "ERROR: SERVICES_JSON_PATH not found: ${services_json}" >&2
+      missing=1
+    fi
+    if [[ ! -f "${unit_template_dir}/home-warden-catalog-heal.service" || ! -f "${unit_template_dir}/home-warden-catalog-heal.timer" ]]; then
+      echo "ERROR: missing catalog-heal unit templates under ${unit_template_dir}" >&2
+      missing=1
+    fi
+    if [[ ! -x "${repo_dir}/scripts/catalog-heal" ]]; then
+      echo "ERROR: scripts/catalog-heal missing or not executable" >&2
+      missing=1
+    fi
+  fi
   if ! command -v logrotate >/dev/null 2>&1; then
     echo "ERROR: logrotate not on PATH — sudo apt-get install -y logrotate" >&2
     missing=1
@@ -408,7 +448,7 @@ prepare_scratch() {
     run ln -sfn /usr/lib/nginx/modules "${scratch_dir}/modules"
   fi
   if ((dry_run)); then
-    echo "DRY-RUN: would touch ${scratch_dir}/{home-warden,cert-renewer,nginx-test-and-reload,healthcheck}.log and logs/{error,access}.log"
+    echo "DRY-RUN: would touch ${scratch_dir}/{home-warden,cert-renewer,nginx-test-and-reload,healthcheck,catalog-heal}.log and logs/{error,access}.log"
   else
     local log
     for log in \
@@ -416,6 +456,7 @@ prepare_scratch() {
       "${scratch_dir}/cert-renewer.log" \
       "${scratch_dir}/nginx-test-and-reload.log" \
       "${scratch_dir}/healthcheck.log" \
+      "${scratch_dir}/catalog-heal.log" \
       "${scratch_dir}/logs/error.log" \
       "${scratch_dir}/logs/access.log"; do
       if ! touch "${log}"; then
@@ -470,6 +511,7 @@ expand_unit() {
       -e "s|@@HOME_NGINX_CONF_DIR@@|${home_nginx_conf_dir}|g" \
       -e "s|@@PDNS_ZONES_YAML@@|${pdns_zones_yaml}|g" \
       -e "s|@@PDNS_ZONES_YAML_DIR@@|${pdns_zones_yaml_dir}|g" \
+      -e "s|@@SERVICES_JSON_PATH@@|${services_json}|g" \
       -e "s|@@REPO_DIR@@|${repo_dir}|g" \
       -e "s|@@HOME_DIR@@|${HOME}|g" \
       -e "s|@@DEPLOYED_COMMIT@@|${deployed_commit}|g" \
@@ -629,6 +671,7 @@ print_status() {
   echo "  certs:           ${conf_dir}/certs/live"
   echo "  home nginx.conf: ${home_nginx_conf:-<unset>}"
   echo "  pdns zones.yml:  ${pdns_zones_yaml:-<unset, pdns wiring skipped>}"
+  echo "  services.json:   ${services_json:-<unset, catalog-heal wiring skipped>}"
   echo "  deployed commit: ${deployed_commit:-$(git -C "${repo_dir}" rev-parse --short HEAD 2>/dev/null || echo '<unset>')}"
   echo "  service log:     ${scratch_dir}/home-warden.log"
   echo "  config.toml:     ${home_warden_config_path}"
@@ -659,7 +702,8 @@ print_status() {
       "certbot_timer:home-warden-certbot.timer" \
       "reload_path:home-warden-reload.path" \
       "pdns_reload_path:home-warden-pdns-reload.path" \
-      "healthcheck_timer:home-warden-healthcheck.timer"; do
+      "healthcheck_timer:home-warden-healthcheck.timer" \
+      "catalog_heal_timer:home-warden-catalog-heal.timer"; do
       label="${pair%%:*}"
       unit="${pair##*:}"
       en="$(systemctl is-enabled "${unit}" 2>/dev/null || true)"
@@ -701,6 +745,8 @@ main() {
     home_nginx_conf="${resolved}"
     resolved="$(resolve_pdns_zones_yaml || true)"
     pdns_zones_yaml="${resolved}"
+    resolved="$(resolve_services_json || true)"
+    services_json="${resolved}"
     print_status
     exit 0
   fi
@@ -718,6 +764,13 @@ main() {
     pdns_enabled=1
   else
     echo "pdns zones.yml not found — skipping local DNS reload wiring (set PDNS_ZONES_YAML to enable, see #108)"
+  fi
+
+  if resolved="$(resolve_services_json)"; then
+    services_json="${resolved}"
+    catalog_heal_enabled=1
+  else
+    echo "services.json not found — skipping catalog-heal wiring (set SERVICES_JSON_PATH to enable, see #57)"
   fi
 
   maybe_create_web_ui_config
@@ -746,6 +799,10 @@ main() {
   fi
   expand_unit "${unit_template_dir}/home-warden-healthcheck.service" "${system_unit_dir}/home-warden-healthcheck.service"
   expand_unit "${unit_template_dir}/home-warden-healthcheck.timer" "${system_unit_dir}/home-warden-healthcheck.timer"
+  if ((catalog_heal_enabled)); then
+    expand_unit "${unit_template_dir}/home-warden-catalog-heal.service" "${system_unit_dir}/home-warden-catalog-heal.service"
+    expand_unit "${unit_template_dir}/home-warden-catalog-heal.timer" "${system_unit_dir}/home-warden-catalog-heal.timer"
+  fi
   expand_unit "${logrotate_template}" "${logrotate_dest}"
   install_host_guard_library
   install_preview_conf_path
@@ -762,6 +819,9 @@ main() {
     run sudo systemctl enable --now home-warden-pdns-reload.path
   fi
   run sudo systemctl enable --now home-warden-healthcheck.timer
+  if ((catalog_heal_enabled)); then
+    run sudo systemctl enable --now home-warden-catalog-heal.timer
+  fi
 
   if systemctl is-active --quiet home-warden.service 2>/dev/null; then
     if ((on_deploy_rc == 0)); then
@@ -786,6 +846,9 @@ main() {
   echo "  tail --follow=name --retry ${scratch_dir}/cert-renewer.log"
   echo "  tail --follow=name --retry ${scratch_dir}/nginx-test-and-reload.log"
   echo "  tail --follow=name --retry ${scratch_dir}/healthcheck.log"
+  if ((catalog_heal_enabled)); then
+    echo "  tail --follow=name --retry ${scratch_dir}/catalog-heal.log"
+  fi
   echo "Certbot timer:     systemctl list-timers home-warden-certbot.timer"
   echo "Manual renew:      sudo systemctl start home-warden-certbot.service"
   echo "Conf watch:        systemctl status home-warden-reload.path"
@@ -794,6 +857,10 @@ main() {
   fi
   echo "Healthcheck timer: systemctl list-timers home-warden-healthcheck.timer"
   echo "Healthcheck mail:  ~/.config/home-warden-healthcheck.env (see etc/home-warden-healthcheck.env.example)"
+  if ((catalog_heal_enabled)); then
+    echo "Catalog heal timer: systemctl list-timers home-warden-catalog-heal.timer"
+    echo "Catalog heal mail:  ~/.config/home-warden-catalog-heal.env (see etc/home-warden-catalog-heal.env.example)"
+  fi
   print_status
 }
 
