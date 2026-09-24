@@ -326,10 +326,13 @@ work in `thehcma/home#16` (private repo) it relocates.
   (`app.dns_tinydns_convert.validate_zones_yaml_syntax` — catches a typo,
   not a deeper semantic mistake) before `pdns_control reload` — not
   `systemctl reload pdns.service`, which the distro-packaged unit doesn't
-  implement at all. These reload units are not yet wired into
-  `scripts/setup-service`'s automatic install flow; see
-  docs/dns-tinydns-migration.md for the current manual install steps and
-  #108 for that integration as a tracked follow-up.
+  implement at all. This ordering (syntax gate before reload, never the
+  reverse, with an unknown `PDNS_SERVICE` unit failing loudly rather than
+  silently skipping) is pinned by the `pdns-reload-gate-test` CI job
+  against stub `systemctl`/`pdns_control` binaries. These reload units
+  are not yet wired into `scripts/setup-service`'s automatic install
+  flow; see docs/dns-tinydns-migration.md for the current manual install
+  steps and #108 for that integration as a tracked follow-up.
 - Full usage, packages, install/reload steps, the record-mapping
   reference table, and the validation workflow:
   [docs/dns-tinydns-migration.md](./docs/dns-tinydns-migration.md).
@@ -456,6 +459,9 @@ CI lives in `.github/workflows/ci.yml`:
 - DNS catalog validate (`.github/ci/dns-catalog-validate` — converts a
   tinydns fixture, runs the real `pdns-backend-geoip` + `dig` against it,
   see Local DNS above)
+- pdns reload gate test (`.github/ci/pdns-reload-gate-test` — runs
+  `scripts/pdns-test-and-reload` against stub `systemctl`/`pdns_control`
+  binaries to pin its fail-closed ordering, see Local DNS above)
 - Web (`.github/ci/web-build` — pnpm typecheck + esbuild build, see Web UI above)
 
 No PR may be merged with a failing CI check.

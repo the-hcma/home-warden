@@ -76,7 +76,14 @@ else
   exit 2
 fi
 
-if ! systemctl is-active --quiet "${pdns_service}" 2>/dev/null; then
+pdns_service_load_state="$(systemctl show --property=LoadState --value "${pdns_service}" 2>/dev/null || true)"
+readonly pdns_service_load_state
+if [[ "${pdns_service_load_state}" == "not-found" ]]; then
+  log "ERROR: unknown systemd unit: ${pdns_service} (check PDNS_SERVICE)"
+  exit 2
+fi
+
+if ! systemctl is-active --quiet "${pdns_service}"; then
   log "${pdns_service} not active — skip reload"
   exit 0
 fi
