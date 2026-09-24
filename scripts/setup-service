@@ -333,6 +333,10 @@ check_prerequisites() {
     missing=1
   fi
   if ((pdns_enabled)); then
+    if [[ ! -f "${pdns_zones_yaml}" ]]; then
+      echo "ERROR: PDNS_ZONES_YAML not found: ${pdns_zones_yaml}" >&2
+      missing=1
+    fi
     if [[ ! -f "${unit_template_dir}/home-warden-pdns-reload.service" || ! -f "${unit_template_dir}/home-warden-pdns-reload.path" ]]; then
       echo "ERROR: missing pdns reload unit templates under ${unit_template_dir}" >&2
       missing=1
