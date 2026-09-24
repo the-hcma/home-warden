@@ -164,7 +164,12 @@ def _ensure_cert(
                 "CLOUDFLARE_CREDENTIALS": str(cloudflare_credentials),
             },
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+    except (OSError, subprocess.TimeoutExpired) as e:
+        # OSError (not just FileNotFoundError) so a non-executable
+        # cert_renewer (PermissionError) is reported as a failed step
+        # too -- by this point the external_dns write and the domains-
+        # file append have already happened, so an unhandled traceback
+        # here would leave partial state with no report of what failed.
         return RegisterStepResult("cert", "failed", f"{cert_renewer} failed to run: {e}")
 
     if proc.returncode != 0:

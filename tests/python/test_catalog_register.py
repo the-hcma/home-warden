@@ -194,6 +194,26 @@ def test_register_service_cert_renewer_timeout_is_failed() -> None:
     assert cert_result.status == "failed"
 
 
+def test_register_service_cert_renewer_permission_error_is_failed_not_raised() -> None:
+    # A non-executable cert_renewer (or any other subprocess-launch
+    # OSError, e.g. EACCES) raises PermissionError, which is an OSError
+    # but neither FileNotFoundError nor TimeoutExpired -- must not escape
+    # as an unhandled traceback after external_dns/cert-domains-append
+    # have already mutated state.
+    with (
+        patch("app.catalog_register.get_service", return_value=CATALOG["services"][0]),
+        patch("app.catalog_register.check_local_dns", return_value=LOCAL_DNS_OK),
+        patch("app.catalog_register.check_upstream", return_value=UPSTREAM_OK),
+        patch("app.catalog_register.sync_dns_record", return_value=SyncResult("svc", "created", "created")),
+        patch("app.catalog_register._read_domains", return_value=set()),
+        patch("app.catalog_register._append_domain"),
+        patch("subprocess.run", side_effect=PermissionError("[Errno 13] Permission denied")),
+    ):
+        results = register_service("svc", CATALOG, **_base_kwargs(apply=True))
+    cert_result = next(r for r in results if r.step == "cert")
+    assert cert_result.status == "failed"
+
+
 def test_register_service_apply_appends_domain_only_when_not_already_listed() -> None:
     completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
     with (
