@@ -329,10 +329,11 @@ work in `thehcma/home#16` (private repo) it relocates.
   implement at all. This ordering (syntax gate before reload, never the
   reverse, with an unknown `PDNS_SERVICE` unit failing loudly rather than
   silently skipping) is pinned by the `pdns-reload-gate-test` CI job
-  against stub `systemctl`/`pdns_control` binaries. These reload units
-  are not yet wired into `scripts/setup-service`'s automatic install
-  flow; see docs/dns-tinydns-migration.md for the current manual install
-  steps and #108 for that integration as a tracked follow-up.
+  against stub `systemctl`/`pdns_control` binaries. `scripts/setup-service`
+  installs and enables these reload units automatically, opt-in via
+  `PDNS_ZONES_YAML` (skipped, not an error, when unset and the default
+  `~/home/dns/zones.yml` doesn't exist either) — see
+  docs/dns-tinydns-migration.md.
 - Full usage, packages, install/reload steps, the record-mapping
   reference table, and the validation workflow:
   [docs/dns-tinydns-migration.md](./docs/dns-tinydns-migration.md).

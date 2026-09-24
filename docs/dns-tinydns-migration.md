@@ -100,32 +100,22 @@ these zones' queries to loopback:853.
 
 ## Install and reload-on-edit wiring
 
-The reload units (`etc/systemd/home-warden-pdns-reload.path`/`.service`)
-are **not yet wired into `scripts/setup-service`'s automatic install
-flow** — that integration is its own small, separate follow-up once an
-operator is actually deploying this on the real host (see
-[#108](https://github.com/the-hcma/home-warden/issues/108)). Install them
-manually for now, expanding the same `@@PLACEHOLDER@@`s
-`scripts/setup-service` uses elsewhere:
+`scripts/setup-service` installs and enables the reload units
+(`etc/systemd/home-warden-pdns-reload.path`/`.service`) automatically,
+the same way it already manages `home-warden-reload.path` for nginx —
+opt-in via `PDNS_ZONES_YAML`:
 
 ```bash
-sudo sed \
-  -e "s|@@PDNS_ZONES_YAML@@|/path/to/thehcma/home/dns/zones.yml|g" \
-  -e "s|@@PDNS_ZONES_YAML_DIR@@|/path/to/thehcma/home/dns|g" \
-  etc/systemd/home-warden-pdns-reload.path \
-  | sudo tee /etc/systemd/system/home-warden-pdns-reload.path >/dev/null
-
-sudo sed \
-  -e "s|@@HOME_DIR@@|${HOME}|g" \
-  -e "s|@@PDNS_ZONES_YAML@@|/path/to/thehcma/home/dns/zones.yml|g" \
-  -e "s|@@REPO_DIR@@|$(pwd)|g" \
-  -e "s|@@SCRATCH_DIR@@|${HOME}/scratch/home-warden|g" \
-  etc/systemd/home-warden-pdns-reload.service \
-  | sudo tee /etc/systemd/system/home-warden-pdns-reload.service >/dev/null
-
-sudo systemctl daemon-reload
-sudo systemctl enable --now home-warden-pdns-reload.path
+PDNS_ZONES_YAML=/path/to/thehcma/home/dns/zones.yml ./scripts/setup-service
 ```
+
+Skipped (with a message, not an error) when `PDNS_ZONES_YAML` is unset and
+the default `~/home/dns/zones.yml` doesn't exist either — installing
+`pdns-server` itself and populating `zones.yml` both stay manual steps
+(see Packages above); this wiring only covers the reload-on-edit path once
+those are in place. `./scripts/setup-service --status` reports the
+resolved `zones.yml` path and the `pdns_reload_path` unit's
+enabled/active state alongside everything else it already tracks.
 
 From then on, editing `zones.yml` triggers
 `scripts/pdns-test-and-reload`: a lightweight, offline

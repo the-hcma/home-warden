@@ -3,6 +3,7 @@
 # Expands etc/systemd templates into /etc/systemd/system/ with sudo.
 #
 # Placeholders: @@OWNER@@ @@SCRATCH_DIR@@ @@CONF_DIR@@ @@HOME_NGINX_CONF@@ @@HOME_DIR@@
+#               @@PDNS_ZONES_YAML@@ @@PDNS_ZONES_YAML_DIR@@
 # Injects ConditionHost=|<machine-id> and ConditionHost=|<hostname> (OR).
 #
 # Flow (non-dry-run):
@@ -18,9 +19,14 @@
 #   ./scripts/setup-service --confirm-host   # first-time pin, non-interactive
 #   ./scripts/setup-service --repin-host     # move the pin to this host
 #   HOME_NGINX_CONF=/path/to/home/nginx/server/nginx.conf ./scripts/setup-service
+#   PDNS_ZONES_YAML=/path/to/home/dns/zones.yml ./scripts/setup-service
 #
 # Env overrides:
 #   HOME_NGINX_CONF  Absolute path to thehcma/home nginx.conf
+#   PDNS_ZONES_YAML  Absolute path to thehcma/home dns/zones.yml — opt-in:
+#                    enables the pdns reload-on-edit path unit (see
+#                    docs/dns-tinydns-migration.md, #108) when set or when
+#                    the default path below exists; skipped otherwise
 #   OWNER            Service user (default: current user)
 #   SCRATCH_DIR      Runtime prefix for nginx -p (default: ~/scratch/home-warden)
 #   CONF_DIR         Durable SSL material (default: ~/conf/home-warden)
@@ -57,6 +63,8 @@ owner="${OWNER:-$(id -un)}"
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 conf_dir="${CONF_DIR:-${HOME}/conf/home-warden}"
 home_nginx_conf="${HOME_NGINX_CONF:-}"
+pdns_zones_yaml="${PDNS_ZONES_YAML:-}"
+pdns_enabled=0
 deployed_commit="${DEPLOYED_COMMIT:-}"
 owner_home="$(getent passwd "${owner}" | cut -d: -f6 || true)"
 readonly owner_home
@@ -67,6 +75,7 @@ readonly preview_helper_dest
 preview_helper_source="${repo_dir}/scripts/nginx-test-candidate"
 readonly preview_helper_source
 readonly default_home_nginx_conf="${HOME}/home/nginx/server/nginx.conf"
+readonly default_pdns_zones_yaml="${HOME}/home/dns/zones.yml"
 
 confirm_host=0
 dry_run=0
@@ -78,7 +87,9 @@ usage() {
 Usage: setup-service [--status] [--dry-run] [--confirm-host] [--repin-host] [-h|--help]
 
 Install/enable home-warden.socket + home-warden.service into /etc/systemd/system,
-plus certbot timer, conf-watch path unit, and healthcheck timer.
+plus certbot timer, conf-watch path unit, and healthcheck timer. Also installs
+the pdns zones.yml reload-on-edit path unit when PDNS_ZONES_YAML is set (or
+its default path exists) — skipped otherwise; see #108.
 Prompts for sudo, validates nginx -t, then starts the service when validation passes.
 
   --status        Show resolved paths and unit state; do not install
@@ -171,8 +182,19 @@ resolve_home_nginx_conf() {
     printf '%s\n' "${default_home_nginx_conf}"
     return 0
   fi
-  if [[ -f /home/house_meister/home/nginx/server/nginx.conf ]]; then
-    printf '%s\n' /home/house_meister/home/nginx/server/nginx.conf
+  return 1
+}
+
+# Opt-in, unlike resolve_home_nginx_conf: pdns is not a required part of
+# every home-warden install yet (see #108), so an unresolvable zones.yml
+# is not an error here — callers treat return 1 as "skip pdns wiring".
+resolve_pdns_zones_yaml() {
+  if [[ -n "${pdns_zones_yaml}" ]]; then
+    printf '%s\n' "${pdns_zones_yaml}"
+    return 0
+  fi
+  if [[ -f "${default_pdns_zones_yaml}" ]]; then
+    printf '%s\n' "${default_pdns_zones_yaml}"
     return 0
   fi
   return 1
@@ -310,6 +332,20 @@ check_prerequisites() {
     echo "ERROR: missing reload path unit templates under ${unit_template_dir}" >&2
     missing=1
   fi
+  if ((pdns_enabled)); then
+    if [[ ! -f "${pdns_zones_yaml}" ]]; then
+      echo "ERROR: PDNS_ZONES_YAML not found: ${pdns_zones_yaml}" >&2
+      missing=1
+    fi
+    if [[ ! -f "${unit_template_dir}/home-warden-pdns-reload.service" || ! -f "${unit_template_dir}/home-warden-pdns-reload.path" ]]; then
+      echo "ERROR: missing pdns reload unit templates under ${unit_template_dir}" >&2
+      missing=1
+    fi
+    if [[ ! -x "${repo_dir}/scripts/pdns-test-and-reload" ]]; then
+      echo "ERROR: scripts/pdns-test-and-reload missing or not executable" >&2
+      missing=1
+    fi
+  fi
   if [[ ! -f "${unit_template_dir}/home-warden-healthcheck.service" || ! -f "${unit_template_dir}/home-warden-healthcheck.timer" ]]; then
     echo "ERROR: missing healthcheck unit templates under ${unit_template_dir}" >&2
     missing=1
@@ -418,8 +454,10 @@ expand_unit() {
   local machine_id
   local tmp
   local home_nginx_conf_dir
+  local pdns_zones_yaml_dir
 
   home_nginx_conf_dir="$(dirname "${home_nginx_conf}")"
+  pdns_zones_yaml_dir="$(dirname "${pdns_zones_yaml}")"
   host_name="$(hw_first_line "${hw_pinned_host_file}")"
   machine_id="$(hw_first_line "${hw_pinned_machine_id_file}")"
 
@@ -430,6 +468,8 @@ expand_unit() {
       -e "s|@@CONF_DIR@@|${conf_dir}|g" \
       -e "s|@@HOME_NGINX_CONF@@|${home_nginx_conf}|g" \
       -e "s|@@HOME_NGINX_CONF_DIR@@|${home_nginx_conf_dir}|g" \
+      -e "s|@@PDNS_ZONES_YAML@@|${pdns_zones_yaml}|g" \
+      -e "s|@@PDNS_ZONES_YAML_DIR@@|${pdns_zones_yaml_dir}|g" \
       -e "s|@@REPO_DIR@@|${repo_dir}|g" \
       -e "s|@@HOME_DIR@@|${HOME}|g" \
       -e "s|@@DEPLOYED_COMMIT@@|${deployed_commit}|g" \
@@ -588,6 +628,7 @@ print_status() {
   echo "  conf:            ${conf_dir}"
   echo "  certs:           ${conf_dir}/certs/live"
   echo "  home nginx.conf: ${home_nginx_conf:-<unset>}"
+  echo "  pdns zones.yml:  ${pdns_zones_yaml:-<unset, pdns wiring skipped>}"
   echo "  deployed commit: ${deployed_commit:-$(git -C "${repo_dir}" rev-parse --short HEAD 2>/dev/null || echo '<unset>')}"
   echo "  service log:     ${scratch_dir}/home-warden.log"
   echo "  config.toml:     ${home_warden_config_path}"
@@ -617,6 +658,7 @@ print_status() {
       "service:home-warden.service" \
       "certbot_timer:home-warden-certbot.timer" \
       "reload_path:home-warden-reload.path" \
+      "pdns_reload_path:home-warden-pdns-reload.path" \
       "healthcheck_timer:home-warden-healthcheck.timer"; do
       label="${pair%%:*}"
       unit="${pair##*:}"
@@ -657,6 +699,8 @@ main() {
   if ((status_only)); then
     resolved="$(resolve_home_nginx_conf || true)"
     home_nginx_conf="${resolved}"
+    resolved="$(resolve_pdns_zones_yaml || true)"
+    pdns_zones_yaml="${resolved}"
     print_status
     exit 0
   fi
@@ -668,6 +712,13 @@ main() {
     exit 1
   fi
   home_nginx_conf="${resolved}"
+
+  if resolved="$(resolve_pdns_zones_yaml)"; then
+    pdns_zones_yaml="${resolved}"
+    pdns_enabled=1
+  else
+    echo "pdns zones.yml not found — skipping local DNS reload wiring (set PDNS_ZONES_YAML to enable, see #108)"
+  fi
 
   maybe_create_web_ui_config
 
@@ -689,6 +740,10 @@ main() {
   expand_unit "${unit_template_dir}/home-warden-certbot.timer" "${system_unit_dir}/home-warden-certbot.timer"
   expand_unit "${unit_template_dir}/home-warden-reload.service" "${system_unit_dir}/home-warden-reload.service"
   expand_unit "${unit_template_dir}/home-warden-reload.path" "${system_unit_dir}/home-warden-reload.path"
+  if ((pdns_enabled)); then
+    expand_unit "${unit_template_dir}/home-warden-pdns-reload.service" "${system_unit_dir}/home-warden-pdns-reload.service"
+    expand_unit "${unit_template_dir}/home-warden-pdns-reload.path" "${system_unit_dir}/home-warden-pdns-reload.path"
+  fi
   expand_unit "${unit_template_dir}/home-warden-healthcheck.service" "${system_unit_dir}/home-warden-healthcheck.service"
   expand_unit "${unit_template_dir}/home-warden-healthcheck.timer" "${system_unit_dir}/home-warden-healthcheck.timer"
   expand_unit "${logrotate_template}" "${logrotate_dest}"
@@ -703,6 +758,9 @@ main() {
   run sudo systemctl enable --now home-warden.socket
   run sudo systemctl enable --now home-warden-certbot.timer
   run sudo systemctl enable --now home-warden-reload.path
+  if ((pdns_enabled)); then
+    run sudo systemctl enable --now home-warden-pdns-reload.path
+  fi
   run sudo systemctl enable --now home-warden-healthcheck.timer
 
   if systemctl is-active --quiet home-warden.service 2>/dev/null; then
@@ -731,6 +789,9 @@ main() {
   echo "Certbot timer:     systemctl list-timers home-warden-certbot.timer"
   echo "Manual renew:      sudo systemctl start home-warden-certbot.service"
   echo "Conf watch:        systemctl status home-warden-reload.path"
+  if ((pdns_enabled)); then
+    echo "Zone watch:        systemctl status home-warden-pdns-reload.path"
+  fi
   echo "Healthcheck timer: systemctl list-timers home-warden-healthcheck.timer"
   echo "Healthcheck mail:  ~/.config/home-warden-healthcheck.env (see etc/home-warden-healthcheck.env.example)"
   print_status
