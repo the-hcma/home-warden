@@ -18,6 +18,18 @@ def services_json_path() -> Path:
     return Path(os.environ.get("SERVICES_JSON_PATH", str(Path.home() / ".config" / "home-warden" / "services.json")))
 
 
+def cert_renewer_path() -> Path:
+    return Path(os.environ.get("CERT_RENEWER", str(REPO_ROOT / "scripts" / "cert-renewer")))
+
+
+def certbot_domains_path() -> Path:
+    """Mirrors scripts/cert-renewer's own CERTBOT_DOMAINS_FILE default --
+    see #110's registration flow, which appends a newly-registered
+    service's server_name here before invoking that script unchanged.
+    """
+    return Path(os.environ.get("CERTBOT_DOMAINS_FILE", str(REPO_ROOT / "conf" / "certbot-domains")))
+
+
 def certs_live_dir() -> Path:
     conf_dir = Path(os.environ.get("CONF_DIR", str(Path.home() / "conf" / "home-warden")))
     return Path(os.environ.get("CERTS_LIVE_DIR", str(conf_dir / "certs" / "live")))
@@ -34,6 +46,14 @@ def dns_sync_target() -> str | None:
     hasn't configured it yet, not a stale/wrong guess.
     """
     return os.environ.get("DNS_SYNC_TARGET")
+
+
+def local_pdns_port() -> int:
+    """Port the local PowerDNS authoritative server listens on (#108's
+    render_pdns_conf emits local-port=853) -- overridable for local dev/CI
+    against a differently-configured instance.
+    """
+    return int(os.environ.get("LOCAL_PDNS_PORT", "853"))
 
 
 def alert_days() -> int:

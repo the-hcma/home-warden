@@ -1,21 +1,26 @@
 """Validate a home-warden service catalog's promises against live infrastructure.
 
-Three independent, read-only dimensions per catalog service (see
-the-hcma/home-warden#57):
+Four independent, read-only dimensions per catalog service (see
+the-hcma/home-warden#57, #110):
 
-  1. cert     -- does a Let's Encrypt cert exist for server_name, cover it in
-                 its SANs, and have enough runway left?
-  2. dns      -- does Cloudflare actually have an A/AAAA/CNAME record for
-                 server_name?
-  3. upstream -- for proxy services, is upstream.host:port accepting
-                 connections and responding to an HTTP request?
+  1. cert       -- does a Let's Encrypt cert exist for server_name, cover it
+                   in its SANs, and have enough runway left?
+  2. dns        -- does Cloudflare actually have an A/AAAA/CNAME record for
+                   server_name (the public name)?
+  3. local_dns  -- for proxy services, does the local PowerDNS zone (#108)
+                   have an A/AAAA record for upstream.host (the private/
+                   local name nginx's own proxy_pass depends on)?
+  4. upstream   -- for proxy services, is upstream.host:port accepting
+                   connections and responding to an HTTP request?
 
 Pure, read-only check functions -- this module never mutates certs, DNS, or
 any live state. Auto-healing on failure is deliberately out of scope; see
 #57 for the open design questions (confirm-first vs. autonomous, flap
 protection, credential scope, alerting) that need resolving before that's
-built. Consumed by app.catalog_health_cli (one-shot/timer use) and
-app.api.catalog_health_routes (on-demand HTTP, for the future web UI).
+built. Consumed by app.catalog_health_cli (one-shot/timer use),
+app.api.catalog_health_routes (on-demand HTTP, for the future web UI), and
+app.catalog_register (#110's registration orchestration, which reuses
+check_local_dns and check_upstream as fail-fast preconditions).
 """
 
 from __future__ import annotations
@@ -168,20 +173,31 @@ def _cf_request(
     raise last_err
 
 
-def _resolve_via_authoritative_ns(domain: str, record_type: str, nameserver: str, timeout: float) -> list[str] | None:
+def _resolve_via_authoritative_ns(
+    domain: str, record_type: str, nameserver: str, timeout: float, *, port: int | None = None
+) -> list[str] | None:
     """Query `nameserver` directly for `domain`'s `record_type` records via
     `dig`, bypassing any resolver cache -- a zone's own authoritative
     nameservers answer a just-written record immediately, with none of a
     public resolver's propagation/TTL-caching delay to account for.
 
+    `port` targets a non-standard port (e.g. the local PowerDNS
+    authoritative server's loopback:853, per #108) -- omitted (the
+    default) for a real public nameserver, always on port 53.
+
     Returns the list of answer values, or None when `dig` itself isn't
-    available in this environment -- an environment limitation, not a DNS
-    failure; callers should treat None as "couldn't verify," distinct
-    from an empty list, which means "asked and got no answer."
+    available in this environment, or the query otherwise couldn't be
+    answered (e.g. nothing listening) -- an environment limitation, not a
+    DNS failure; callers should treat None as "couldn't verify," distinct
+    from an empty list, which means "asked and got no answer" (NXDOMAIN).
     """
+    cmd = ["dig", "+short"]
+    if port is not None:
+        cmd += ["-p", str(port)]
+    cmd += [f"@{nameserver}", domain, record_type]
     try:
         proc = subprocess.run(
-            ["dig", "+short", f"@{nameserver}", domain, record_type],
+            cmd,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -296,6 +312,68 @@ def check_dns(
     return CheckResult(name, "dns", "fail", f"no A/AAAA/CNAME record for {domain} in any matching Cloudflare zone")
 
 
+def check_local_dns(name: str, service: dict, *, local_dns_port: int, timeout: float) -> CheckResult:
+    """Does the local PowerDNS authoritative server (#108) resolve
+    upstream.host -- the private/local name nginx's own proxy_pass
+    depends on, distinct from server_name's public DNS (check_dns above).
+
+    upstream.host is not required to live in the local PowerDNS zone at
+    all -- a backend resolved by the host's real resolver (a public name,
+    or any zone this server doesn't serve) is valid per the catalog
+    schema. So this walks candidate zone apexes (apex-first, like
+    candidate_zone_names elsewhere in this module) querying each for its
+    own SOA: only once the local server proves *authoritative* for some
+    matching zone does an empty A/AAAA answer count as a real miss --
+    otherwise "not our zone" is reported as skip, not fail.
+
+    Read-only like the other dimensions: a missing record (in a zone this
+    server *is* authoritative for) is reported as a failure to fix by
+    hand (add it to thehcma/home's dns/zones.yml and reload), never
+    something this module creates -- whatever stands up the backend owns
+    registering its own local name, not catalog registration (see #110).
+    """
+    if service.get("kind") != "proxy":
+        return CheckResult(name, "local_dns", "skip", f"kind={service.get('kind')!r}, no upstream to check")
+
+    upstream = service.get("upstream") or {}
+    host = upstream.get("host")
+    if not host:
+        return CheckResult(name, "local_dns", "fail", "upstream.host missing from catalog entry")
+
+    try:
+        ipaddress.ip_address(host)
+        return CheckResult(name, "local_dns", "skip", f"upstream.host {host!r} is a literal IP, no DNS needed")
+    except ValueError:
+        pass
+
+    zone_found = False
+    for candidate in candidate_zone_names(host):
+        soa = _resolve_via_authoritative_ns(candidate, "SOA", "127.0.0.1", timeout, port=local_dns_port)
+        if soa is None:
+            return CheckResult(name, "local_dns", "skip", "no local PowerDNS reachable on this host to verify against")
+        if soa:
+            zone_found = True
+            break
+    if not zone_found:
+        return CheckResult(name, "local_dns", "skip", f"{host} is not served by the local PowerDNS zone")
+
+    a_answers = _resolve_via_authoritative_ns(host, "A", "127.0.0.1", timeout, port=local_dns_port)
+    if a_answers is None:
+        return CheckResult(name, "local_dns", "skip", "no local PowerDNS reachable on this host to verify against")
+    aaaa_answers = _resolve_via_authoritative_ns(host, "AAAA", "127.0.0.1", timeout, port=local_dns_port)
+    if aaaa_answers is None:
+        return CheckResult(name, "local_dns", "skip", "no local PowerDNS reachable on this host to verify against")
+    answers = a_answers + aaaa_answers
+    if not answers:
+        return CheckResult(
+            name,
+            "local_dns",
+            "fail",
+            f"no local A/AAAA record for {host} -- add one to thehcma/home's dns/zones.yml and reload first",
+        )
+    return CheckResult(name, "local_dns", "ok", f"A/AAAA={', '.join(answers)}")
+
+
 def check_upstream(name: str, service: dict, timeout: float) -> CheckResult:
     if service.get("kind") != "proxy":
         return CheckResult(name, "upstream", "skip", f"kind={service.get('kind')!r}, no upstream to probe")
@@ -350,27 +428,35 @@ def run_all(
     certs_live_dir: Path,
     alert_days: int,
     cf_headers: dict[str, str] | None,
+    local_dns_port: int,
     timeout: float,
     max_retries: int,
     skip_cert: bool = False,
     skip_dns: bool = False,
+    skip_local_dns: bool = False,
     skip_upstream: bool = False,
 ) -> list[CheckResult]:
     """Run the requested dimensions for every service in the catalog.
 
-    Validates `timeout`/`alert_days` here -- the one choke point both the
-    CLI and the route funnel through -- rather than downstream in each
-    check: a non-positive timeout reaches `socket.settimeout()` as an
-    uncaught `ValueError` (not an `OSError`, so check_upstream's own catch
-    doesn't see it), and a negative alert_days would silently make the
-    expiry comparison pass for a cert that's already expired. Raising here
-    keeps both consumers' existing exit-2/HTTP-500 config-error contract
-    intact instead of an escaping exception or a silent false-healthy.
+    Validates `timeout`/`alert_days`/`local_dns_port` here -- the one
+    choke point both the CLI and the route funnel through -- rather than
+    downstream in each check: a non-positive timeout reaches
+    `socket.settimeout()` as an uncaught `ValueError` (not an `OSError`,
+    so check_upstream's own catch doesn't see it), a negative alert_days
+    would silently make the expiry comparison pass for a cert that's
+    already expired, and an out-of-range local_dns_port makes `dig`
+    unreachable, which check_local_dns already treats as an
+    environment-limitation "skip" -- an invalid port must not quietly
+    degrade the local_dns dimension to unverified. Raising here keeps
+    both consumers' existing exit-2/HTTP-500 config-error contract intact
+    instead of an escaping exception or a silent false-healthy.
     """
     if timeout <= 0:
         raise ValueError(f"timeout must be positive, got {timeout}")
     if alert_days < 0:
         raise ValueError(f"alert_days must be non-negative, got {alert_days}")
+    if not (1 <= local_dns_port <= 65535):
+        raise ValueError(f"local_dns_port must be between 1 and 65535, got {local_dns_port}")
 
     results: list[CheckResult] = []
     for service in catalog.get("services") or []:
@@ -379,6 +465,8 @@ def run_all(
             results.append(check_cert(name, service, certs_live_dir, alert_days))
         if not skip_dns:
             results.append(check_dns(name, service, cf_headers, timeout, max_retries))
+        if not skip_local_dns:
+            results.append(check_local_dns(name, service, local_dns_port=local_dns_port, timeout=timeout))
         if not skip_upstream:
             results.append(check_upstream(name, service, timeout))
     return results

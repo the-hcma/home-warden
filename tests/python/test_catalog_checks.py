@@ -16,7 +16,7 @@ import ipaddress
 import subprocess
 import urllib.error
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import pytest
 from cryptography import x509
@@ -32,6 +32,7 @@ from app.catalog_checks import (
     candidate_zone_names,
     check_cert,
     check_dns,
+    check_local_dns,
     check_upstream,
     load_catalog,
     parse_cloudflare_credentials,
@@ -508,6 +509,16 @@ def test_resolve_via_authoritative_ns_ok() -> None:
         answers = _resolve_via_authoritative_ns("app.example.com", "A", "ns1.example.net", timeout=5)
     assert answers == ["203.0.113.10"]
     assert mock_run.call_args.kwargs["timeout"] == 5
+    assert "-p" not in mock_run.call_args.args[0]
+
+
+def test_resolve_via_authoritative_ns_with_port_adds_dig_flag() -> None:
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="10.0.0.5\n")
+    with patch("subprocess.run", return_value=completed) as mock_run:
+        answers = _resolve_via_authoritative_ns("backend.example.internal", "A", "127.0.0.1", 5, port=853)
+    assert answers == ["10.0.0.5"]
+    cmd = mock_run.call_args.args[0]
+    assert cmd[cmd.index("-p") + 1] == "853"
 
 
 def test_resolve_via_authoritative_ns_empty_answer() -> None:
@@ -638,6 +649,117 @@ def test_check_dns_irrelevant_record_type_is_not_a_match() -> None:
     assert "no A/AAAA/CNAME record" in result.detail
 
 
+# --- check_local_dns --------------------------------------------------------
+
+
+def test_check_local_dns_skip_for_static_kind() -> None:
+    result = check_local_dns("svc", {"kind": "static"}, local_dns_port=853, timeout=5)
+    assert result.status == "skip"
+
+
+def test_check_local_dns_missing_upstream_host_is_fail() -> None:
+    result = check_local_dns("svc", {"kind": "proxy", "upstream": {}}, local_dns_port=853, timeout=5)
+    assert result.status == "fail"
+    assert "missing" in result.detail
+
+
+def test_check_local_dns_literal_ip_upstream_host_is_skip() -> None:
+    service = {"kind": "proxy", "upstream": {"host": "203.0.113.10", "port": 8080}}
+    with patch("app.catalog_checks._resolve_via_authoritative_ns") as mock_resolve:
+        result = check_local_dns("svc", service, local_dns_port=853, timeout=5)
+    mock_resolve.assert_not_called()
+    assert result.status == "skip"
+    assert "literal IP" in result.detail
+
+
+def test_check_local_dns_unreachable_is_skip_not_fail() -> None:
+    # No local PowerDNS reachable at all (e.g. this host doesn't run one)
+    # is an environment limitation, not "the record is missing" -- must
+    # not be reported the same way as a real NXDOMAIN.
+    service = {"kind": "proxy", "upstream": {"host": "backend.internal", "port": 8080}}
+    with patch("app.catalog_checks._resolve_via_authoritative_ns", return_value=None):
+        result = check_local_dns("svc", service, local_dns_port=853, timeout=5)
+    assert result.status == "skip"
+
+
+def test_check_local_dns_not_our_zone_is_skip_not_fail() -> None:
+    # upstream.host is not required to live in the local PowerDNS zone at
+    # all (a backend resolved by the host's real resolver is a valid,
+    # common case) -- an empty SOA answer means "not authoritative for
+    # this zone," not "record missing," and must not fail the check.
+    service = {"kind": "proxy", "upstream": {"host": "backend.internal", "port": 8080}}
+    with patch("app.catalog_checks._resolve_via_authoritative_ns", return_value=[]) as mock_resolve:
+        result = check_local_dns("svc", service, local_dns_port=853, timeout=5)
+    mock_resolve.assert_called_once_with("backend.internal", "SOA", "127.0.0.1", 5, port=853)
+    assert result.status == "skip"
+    assert "not served by the local PowerDNS zone" in result.detail
+
+
+def test_check_local_dns_no_record_is_fail() -> None:
+    # SOA found (this server is authoritative for the zone) but neither
+    # A nor AAAA answers -- a real miss, unlike the not-our-zone case.
+    service = {"kind": "proxy", "upstream": {"host": "backend.internal", "port": 8080}}
+    with patch(
+        "app.catalog_checks._resolve_via_authoritative_ns",
+        side_effect=[["ns1.backend.internal."], [], []],
+    ) as mock_resolve:
+        result = check_local_dns("svc", service, local_dns_port=853, timeout=5)
+    assert mock_resolve.call_args_list == [
+        call("backend.internal", "SOA", "127.0.0.1", 5, port=853),
+        call("backend.internal", "A", "127.0.0.1", 5, port=853),
+        call("backend.internal", "AAAA", "127.0.0.1", 5, port=853),
+    ]
+    assert result.status == "fail"
+    assert "no local A/AAAA record" in result.detail
+
+
+def test_check_local_dns_a_query_none_is_skip_not_fail() -> None:
+    # SOA succeeds (zone found) but the A query itself can't be verified
+    # (e.g. the local server reloaded/restarted between probes) -- must
+    # not be coerced into "record missing" the way `or []` would.
+    service = {"kind": "proxy", "upstream": {"host": "backend.internal", "port": 8080}}
+    with patch(
+        "app.catalog_checks._resolve_via_authoritative_ns",
+        side_effect=[["ns1.backend.internal."], None],
+    ):
+        result = check_local_dns("svc", service, local_dns_port=853, timeout=5)
+    assert result.status == "skip"
+
+
+def test_check_local_dns_aaaa_query_none_is_skip_not_fail() -> None:
+    service = {"kind": "proxy", "upstream": {"host": "backend.internal", "port": 8080}}
+    with patch(
+        "app.catalog_checks._resolve_via_authoritative_ns",
+        side_effect=[["ns1.backend.internal."], [], None],
+    ):
+        result = check_local_dns("svc", service, local_dns_port=853, timeout=5)
+    assert result.status == "skip"
+
+
+def test_check_local_dns_ok() -> None:
+    service = {"kind": "proxy", "upstream": {"host": "backend.internal", "port": 8080}}
+    with patch(
+        "app.catalog_checks._resolve_via_authoritative_ns",
+        side_effect=[["ns1.backend.internal."], ["10.0.0.5"], []],
+    ):
+        result = check_local_dns("svc", service, local_dns_port=853, timeout=5)
+    assert result.status == "ok"
+    assert "10.0.0.5" in result.detail
+
+
+def test_check_local_dns_aaaa_only_is_ok() -> None:
+    # A-only queries would false-fail an IPv6-only backend -- AAAA must
+    # also be checked, not just A.
+    service = {"kind": "proxy", "upstream": {"host": "backend.internal", "port": 8080}}
+    with patch(
+        "app.catalog_checks._resolve_via_authoritative_ns",
+        side_effect=[["ns1.backend.internal."], [], ["::1"]],
+    ):
+        result = check_local_dns("svc", service, local_dns_port=853, timeout=5)
+    assert result.status == "ok"
+    assert "::1" in result.detail
+
+
 # --- run_all -------------------------------------------------------------
 
 
@@ -648,18 +770,56 @@ def test_run_all_respects_skip_flags(tmp_path: Path) -> None:
         certs_live_dir=tmp_path,
         alert_days=10,
         cf_headers=None,
+        local_dns_port=853,
         timeout=1,
         max_retries=1,
         skip_cert=True,
         skip_dns=True,
+        skip_local_dns=True,
         skip_upstream=False,
     )
     assert len(results) == 1
     assert results[0].dimension == "upstream"
 
 
+def test_run_all_includes_local_dns_dimension_by_default() -> None:
+    # Nothing else in this suite exercises local_dns through run_all --
+    # deleting the branch, or dropping its local_dns_port pass-through,
+    # must not leave this green.
+    catalog = {
+        "services": [
+            {"name": "svc", "kind": "proxy", "server_name": "app.example.com", "upstream": {"host": "10.0.0.5"}}
+        ]
+    }
+    with patch(
+        "app.catalog_checks.check_local_dns", return_value=CheckResult("svc", "local_dns", "ok", "resolves")
+    ) as mock_check:
+        results = run_all(
+            catalog,
+            certs_live_dir=Path("/nonexistent"),
+            alert_days=10,
+            cf_headers=None,
+            local_dns_port=853,
+            timeout=1,
+            max_retries=1,
+            skip_cert=True,
+            skip_dns=True,
+            skip_upstream=True,
+        )
+    assert [r.dimension for r in results] == ["local_dns"]
+    mock_check.assert_called_once_with("svc", catalog["services"][0], local_dns_port=853, timeout=1)
+
+
 def test_run_all_empty_catalog() -> None:
-    results = run_all({}, certs_live_dir=Path("/nonexistent"), alert_days=10, cf_headers=None, timeout=1, max_retries=1)
+    results = run_all(
+        {},
+        certs_live_dir=Path("/nonexistent"),
+        alert_days=10,
+        cf_headers=None,
+        local_dns_port=853,
+        timeout=1,
+        max_retries=1,
+    )
     assert results == []
 
 
@@ -667,14 +827,46 @@ def test_run_all_rejects_non_positive_timeout() -> None:
     # timeout<=0 reaches socket.settimeout() as an uncaught ValueError
     # (not an OSError) if it isn't caught here first.
     with pytest.raises(ValueError, match="timeout must be positive"):
-        run_all({}, certs_live_dir=Path("/nonexistent"), alert_days=10, cf_headers=None, timeout=0, max_retries=1)
+        run_all(
+            {},
+            certs_live_dir=Path("/nonexistent"),
+            alert_days=10,
+            cf_headers=None,
+            local_dns_port=853,
+            timeout=0,
+            max_retries=1,
+        )
 
 
 def test_run_all_rejects_negative_alert_days() -> None:
     # A negative alert_days would otherwise silently make the expiry
     # comparison pass for a cert that's already expired.
     with pytest.raises(ValueError, match="alert_days must be non-negative"):
-        run_all({}, certs_live_dir=Path("/nonexistent"), alert_days=-1, cf_headers=None, timeout=5, max_retries=1)
+        run_all(
+            {},
+            certs_live_dir=Path("/nonexistent"),
+            alert_days=-1,
+            cf_headers=None,
+            local_dns_port=853,
+            timeout=5,
+            max_retries=1,
+        )
+
+
+def test_run_all_rejects_out_of_range_local_dns_port() -> None:
+    # An invalid port makes dig unreachable, which check_local_dns treats
+    # as an environment-limitation "skip" -- must not silently degrade
+    # the whole dimension to unverified instead of a loud config error.
+    with pytest.raises(ValueError, match="local_dns_port must be between 1 and 65535"):
+        run_all(
+            {},
+            certs_live_dir=Path("/nonexistent"),
+            alert_days=10,
+            cf_headers=None,
+            local_dns_port=0,
+            timeout=5,
+            max_retries=1,
+        )
 
 
 # --- sync_dns_record -------------------------------------------------------

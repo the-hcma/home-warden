@@ -340,6 +340,66 @@ work in `thehcma/home#16` (private repo) it relocates.
 
 ---
 
+## Service Registration Orchestration
+
+`app/catalog_register.py` (CLI: `catalog-register`, wrapper:
+`scripts/catalog-register --service <name>`) drives one already-catalogued
+service's local DNS, external DNS, cert, and final nginx-render validation
+in the order a new service actually needs, wiring together
+[#108](https://github.com/the-hcma/home-warden/issues/108)'s local DNS,
+[#109](https://github.com/the-hcma/home-warden/issues/109)'s Cloudflare
+sync, `scripts/cert-renewer`, and `app.catalog_crud`'s existing
+validate/preview pipeline. See
+[#110](https://github.com/the-hcma/home-warden/issues/110).
+
+- **Staging order — internal name, then upstream, then external name**:
+  1. `local_dns` — **verify only** that `upstream.host` (the private/local
+     name nginx's own `proxy_pass` depends on — distinct from
+     `server_name`, the public name) already resolves via the local
+     PowerDNS zone (#108). A missing record fails with "add it by hand and
+     reload first" — this module never creates one; whatever stands up the
+     backend owns registering its own local name. Skipped for `static`-kind
+     services (no upstream) and for a literal IP `upstream.host` (no DNS
+     needed). Also skipped, not failed, when this host has no local
+     PowerDNS reachable at all (mirrors `#108`'s own opt-in design).
+  2. `upstream` — verify the backend itself is actually reachable
+     (`app.catalog_checks.check_upstream`, reused as-is) before touching
+     anything public.
+  3. `external_dns` — create/update the public Cloudflare record for
+     `server_name` (`app.catalog_checks.sync_dns_record`, reused as-is).
+  4. `cert` — ensure `server_name` is listed in `conf/certbot-domains`
+     (appended if missing), then invokes `scripts/cert-renewer`
+     **unchanged** — that script already handles DNS-01 propagation wait
+     (`DNS_CLOUDFLARE_PROPAGATION_SECONDS`) internally, so this step adds
+     no propagation-wait logic of its own.
+  5. `nginx` — final `nginx -t` + Gixy-Next validation against the full
+     catalog via `app.catalog_crud.render_preview` — the **same**
+     validate/preview pipeline the web UI's own catalog edits already use
+     (`#69`), not a separate implementation. This module stops at
+     `services.json`/preview validation; it does not deploy the rendered
+     config to the live served nginx.conf or trigger a reload — that gap
+     exists for every catalog edit today, not something specific to this
+     flow, and stays out of scope here.
+- **Fail-fast, not auto-healing**: each step is a precondition check for
+  the next. A failure stops the pipeline immediately and reports what to
+  fix by hand — this is provisioning, matching this repo's established
+  "fail loud and stop" posture (`scripts/cert-renewer`,
+  `scripts/pdns-test-and-reload`), not a retry-until-it-works loop.
+- **Confirm-first**: `apply=False` (the CLI default, no `--apply` flag) is
+  a full dry-run preview of every step — nothing changes. Re-run with
+  `--apply` once the plan looks right. Mirrors
+  `app.catalog_checks.sync_dns_record`'s own `dry_run` parameter rather
+  than an interactive y/n prompt, consistent with every other Python CLI
+  in this repo.
+- `app.catalog_checks.check_local_dns` (the `local_dns` step's check) is
+  also wired into `run_all`/`catalog-health-check`/`GET /health/catalog`
+  as a fourth read-only dimension alongside `cert`/`dns`/`upstream` — the
+  same function this module uses as a precondition also gives #57's
+  ongoing health checks local-DNS coverage for internal-only services, per
+  #108's own "depended on by #57" note.
+
+---
+
 ## Web UI
 
 home-warden's first-party admin web UI

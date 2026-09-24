@@ -18,6 +18,7 @@ from app.catalog_health_settings import (
     certs_live_dir,
     cloudflare_credentials_path,
     enforce_host_guard,
+    local_pdns_port,
     max_retries,
     services_json_path,
     timeout_seconds,
@@ -30,6 +31,7 @@ router = APIRouter(prefix="/health", tags=["health"])
 def get_catalog_health(
     skip_cert: bool = Query(False),
     skip_dns: bool = Query(False),
+    skip_local_dns: bool = Query(False),
     skip_upstream: bool = Query(False),
 ) -> dict:
     if not enforce_host_guard("catalog-health-api"):
@@ -54,10 +56,12 @@ def get_catalog_health(
             certs_live_dir=certs_live_dir(),
             alert_days=alert_days(),
             cf_headers=cf_headers,
+            local_dns_port=local_pdns_port(),
             timeout=timeout_seconds(),
             max_retries=max_retries(),
             skip_cert=skip_cert,
             skip_dns=skip_dns,
+            skip_local_dns=skip_local_dns,
             skip_upstream=skip_upstream,
         )
     except FileNotFoundError as e:
