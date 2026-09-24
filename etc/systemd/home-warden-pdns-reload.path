@@ -1,0 +1,27 @@
+# Watch thehcma/home pdns zones.yml; trigger test-and-reload oneshot.
+# Template: etc/systemd/home-warden-pdns-reload.path — placeholders below
+# use the same @@PLACEHOLDER@@ convention as this repo's other unit
+# templates (see scripts/setup-service), but this unit is NOT yet wired
+# into that script's automatic install flow -- see
+# docs/dns-tinydns-migration.md for the current manual install steps.
+# scripts/setup-service integration is a tracked follow-up once local
+# PowerDNS is actually deployed on the real host (see the-hcma/home-warden#108).
+#
+# Watches both the file and its directory:
+#   - PathModified on the file catches in-place edits (e.g. sed -i)
+#   - PathModified on the directory catches rename-based editor saves
+# Debounce: systemd coalesces bursts into one activation.
+# Fail-closed: the syntax check in home-warden-pdns-reload.service still
+# refuses a broken zones.yml before ever calling pdns_control reload.
+
+[Unit]
+Description=home-warden — watch pdns zones.yml for reload
+Documentation=https://github.com/the-hcma/home-warden/blob/main/docs/dns-tinydns-migration.md
+
+[Path]
+PathModified=@@PDNS_ZONES_YAML@@
+PathModified=@@PDNS_ZONES_YAML_DIR@@
+Unit=home-warden-pdns-reload.service
+
+[Install]
+WantedBy=paths.target

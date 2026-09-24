@@ -39,6 +39,7 @@ dependencies = [
 catalog-dns-sync = "app.catalog_dns_sync_cli:main"
 catalog-health-check = "app.catalog_health_cli:main"
 dns-tinydns-convert = "app.dns_tinydns_convert_cli:main"
+dns-zones-yaml-check = "app.dns_zones_yaml_check_cli:main"
 render-catalog = "app.catalog_render_cli:main"
 
 [project.urls]

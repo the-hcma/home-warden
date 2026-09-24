@@ -314,12 +314,28 @@ work in `thehcma/home#16` (private repo) it relocates.
     fixture, runs the genuinely-generated `zones.yml`/`pdns.conf` through
     a real `pdns_server`, and `dig`-verifies every record type. Wired as
     its own `dns-catalog-validate` CI job.
-- **Ongoing zone edits** (not just the one-off migration) should run
-  through the same validation before `pdns_control reload` on the live
-  host — see #108 for the reload-wiring/systemd follow-up this converter
-  work unblocks.
-- Full usage, the record-mapping reference table, and the validation
-  workflow: [docs/dns-tinydns-migration.md](./docs/dns-tinydns-migration.md).
+- **Dedicated account**: already handled by the distro. Debian/Ubuntu's
+  `pdns-server` package creates its own `pdns` system account (via
+  `adduser` in its postinst) and runs `pdns.service` as that account by
+  default — home-warden does not author a privilege-separation unit for
+  pdns the way it did for nginx (whose socket-activation trick solves a
+  problem the distro packaging already solves here).
+- **Reload-on-edit**: `scripts/pdns-test-and-reload` (triggered by
+  `etc/systemd/home-warden-pdns-reload.path`) runs a lightweight, offline
+  `dns-zones-yaml-check` syntax/shape gate
+  (`app.dns_tinydns_convert.validate_zones_yaml_syntax` — catches a typo,
+  not a deeper semantic mistake) before `pdns_control reload` — not
+  `systemctl reload pdns.service`, which the distro-packaged unit doesn't
+  implement at all. This ordering (syntax gate before reload, never the
+  reverse, with an unknown `PDNS_SERVICE` unit failing loudly rather than
+  silently skipping) is pinned by the `pdns-reload-gate-test` CI job
+  against stub `systemctl`/`pdns_control` binaries. These reload units
+  are not yet wired into `scripts/setup-service`'s automatic install
+  flow; see docs/dns-tinydns-migration.md for the current manual install
+  steps and #108 for that integration as a tracked follow-up.
+- Full usage, packages, install/reload steps, the record-mapping
+  reference table, and the validation workflow:
+  [docs/dns-tinydns-migration.md](./docs/dns-tinydns-migration.md).
 
 ---
 
@@ -443,6 +459,9 @@ CI lives in `.github/workflows/ci.yml`:
 - DNS catalog validate (`.github/ci/dns-catalog-validate` — converts a
   tinydns fixture, runs the real `pdns-backend-geoip` + `dig` against it,
   see Local DNS above)
+- pdns reload gate test (`.github/ci/pdns-reload-gate-test` — runs
+  `scripts/pdns-test-and-reload` against stub `systemctl`/`pdns_control`
+  binaries to pin its fail-closed ordering, see Local DNS above)
 - Web (`.github/ci/web-build` — pnpm typecheck + esbuild build, see Web UI above)
 
 No PR may be merged with a failing CI check.

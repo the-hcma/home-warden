@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# ci/pdns-reload-gate-test -- exercises scripts/pdns-test-and-reload's
+# fail-closed ordering end to end (syntax gate before `pdns_control
+# reload`), since nothing else in this repo invokes that script directly.
+# Stubs `systemctl`/`pdns_control` on PATH rather than installing real
+# PowerDNS -- .github/ci/dns-catalog-validate already covers the real
+# server/YAML-shape acceptance test; this one is purely about the
+# gate script's own control flow. See the-hcma/home-warden#108 review.
+set -euo pipefail
+bash .github/ci/setup-python
+
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+work_dir="$(mktemp -d)"
+trap 'rm -rf "${work_dir}"' EXIT
+
+stub_bin="${work_dir}/bin"
+mkdir -p "${stub_bin}"
+
+cat >"${stub_bin}/systemctl" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  show)
+    case "$*" in
+      *--property=LoadState*--value*)
+        echo "${STUB_SYSTEMCTL_LOAD_STATE:-loaded}"
+        exit 0
+        ;;
+      *--property=LoadState*)
+        echo "LoadState=${STUB_SYSTEMCTL_LOAD_STATE:-loaded}"
+        exit 0
+        ;;
+      *)
+        # Wrong/missing property (or --value without --property=LoadState)
+        # -- fail loudly rather than guess, so a regressed invocation is
+        # caught instead of silently getting a plausible-looking answer.
+        exit 1
+        ;;
+    esac
+    ;;
+  is-active)
+    exit "${STUB_SYSTEMCTL_ACTIVE_EXIT:-0}"
+    ;;
+esac
+exit 1
+STUB
+chmod +x "${stub_bin}/systemctl"
+
+cat >"${stub_bin}/pdns_control" <<'STUB'
+#!/usr/bin/env bash
+: >"${STUB_PDNS_CONTROL_SENTINEL:?}"
+exit "${STUB_PDNS_CONTROL_EXIT:-0}"
+STUB
+chmod +x "${stub_bin}/pdns_control"
+
+export PATH="${stub_bin}:${PATH}"
+export HOME_WARDEN_SKIP_HOST_GUARD=1
+
+sentinel="${work_dir}/pdns_control.called"
+export STUB_PDNS_CONTROL_SENTINEL="${sentinel}"
+
+fail=0
+
+run_case() {
+  local -r desc="$1" expected_exit="$2"
+  shift 2
+  rm -f "${sentinel}"
+  local actual_exit=0
+  "$@" || actual_exit=$?
+  if [[ "${actual_exit}" != "${expected_exit}" ]]; then
+    echo "FAIL (${desc}): expected exit ${expected_exit}, got ${actual_exit}" >&2
+    fail=1
+  else
+    echo "OK (${desc}): exit ${actual_exit}"
+  fi
+}
+
+assert_sentinel() {
+  local -r desc="$1" expect_called="$2"
+  if [[ "${expect_called}" == "1" && ! -f "${sentinel}" ]]; then
+    echo "FAIL (${desc}): pdns_control was never invoked" >&2
+    fail=1
+  elif [[ "${expect_called}" == "0" && -f "${sentinel}" ]]; then
+    echo "FAIL (${desc}): pdns_control was invoked but should not have been" >&2
+    fail=1
+  else
+    echo "OK (${desc}): pdns_control invocation as expected (called=${expect_called})"
+  fi
+}
+
+# Case 1: malformed zones.yml -- must refuse (exit 2) before ever calling
+# pdns_control, proving the syntax gate runs before the reload step.
+malformed="${work_dir}/malformed.yml"
+printf 'not: [valid, {' >"${malformed}"
+PDNS_ZONES_YAML="${malformed}" \
+  run_case "malformed zones.yml" 2 "${repo_dir}/scripts/pdns-test-and-reload"
+assert_sentinel "malformed zones.yml" 0
+
+well_formed="${work_dir}/zones.yml"
+printf 'domains:\n  - domain: example.com\n    ttl: 3600\n    records: {}\n' >"${well_formed}"
+
+# Case 2: well-formed zones.yml, service active -- reload must actually run.
+PDNS_ZONES_YAML="${well_formed}" STUB_SYSTEMCTL_LOAD_STATE=loaded STUB_SYSTEMCTL_ACTIVE_EXIT=0 \
+  run_case "well-formed + active service" 0 "${repo_dir}/scripts/pdns-test-and-reload"
+assert_sentinel "well-formed + active service" 1
+
+# Case 3: well-formed zones.yml, service inactive -- must skip reload, exit 0.
+PDNS_ZONES_YAML="${well_formed}" STUB_SYSTEMCTL_LOAD_STATE=loaded STUB_SYSTEMCTL_ACTIVE_EXIT=3 \
+  run_case "well-formed + inactive service" 0 "${repo_dir}/scripts/pdns-test-and-reload"
+assert_sentinel "well-formed + inactive service" 0
+
+# Case 4: well-formed zones.yml, unknown unit name (e.g. a PDNS_SERVICE typo
+# like the package name pdns-server.service) -- must fail loudly (exit 2),
+# not silently report success the way a merely-inactive unit does.
+PDNS_ZONES_YAML="${well_formed}" PDNS_SERVICE=pdns-server.service STUB_SYSTEMCTL_LOAD_STATE=not-found \
+  STUB_SYSTEMCTL_ACTIVE_EXIT=3 \
+  run_case "unknown PDNS_SERVICE unit" 2 "${repo_dir}/scripts/pdns-test-and-reload"
+assert_sentinel "unknown PDNS_SERVICE unit" 0
+
+# Case 5: well-formed zones.yml, service active, but `pdns_control reload`
+# itself fails -- the script's documented exit 1 ("pdns_control reload
+# failed"), not a silently-swallowed success.
+PDNS_ZONES_YAML="${well_formed}" STUB_SYSTEMCTL_LOAD_STATE=loaded STUB_SYSTEMCTL_ACTIVE_EXIT=0 \
+  STUB_PDNS_CONTROL_EXIT=1 \
+  run_case "pdns_control reload fails" 1 "${repo_dir}/scripts/pdns-test-and-reload"
+assert_sentinel "pdns_control reload fails" 1
+
+exit "${fail}"
