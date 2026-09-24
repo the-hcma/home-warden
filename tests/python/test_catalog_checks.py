@@ -34,6 +34,7 @@ from app.catalog_checks import (
     check_dns,
     check_local_dns,
     check_upstream,
+    list_cloudflare_records,
     load_catalog,
     parse_cloudflare_credentials,
     run_all,
@@ -758,6 +759,82 @@ def test_check_local_dns_aaaa_only_is_ok() -> None:
         result = check_local_dns("svc", service, local_dns_port=853, timeout=5)
     assert result.status == "ok"
     assert "::1" in result.detail
+
+
+# --- list_cloudflare_records -------------------------------------------
+
+
+def test_list_cloudflare_records_no_domain_returns_none() -> None:
+    assert list_cloudflare_records(None, {"x": "y"}, timeout=5, max_retries=1) is None
+
+
+def test_list_cloudflare_records_no_credentials_returns_none() -> None:
+    assert list_cloudflare_records("app.example.com", None, timeout=5, max_retries=1) is None
+
+
+def test_list_cloudflare_records_no_zone_found_returns_none() -> None:
+    with patch("app.catalog_checks._cf_request", return_value={"result": []}):
+        result = list_cloudflare_records("app.example.com", {"x": "y"}, timeout=5, max_retries=1)
+    assert result is None
+
+
+def test_list_cloudflare_records_no_matching_record_returns_none() -> None:
+    # candidate_zone_names("app.example.com") tries "example.com" then
+    # "app.example.com" -- both must resolve to keep this exercising "zone
+    # found, no matching record type" rather than falling through to a
+    # StopIteration the broad exception handling used to mask.
+    with patch(
+        "app.catalog_checks._cf_request",
+        side_effect=[
+            {"result": [{"id": "zone123"}]},
+            {"result": []},
+            {"result": [{"id": "zone456"}]},
+            {"result": []},
+        ],
+    ):
+        result = list_cloudflare_records("app.example.com", {"x": "y"}, timeout=5, max_retries=1)
+    assert result is None
+
+
+def test_list_cloudflare_records_ok() -> None:
+    with patch(
+        "app.catalog_checks._cf_request",
+        side_effect=[
+            {"result": [{"id": "zone123"}]},
+            {"result": [{"type": "A", "content": "203.0.113.10", "ttl": 300, "proxied": False}]},
+        ],
+    ):
+        result = list_cloudflare_records("app.example.com", {"x": "y"}, timeout=5, max_retries=1)
+    assert result == [{"type": "A", "content": "203.0.113.10", "ttl": 300, "proxied": False}]
+
+
+def test_list_cloudflare_records_filters_irrelevant_types() -> None:
+    with patch(
+        "app.catalog_checks._cf_request",
+        side_effect=[
+            {"result": [{"id": "zone123"}]},
+            {
+                "result": [
+                    {"type": "TXT", "content": "v=spf1 -all", "ttl": 300},
+                    {"type": "A", "content": "203.0.113.10", "ttl": 300, "proxied": False},
+                ]
+            },
+        ],
+    ):
+        result = list_cloudflare_records("app.example.com", {"x": "y"}, timeout=5, max_retries=1)
+    assert result == [{"type": "A", "content": "203.0.113.10", "ttl": 300, "proxied": False}]
+
+
+def test_list_cloudflare_records_propagates_api_errors() -> None:
+    # A genuine Cloudflare API error (auth failure, persistent 5xx) must
+    # not be swallowed into None -- that would be indistinguishable from
+    # a real absent record. Callers (app.api.dns_view_routes) catch this
+    # themselves to report a distinct "error" status.
+    with (
+        patch("app.catalog_checks._cf_request", side_effect=_http_error(500, "server error")),
+        pytest.raises(urllib.error.HTTPError),
+    ):
+        list_cloudflare_records("app.example.com", {"x": "y"}, timeout=5, max_retries=1)
 
 
 # --- run_all -------------------------------------------------------------

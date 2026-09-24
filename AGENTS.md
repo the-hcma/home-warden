@@ -459,6 +459,21 @@ small subset of domesti-bot's, so adopt the shape, not its full scale.
   of crashing startup. Existing env-var settings in
   `app/catalog_health_settings.py` are intentionally still env-driven
   until a later migration issue lands.
+- **DNS records view** (`GET /dns/records`, `app/api/dns_view_routes.py`;
+  "DNS records" nav tab, `mountDnsView` in `web/src/main.ts`) — read-only,
+  per #111. Shows, for every catalog service: the local PowerDNS record
+  (#108, read via `app.dns_zones_view.load_zones_yaml` against
+  `PDNS_ZONES_YAML`) for its `upstream.host`, and the external Cloudflare
+  record (#109, via `app.catalog_checks.list_cloudflare_records`) for its
+  `server_name`. Each side reports one of four statuses —
+  `not_applicable` (no host/server_name to check, e.g. a `static`-kind
+  service has no `upstream.host`), `not_configured` (this host has no
+  local `zones.yml` or no Cloudflare credentials at all — #108/#109's own
+  opt-in designs), `missing` (configured, but no matching record found —
+  the same gap #57's health check already flags, shown here as data
+  instead of a pass/fail), or `ok` (records found). Write access
+  (create/update/delete from the UI) is explicitly deferred — this issue
+  is read-only first, matching #69/#70's own incremental landing pattern.
 
 ---
 

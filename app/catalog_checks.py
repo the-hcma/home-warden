@@ -422,6 +422,50 @@ def check_upstream(name: str, service: dict, timeout: float) -> CheckResult:
     return CheckResult(name, "upstream", "ok", f"{url} responded HTTP {code}")
 
 
+def list_cloudflare_records(
+    domain: str | None, cf_headers: dict[str, str] | None, timeout: float, max_retries: int
+) -> list[dict[str, object]] | None:
+    """Read-only: every A/AAAA/CNAME record Cloudflare has for `domain`,
+    across whichever candidate zone actually holds it -- for display
+    (#111), not a pass/fail judgment (check_dns) or a write
+    (sync_dns_record). Returns None when `domain`/`cf_headers` is
+    missing, or no matching zone/record was found at all -- callers
+    distinguish "not configured" from "zone found but empty" themselves
+    using their own inputs, same as check_dns/sync_dns_record do.
+
+    Raises on a genuine Cloudflare API error (an auth/4xx failure, or a
+    5xx/network error after retries are exhausted) instead of swallowing
+    it into None -- an auth failure must not be indistinguishable from a
+    real absent record. Callers that want a single "couldn't tell"
+    result (matching check_dns's own broad-catch precedent) should catch
+    around this call themselves.
+    """
+    if not domain or cf_headers is None:
+        return None
+    for candidate in candidate_zone_names(domain):
+        zone_url = f"{CF_API_BASE}/zones?name={urllib.parse.quote(candidate)}"
+        zone_data = _cf_request(zone_url, cf_headers, timeout, max_retries)
+        zone_results = zone_data.get("result") or []
+        if not zone_results:
+            continue
+        zone_id = zone_results[0]["id"]
+        rec_url = f"{CF_API_BASE}/zones/{zone_id}/dns_records?name={urllib.parse.quote(domain)}"
+        rec_data = _cf_request(rec_url, cf_headers, timeout, max_retries)
+        records = rec_data.get("result") or []
+        relevant = [r for r in records if r.get("type") in ("A", "AAAA", "CNAME")]
+        if relevant:
+            return [
+                {
+                    "type": r.get("type"),
+                    "content": r.get("content"),
+                    "ttl": r.get("ttl"),
+                    "proxied": r.get("proxied", False),
+                }
+                for r in relevant
+            ]
+    return None
+
+
 def run_all(
     catalog: dict,
     *,

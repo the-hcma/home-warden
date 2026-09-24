@@ -8,7 +8,7 @@
 // available (e.g. a packaged checkout).
 declare const __COMMIT_SHA__: string;
 
-type AppView = "about" | "catalog" | "health" | "settings";
+type AppView = "about" | "catalog" | "dns" | "health" | "settings";
 type CatalogAction = "create" | "delete" | "update";
 type ServiceKind = "proxy" | "static";
 type SessionResponse = {
@@ -171,6 +171,34 @@ type HealthGroup = {
 type HealthResponse = {
   checks: HealthCheck[];
   healthy: boolean;
+};
+type DnsRecordEntry = {
+  content: null | string;
+  proxied?: boolean;
+  ttl: null | number;
+  type: string;
+};
+type DnsRecordSetStatus = "error" | "missing" | "not_applicable" | "not_configured" | "ok";
+type DnsRecordSet = {
+  detail: null | string;
+  records: DnsRecordEntry[] | null;
+  status: DnsRecordSetStatus;
+};
+type DnsServiceEntry = {
+  external: DnsRecordSet;
+  local: DnsRecordSet;
+  name: string;
+  server_name: null | string;
+  upstream_host: null | string;
+};
+type DnsRecordsResponse = {
+  services: DnsServiceEntry[];
+};
+type DnsViewState = {
+  data: DnsRecordsResponse | null;
+  error: string | null;
+  loading: boolean;
+  refreshing: boolean;
 };
 
 const appPath = "/";
@@ -1801,6 +1829,207 @@ function mountLoginForm(root: HTMLElement): void {
   }
 }
 
+function mountDnsView(root: HTMLElement): () => void {
+  const state: DnsViewState = {
+    data: null,
+    error: null,
+    loading: true,
+    refreshing: false,
+  };
+  let disposed = false;
+  let requestVersion = 0;
+
+  void refresh("initial");
+  render();
+
+  return () => {
+    disposed = true;
+    root.replaceChildren();
+  };
+
+  async function refresh(source: "initial" | "manual"): Promise<void> {
+    const currentRequest = requestVersion + 1;
+    const hasData = state.data !== null;
+
+    requestVersion = currentRequest;
+    state.error = null;
+    state.loading = !hasData;
+    state.refreshing = hasData;
+    safeRender();
+
+    try {
+      const data = await readDnsRecords();
+      if (disposed || currentRequest !== requestVersion) {
+        return;
+      }
+      state.data = data;
+      state.error = null;
+    } catch (error: unknown) {
+      if (disposed || currentRequest !== requestVersion) {
+        return;
+      }
+      const message = error instanceof Error ? error.message : "Failed to load DNS records";
+      state.error = hasData && source !== "initial" ? `Refresh failed: ${message}` : message;
+    }
+
+    if (disposed || currentRequest !== requestVersion) {
+      return;
+    }
+    state.loading = false;
+    state.refreshing = false;
+    safeRender();
+  }
+
+  function render(): void {
+    const container = document.createElement("div");
+    const controls = document.createElement("div");
+    const heading = document.createElement("h2");
+    const refreshButton = document.createElement("button");
+
+    heading.textContent = "DNS records";
+    controls.append(heading);
+
+    refreshButton.disabled = state.loading || state.refreshing;
+    refreshButton.textContent = state.refreshing ? "Refreshing…" : "Refresh now";
+    refreshButton.type = "button";
+    refreshButton.addEventListener("click", () => {
+      void refresh("manual");
+    });
+    controls.append(refreshButton);
+
+    const note = document.createElement("p");
+    note.classList.add("message");
+    note.textContent =
+      "Local (thehcma/home's zones.yml, #108) and external (Cloudflare, #109) records actually registered for each service -- read-only.";
+    controls.append(note);
+
+    if (state.error) {
+      const errorNode = document.createElement("p");
+      errorNode.classList.add("error-banner");
+      errorNode.textContent = state.data ? `${state.error}. Showing last successful response.` : state.error;
+      controls.append(errorNode);
+    }
+
+    if (state.loading && !state.data) {
+      const loadingNode = document.createElement("p");
+      loadingNode.textContent = "Loading DNS records…";
+      container.append(controls, loadingNode);
+      root.replaceChildren(container);
+      return;
+    }
+
+    if (!state.data) {
+      const emptyNode = document.createElement("p");
+      emptyNode.textContent = "DNS record data is not available yet.";
+      container.append(controls, emptyNode);
+      root.replaceChildren(container);
+      return;
+    }
+
+    container.append(controls, renderDnsTable(state.data));
+    root.replaceChildren(container);
+  }
+
+  function renderDnsTable(data: DnsRecordsResponse): HTMLElement {
+    const services = [...data.services].sort((left, right) => (left.name ?? "").localeCompare(right.name ?? ""));
+
+    if (services.length === 0) {
+      const empty = document.createElement("p");
+      empty.textContent = "No catalog services were returned.";
+      return empty;
+    }
+
+    const table = document.createElement("table");
+    const headerRow = document.createElement("tr");
+
+    styleTable(table);
+    for (const title of ["Service", "Local (upstream.host)", "External (server_name)"]) {
+      const cell = document.createElement("th");
+      cell.textContent = title;
+      styleTableCell(cell, true);
+      headerRow.append(cell);
+    }
+    table.append(headerRow);
+
+    for (const service of services) {
+      const row = document.createElement("tr");
+      const serviceCell = document.createElement("td");
+
+      serviceCell.textContent = service.name;
+      styleTableCell(serviceCell);
+
+      row.append(
+        serviceCell,
+        renderDnsRecordCell(service.local, service.upstream_host),
+        renderDnsRecordCell(service.external, service.server_name),
+      );
+      table.append(row);
+    }
+
+    return table;
+  }
+
+  function renderDnsRecordCell(recordSet: DnsRecordSet, subject: null | string): HTMLTableCellElement {
+    const cell = document.createElement("td");
+    styleTableCell(cell);
+
+    const label = document.createElement("div");
+    label.classList.add("message");
+    label.textContent = subject ?? "(none)";
+    cell.append(label);
+
+    if (recordSet.status === "not_applicable") {
+      const span = document.createElement("span");
+      span.classList.add("badge--skip");
+      span.textContent = "N/A";
+      cell.append(span);
+      return cell;
+    }
+
+    if (recordSet.status === "not_configured") {
+      const span = document.createElement("span");
+      span.classList.add("badge--skip");
+      span.textContent = "Not configured";
+      cell.append(span);
+      return cell;
+    }
+
+    if (recordSet.status === "error") {
+      const span = document.createElement("span");
+      span.classList.add("badge--fail");
+      span.textContent = "Error";
+      span.title = recordSet.detail ?? "";
+      cell.append(span);
+      return cell;
+    }
+
+    if (recordSet.status === "missing" || !recordSet.records || recordSet.records.length === 0) {
+      const span = document.createElement("span");
+      span.classList.add("badge--fail");
+      span.textContent = "Missing";
+      cell.append(span);
+      return cell;
+    }
+
+    const list = document.createElement("ul");
+    for (const record of recordSet.records) {
+      const item = document.createElement("li");
+      const ttlSuffix = record.ttl !== null ? ` (ttl ${record.ttl}s)` : "";
+      const proxiedSuffix = record.proxied ? " (proxied)" : "";
+      item.textContent = `${record.type} ${record.content ?? ""}${ttlSuffix}${proxiedSuffix}`;
+      list.append(item);
+    }
+    cell.append(list);
+    return cell;
+  }
+
+  function safeRender(): void {
+    if (!disposed) {
+      render();
+    }
+  }
+}
+
 function mountPage(root: HTMLElement): void {
   if (window.location.pathname === loginPath) {
     mountLoginForm(root);
@@ -2130,6 +2359,12 @@ async function readCatalogHealth(): Promise<HealthResponse> {
   });
 }
 
+async function readDnsRecords(): Promise<DnsRecordsResponse> {
+  return fetchJson<DnsRecordsResponse>("/dns/records", {
+    method: "GET",
+  });
+}
+
 async function readCatalogService(name: string): Promise<ServiceEntry> {
   const response = await fetchJson<{ service: ServiceEntry }>(`/catalog/services/${encodeURIComponent(name)}`, {
     method: "GET",
@@ -2227,6 +2462,7 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
 
   const aboutButton = document.createElement("button");
   const catalogButton = document.createElement("button");
+  const dnsButton = document.createElement("button");
   const healthButton = document.createElement("button");
   const settingsButton = document.createElement("button");
   const logoutButton = document.createElement("button");
@@ -2249,6 +2485,13 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
   healthButton.type = "button";
   healthButton.addEventListener("click", () => {
     mountView("health");
+    closeMenu();
+  });
+
+  dnsButton.textContent = "DNS records";
+  dnsButton.type = "button";
+  dnsButton.addEventListener("click", () => {
+    mountView("dns");
     closeMenu();
   });
 
@@ -2291,7 +2534,7 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
 
   menuPanel.classList.add("menu-panel");
   menuPanel.hidden = true;
-  menuPanel.append(healthButton, catalogButton, settingsButton, aboutButton);
+  menuPanel.append(healthButton, catalogButton, dnsButton, settingsButton, aboutButton);
 
   menu.classList.add("menu");
   menu.append(menuButton, menuPanel);
@@ -2333,6 +2576,7 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
     activeView = view;
     aboutButton.disabled = activeView === "about";
     catalogButton.disabled = activeView === "catalog";
+    dnsButton.disabled = activeView === "dns";
     healthButton.disabled = activeView === "health";
     settingsButton.disabled = activeView === "settings";
     unmountCurrentView =
@@ -2342,7 +2586,9 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
           ? mountAboutPanel(shell, username)
           : activeView === "settings"
             ? mountSettingsPanel(shell)
-            : mountHealthDashboard(shell);
+            : activeView === "dns"
+              ? mountDnsView(shell)
+              : mountHealthDashboard(shell);
   }
 }
 
