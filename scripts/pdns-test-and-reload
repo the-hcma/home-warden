@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Fail-closed: dns-zones-yaml-check syntax gate, then pdns_control reload.
+# Used by home-warden-pdns-reload.service (systemd path unit) -- mirrors
+# scripts/nginx-test-and-reload's pattern for the pdns side.
+#
+# Env:
+#   PDNS_ZONES_YAML  path to thehcma/home's dns/zones.yml (required unless
+#                    default resolves)
+#   PDNS_SERVICE     systemd unit name for the distro pdns-server package
+#                    (default: pdns.service -- the *package* is
+#                    pdns-server, but the *unit* Debian/Ubuntu installs is
+#                    just "pdns")
+#
+# Exit:
+#   0 — syntax OK and reload succeeded (or service inactive: skip reload)
+#   1 — pdns_control reload failed
+#   2 — usage / missing file / syntax check failed
+#
+# Note: this calls `pdns_control reload`, not `systemctl reload
+# "${pdns_service}"` -- the distro-packaged pdns.service does not
+# implement systemd's reload verb ("Job type reload is not applicable for
+# unit pdns.service" on a stock Debian/Ubuntu install), and pdns_control
+# reload is PowerDNS's own documented mechanism for picking up
+# GeoIP-backend YAML changes without a full restart.
+#
+# Logging: write to stdout/stderr only. When run from
+# home-warden-pdns-reload.service, systemd appends those streams to
+# ~/scratch/home-warden/pdns-test-and-reload.log.
+#
+# Refuses to run anywhere but the host pinned by
+# `scripts/setup-service --confirm-host` (see scripts/lib/host-guard).
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly script_dir
+repo_dir="$(cd "${script_dir}/.." && pwd)"
+readonly repo_dir
+
+# shellcheck source=scripts/lib/host-guard
+source "${script_dir}/lib/host-guard"
+if ! hw_host_guard_enforce "pdns-test-and-reload"; then
+  exit 1
+fi
+
+pdns_zones_yaml="${PDNS_ZONES_YAML:-}"
+readonly pdns_zones_yaml
+pdns_service="${PDNS_SERVICE:-pdns.service}"
+readonly pdns_service
+
+log() {
+  local -r msg=$1
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '%s %s\n' "${ts}" "${msg}"
+}
+
+if [[ -z "${pdns_zones_yaml}" ]]; then
+  log "ERROR: set PDNS_ZONES_YAML"
+  exit 2
+fi
+
+if [[ ! -f "${pdns_zones_yaml}" ]]; then
+  log "ERROR: zones file not found: ${pdns_zones_yaml}"
+  exit 2
+fi
+
+log "dns-zones-yaml-check ${pdns_zones_yaml}"
+if ! (cd "${repo_dir}" && uv run dns-zones-yaml-check "${pdns_zones_yaml}"); then
+  log "FAIL: zones.yml syntax check failed — refusing reload"
+  exit 2
+fi
+log "syntax OK"
+
+if ! systemctl is-active --quiet "${pdns_service}" 2>/dev/null; then
+  log "${pdns_service} not active — skip reload"
+  exit 0
+fi
+
+log "pdns_control reload"
+if pdns_control reload; then
+  log "reload OK"
+else
+  log "FAIL: pdns_control reload failed"
+  exit 1
+fi

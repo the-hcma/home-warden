@@ -4,9 +4,19 @@ Converts `thehcma/home`'s tinydns-format `dns/data` into the PowerDNS
 GeoIP-backend `zones.yml` + a matching `pdns.conf`, per
 [the-hcma/home-warden#108](https://github.com/the-hcma/home-warden/issues/108)
 (relocating the design from `thehcma/home#16`, a private repo). This doc
-covers the converter itself; running `pdns-server`/`pdns-recursor` as
-systemd units under a dedicated account lands as a follow-up once #108's
-own systemd-wiring half is scoped (see that issue for the current split).
+also covers installing `pdns-server`/`pdns-recursor` and the reload-on-edit
+wiring.
+
+**Dedicated account: already handled.** Debian/Ubuntu's `pdns-server`
+package creates its own system account (`pdns`) via `adduser` in its
+postinst script and runs `pdns.service` as that account by default (the
+recursor runs as the same `pdns` user on Debian-likes too) — home-warden
+does not need to author a privilege-separation unit the way it did for
+nginx (whose socket-activation trick exists specifically to bind
+privileged ports without running nginx as root; the distro's own pdns
+packaging already solves the equivalent problem). See
+[#43](https://github.com/the-hcma/home-warden/issues/43) for the same
+question, still open, on nginx's own account.
 
 ## What it does
 
@@ -75,3 +85,80 @@ the sqlite-backend check above to catch record-level mistakes.
 
 Known, deliberate non-goals (per `thehcma/home#16`): geo-routing/MaxMind,
 DNSSEC, any tinydns line type not in the table above.
+
+## Packages (Ubuntu/Debian)
+
+```bash
+sudo apt-get install pdns-server pdns-backend-geoip pdns-recursor
+```
+
+No MaxMind/GeoLite database is needed — `render_pdns_conf` emits
+`geoip-database-files=` empty, and this repo's design deliberately never
+uses geo expansions (plain `records:` only). `dns/recursor.conf` (in
+`thehcma/home`) stays hand-maintained and unchanged; it already forwards
+these zones' queries to loopback:853.
+
+## Install and reload-on-edit wiring
+
+The reload units (`etc/systemd/home-warden-pdns-reload.path`/`.service`)
+are **not yet wired into `scripts/setup-service`'s automatic install
+flow** — that integration is its own small, separate follow-up once an
+operator is actually deploying this on the real host (see
+[#108](https://github.com/the-hcma/home-warden/issues/108)). Install them
+manually for now, expanding the same `@@PLACEHOLDER@@`s
+`scripts/setup-service` uses elsewhere:
+
+```bash
+sudo sed \
+  -e "s|@@PDNS_ZONES_YAML@@|/path/to/thehcma/home/dns/zones.yml|g" \
+  -e "s|@@PDNS_ZONES_YAML_DIR@@|/path/to/thehcma/home/dns|g" \
+  etc/systemd/home-warden-pdns-reload.path \
+  | sudo tee /etc/systemd/system/home-warden-pdns-reload.path >/dev/null
+
+sudo sed \
+  -e "s|@@HOME_DIR@@|${HOME}|g" \
+  -e "s|@@PDNS_ZONES_YAML@@|/path/to/thehcma/home/dns/zones.yml|g" \
+  -e "s|@@REPO_DIR@@|$(pwd)|g" \
+  -e "s|@@SCRATCH_DIR@@|${HOME}/scratch/home-warden|g" \
+  etc/systemd/home-warden-pdns-reload.service \
+  | sudo tee /etc/systemd/system/home-warden-pdns-reload.service >/dev/null
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now home-warden-pdns-reload.path
+```
+
+From then on, editing `zones.yml` triggers
+`scripts/pdns-test-and-reload`: a lightweight, offline
+`dns-zones-yaml-check` syntax/shape gate (see that script and
+`app.dns_tinydns_convert.validate_zones_yaml_syntax` — it catches a typo
+or a renamed key, not a deeper semantic mistake like the list-vs-dict
+records shape bug this repo's own CI once caught), then
+[`pdns_control reload`](https://doc.powerdns.com/authoritative/backends/geoip.html)
+— the documented way to make the GeoIP backend pick up a rewritten YAML
+file without a full restart. Note this calls `pdns_control reload`
+directly, **not** `systemctl reload pdns.service` — the distro-packaged
+unit doesn't implement systemd's reload verb at all ("Job type reload is
+not applicable for unit pdns.service").
+
+Logs: `~/scratch/home-warden/pdns-test-and-reload.log`.
+
+## Spot-checking a live install
+
+```bash
+dig @127.0.0.1 -p 853 <name>.<your-zone> A      # loopback auth server directly
+dig @<lan-ip> <name>.<your-zone> A              # via the recursor, the real path
+dig @127.0.0.1 -p 853 <ptr-name>.in-addr.arpa PTR
+dig @127.0.0.1 -p 853 _kerberos.<your-zone> TXT
+dig @127.0.0.1 -p 853 _ldap._tcp.<your-zone> SRV
+```
+
+Substitute the real internal zone name(s) from `thehcma/home` (private
+repo) — deliberately not written out here, per
+`.cursor/rules/no-private-infra.mdc`.
+
+## Dropping the tinydns backend after cutover
+
+Once the GeoIP backend has been running cleanly for a while, `pdns-backend-tinydns`
+/ `tinydns-data` can be removed from the host — keep them installed until
+that's actually confirmed, per `thehcma/home#16`'s own acceptance
+criteria.

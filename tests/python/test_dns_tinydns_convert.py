@@ -8,6 +8,8 @@ real thehcma/home data, per .cursor/rules/no-private-infra.mdc.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import yaml
 
 from app.dns_tinydns_convert import (
@@ -17,6 +19,7 @@ from app.dns_tinydns_convert import (
     bucket_into_zones,
     parse_tinydns_data,
     render_zones_yaml,
+    validate_zones_yaml_syntax,
     zone_apexes_from_records,
 )
 
@@ -478,3 +481,90 @@ def test_end_to_end_conversion() -> None:
     reverse = domains_by_name["113.0.203.in-addr.arpa"]["records"]
     assert reverse["2.113.0.203.in-addr.arpa"] == [{"ptr": {"content": "app.example.com.", "ttl": 60}}]
     assert {"ns": "ns1.example.com."} in reverse["113.0.203.in-addr.arpa"]
+
+
+# --- validate_zones_yaml_syntax ---------------------------------------------
+
+
+def test_validate_zones_yaml_syntax_accepts_well_formed_file(tmp_path: Path) -> None:
+    path = tmp_path / "zones.yml"
+    path.write_text("domains:\n  - domain: example.com\n    ttl: 3600\n    records:\n      example.com: []\n")
+    validate_zones_yaml_syntax(path)  # must not raise
+
+
+def test_validate_zones_yaml_syntax_missing_file_raises(tmp_path: Path) -> None:
+    try:
+        validate_zones_yaml_syntax(tmp_path / "missing.yml")
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "missing file" in str(e)
+
+
+def test_validate_zones_yaml_syntax_invalid_yaml_raises(tmp_path: Path) -> None:
+    path = tmp_path / "zones.yml"
+    path.write_text("not: [valid, {")
+    try:
+        validate_zones_yaml_syntax(path)
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "invalid YAML" in str(e)
+
+
+def test_validate_zones_yaml_syntax_non_mapping_top_level_raises(tmp_path: Path) -> None:
+    path = tmp_path / "zones.yml"
+    path.write_text("- just\n- a\n- list\n")
+    try:
+        validate_zones_yaml_syntax(path)
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "top-level YAML must be a mapping" in str(e)
+
+
+def test_validate_zones_yaml_syntax_missing_domains_key_raises(tmp_path: Path) -> None:
+    path = tmp_path / "zones.yml"
+    path.write_text("something_else: true\n")
+    try:
+        validate_zones_yaml_syntax(path)
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "missing or empty top-level 'domains' list" in str(e)
+
+
+def test_validate_zones_yaml_syntax_empty_domains_list_raises(tmp_path: Path) -> None:
+    path = tmp_path / "zones.yml"
+    path.write_text("domains: []\n")
+    try:
+        validate_zones_yaml_syntax(path)
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "missing or empty top-level 'domains' list" in str(e)
+
+
+def test_validate_zones_yaml_syntax_non_mapping_domain_entry_raises(tmp_path: Path) -> None:
+    path = tmp_path / "zones.yml"
+    path.write_text("domains:\n  - just a string\n")
+    try:
+        validate_zones_yaml_syntax(path)
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "domains[0] must be a mapping" in str(e)
+
+
+def test_validate_zones_yaml_syntax_missing_required_key_raises(tmp_path: Path) -> None:
+    path = tmp_path / "zones.yml"
+    path.write_text("domains:\n  - domain: example.com\n    ttl: 3600\n")
+    try:
+        validate_zones_yaml_syntax(path)
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "missing required key 'records'" in str(e)
+
+
+def test_validate_zones_yaml_syntax_non_mapping_records_raises(tmp_path: Path) -> None:
+    path = tmp_path / "zones.yml"
+    path.write_text("domains:\n  - domain: example.com\n    ttl: 3600\n    records: not-a-mapping\n")
+    try:
+        validate_zones_yaml_syntax(path)
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "domains[0].records must be a mapping" in str(e)

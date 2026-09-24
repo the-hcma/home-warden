@@ -17,6 +17,7 @@ live API).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 GENERIC_SRV_TYPE = "33"
 
@@ -182,6 +183,47 @@ def render_zones_yaml(zones: dict[str, Zone]) -> str:
         "# forward, per #108); only the initial migration ran the converter.\n"
     )
     return header + yaml.safe_dump({"domains": domains}, sort_keys=False, default_flow_style=False)
+
+
+def validate_zones_yaml_syntax(path: Path) -> None:
+    """Lightweight, offline check that `path` is well-formed GeoIP-backend
+    YAML: valid YAML, a top-level mapping with a non-empty `domains` list,
+    each entry a mapping carrying `domain`/`ttl`/`records`. Raises
+    ValueError describing the first problem found.
+
+    This is deliberately *not* the real acceptance test -- it catches a
+    hand-edit typo/shape mistake (a missing colon, a renamed key) before
+    `pdns_control reload` ever sees it, but cannot catch a deeper semantic
+    mistake the way spinning up a real pdns_server does (the list-vs-dict
+    records shape bug this module shipped with initially, for instance,
+    was syntactically valid YAML). For that, see
+    app.dns_zone_validate.validate_via_sqlite_backend (local dev/CI) or
+    .github/ci/dns-catalog-validate (the real GeoIP-backend acceptance
+    test) -- this function is the fast, always-available gate
+    scripts/pdns-test-and-reload runs before every live reload, not a
+    replacement for either.
+    """
+    import yaml
+
+    if not path.is_file():
+        raise ValueError(f"missing file: {path}")
+    try:
+        data = yaml.safe_load(path.read_text())
+    except yaml.YAMLError as e:
+        raise ValueError(f"invalid YAML in {path}: {e}") from e
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: top-level YAML must be a mapping, got {type(data).__name__}")
+    domains = data.get("domains")
+    if not isinstance(domains, list) or not domains:
+        raise ValueError(f"{path}: missing or empty top-level 'domains' list")
+    for i, entry in enumerate(domains):
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path}: domains[{i}] must be a mapping, got {type(entry).__name__}")
+        for key in ("domain", "ttl", "records"):
+            if key not in entry:
+                raise ValueError(f"{path}: domains[{i}] missing required key {key!r}")
+        if not isinstance(entry["records"], dict):
+            raise ValueError(f"{path}: domains[{i}].records must be a mapping")
 
 
 def zone_apexes_from_records(records: list[ParsedRecord]) -> list[str]:

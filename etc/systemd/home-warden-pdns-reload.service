@@ -1,0 +1,27 @@
+# Oneshot: zones.yml syntax check then pdns_control reload.
+# Template: etc/systemd/home-warden-pdns-reload.service — same
+# @@PLACEHOLDER@@ convention as this repo's other unit templates, but not
+# yet wired into scripts/setup-service's automatic install flow -- see
+# docs/dns-tinydns-migration.md for the current manual install steps.
+# No [Install] — activated only by home-warden-pdns-reload.path.
+
+[Unit]
+Description=home-warden pdns zones.yml check and reload (oneshot)
+Documentation=https://github.com/the-hcma/home-warden/blob/main/docs/dns-tinydns-migration.md
+
+[Service]
+Type=oneshot
+# Needs root for pdns_control (talks to a control socket owned by the
+# pdns system account the distro pdns-server package already creates) /
+# systemctl is-active. No User=, so %h isn't the operator's home — HOME
+# must be set explicitly so scripts/lib/host-guard (sourced by
+# scripts/pdns-test-and-reload) can find the pin under the operator's
+# ~/.config, not /root/.config.
+Environment=HOME=@@HOME_DIR@@
+Environment=PDNS_ZONES_YAML=@@PDNS_ZONES_YAML@@
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+WorkingDirectory=@@REPO_DIR@@
+ExecStart=@@REPO_DIR@@/scripts/pdns-test-and-reload
+TimeoutStartSec=2min
+StandardOutput=append:@@SCRATCH_DIR@@/pdns-test-and-reload.log
+StandardError=append:@@SCRATCH_DIR@@/pdns-test-and-reload.log
