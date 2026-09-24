@@ -434,19 +434,25 @@ def run_all(
 ) -> list[CheckResult]:
     """Run the requested dimensions for every service in the catalog.
 
-    Validates `timeout`/`alert_days` here -- the one choke point both the
-    CLI and the route funnel through -- rather than downstream in each
-    check: a non-positive timeout reaches `socket.settimeout()` as an
-    uncaught `ValueError` (not an `OSError`, so check_upstream's own catch
-    doesn't see it), and a negative alert_days would silently make the
-    expiry comparison pass for a cert that's already expired. Raising here
-    keeps both consumers' existing exit-2/HTTP-500 config-error contract
-    intact instead of an escaping exception or a silent false-healthy.
+    Validates `timeout`/`alert_days`/`local_dns_port` here -- the one
+    choke point both the CLI and the route funnel through -- rather than
+    downstream in each check: a non-positive timeout reaches
+    `socket.settimeout()` as an uncaught `ValueError` (not an `OSError`,
+    so check_upstream's own catch doesn't see it), a negative alert_days
+    would silently make the expiry comparison pass for a cert that's
+    already expired, and an out-of-range local_dns_port makes `dig`
+    unreachable, which check_local_dns already treats as an
+    environment-limitation "skip" -- an invalid port must not quietly
+    degrade the local_dns dimension to unverified. Raising here keeps
+    both consumers' existing exit-2/HTTP-500 config-error contract intact
+    instead of an escaping exception or a silent false-healthy.
     """
     if timeout <= 0:
         raise ValueError(f"timeout must be positive, got {timeout}")
     if alert_days < 0:
         raise ValueError(f"alert_days must be non-negative, got {alert_days}")
+    if not (1 <= local_dns_port <= 65535):
+        raise ValueError(f"local_dns_port must be between 1 and 65535, got {local_dns_port}")
 
     results: list[CheckResult] = []
     for service in catalog.get("services") or []:

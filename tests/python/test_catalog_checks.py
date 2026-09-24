@@ -830,6 +830,22 @@ def test_run_all_rejects_negative_alert_days() -> None:
         )
 
 
+def test_run_all_rejects_out_of_range_local_dns_port() -> None:
+    # An invalid port makes dig unreachable, which check_local_dns treats
+    # as an environment-limitation "skip" -- must not silently degrade
+    # the whole dimension to unverified instead of a loud config error.
+    with pytest.raises(ValueError, match="local_dns_port must be between 1 and 65535"):
+        run_all(
+            {},
+            certs_live_dir=Path("/nonexistent"),
+            alert_days=10,
+            cf_headers=None,
+            local_dns_port=0,
+            timeout=5,
+            max_retries=1,
+        )
+
+
 # --- sync_dns_record -------------------------------------------------------
 
 

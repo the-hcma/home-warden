@@ -54,6 +54,16 @@ def test_cli_non_positive_timeout_exits_2(monkeypatch, capsys) -> None:
     assert "--timeout" in capsys.readouterr().err
 
 
+def test_cli_out_of_range_local_dns_port_exits_2(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["catalog-register", "--service", "svc", "--target", "203.0.113.10", "--local-dns-port", "0"],
+    )
+    assert main() == 2
+    assert "--local-dns-port" in capsys.readouterr().err
+
+
 def test_cli_host_guard_refused(monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", ["catalog-register", "--service", "svc", "--target", "203.0.113.10"])
     monkeypatch.setattr("app.catalog_register_cli.enforce_host_guard", lambda caller: False)
