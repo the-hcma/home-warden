@@ -101,6 +101,35 @@ def test_validate_via_sqlite_backend_missing_schema_raises(tmp_path: Path) -> No
             validate_via_sqlite_backend(zones, workdir=tmp_path)
 
 
+def test_validate_via_sqlite_backend_detects_ttl_mismatch(tmp_path: Path) -> None:
+    # Fully mocked -- no real pdns_server needed -- so this branch has a
+    # test that can actually fail it, unlike the @requires_real_pdns
+    # "no mismatches" test, which only ever exercises the agreeing case
+    # (and is skipped entirely wherever PowerDNS isn't installed, this
+    # repo's own pytest CI job included).
+    zones = {
+        "example.com": Zone(
+            apex="example.com",
+            ttl=3600,
+            records={"app.example.com": {"a": [RecordValue("203.0.113.10", ttl=60)]}},
+        )
+    }
+    fake_proc = MagicMock()
+    with (
+        patch("shutil.which", return_value="/usr/bin/fake"),
+        patch("app.dns_zone_validate._find_sqlite_schema", return_value=tmp_path / "schema.sql"),
+        patch("app.dns_zone_validate._read_schema_sql", return_value=b"-- schema --"),
+        patch("app.dns_zone_validate.subprocess.run"),
+        patch("app.dns_zone_validate._start_server_with_retry", return_value=(fake_proc, 12345)),
+        # Content matches, but the served ttl is the zone default (3600)
+        # rather than this record's own explicit ttl (60).
+        patch("app.dns_zone_validate._dig_with_ttl", return_value=[("203.0.113.10", 3600)]),
+    ):
+        mismatches = validate_via_sqlite_backend(zones, workdir=tmp_path)
+    assert len(mismatches) == 1
+    assert "expected ttl(s)" in mismatches[0]
+
+
 # --- _read_schema_sql --------------------------------------------------------
 
 

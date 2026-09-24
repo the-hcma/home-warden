@@ -90,7 +90,11 @@ def validate_via_sqlite_backend(
     conf_path.write_text(
         "launch=gsqlite3\n"
         f"gsqlite3-database={db_path}\n"
-        "local-address=127.0.0.1\n"
+        # Both loopback addresses in the one directive PowerDNS actually
+        # has -- an IPv4-only value leaves local-ipv6 at PowerDNS's own
+        # default of `::` (every interface), same fix and same reasoning
+        # as dns_tinydns_convert.render_pdns_conf.
+        "local-address=127.0.0.1, ::1\n"
         "disable-axfr=yes\n"
         # Relative, with cwd=workdir on the server Popen call below --
         # not the absolute workdir path, which can exceed a UNIX domain
