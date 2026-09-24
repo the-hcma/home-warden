@@ -21,17 +21,21 @@ cat >"${stub_bin}/systemctl" <<'STUB'
 case "$1" in
   show)
     case "$*" in
-      *--value*)
+      *--property=LoadState*--value*)
         echo "${STUB_SYSTEMCTL_LOAD_STATE:-loaded}"
+        exit 0
         ;;
       *--property=LoadState*)
         echo "LoadState=${STUB_SYSTEMCTL_LOAD_STATE:-loaded}"
+        exit 0
         ;;
       *)
+        # Wrong/missing property (or --value without --property=LoadState)
+        # -- fail loudly rather than guess, so a regressed invocation is
+        # caught instead of silently getting a plausible-looking answer.
         exit 1
         ;;
     esac
-    exit 0
     ;;
   is-active)
     exit "${STUB_SYSTEMCTL_ACTIVE_EXIT:-0}"
@@ -111,5 +115,13 @@ PDNS_ZONES_YAML="${well_formed}" PDNS_SERVICE=pdns-server.service STUB_SYSTEMCTL
   STUB_SYSTEMCTL_ACTIVE_EXIT=3 \
   run_case "unknown PDNS_SERVICE unit" 2 "${repo_dir}/scripts/pdns-test-and-reload"
 assert_sentinel "unknown PDNS_SERVICE unit" 0
+
+# Case 5: well-formed zones.yml, service active, but `pdns_control reload`
+# itself fails -- the script's documented exit 1 ("pdns_control reload
+# failed"), not a silently-swallowed success.
+PDNS_ZONES_YAML="${well_formed}" STUB_SYSTEMCTL_LOAD_STATE=loaded STUB_SYSTEMCTL_ACTIVE_EXIT=0 \
+  STUB_PDNS_CONTROL_EXIT=1 \
+  run_case "pdns_control reload fails" 1 "${repo_dir}/scripts/pdns-test-and-reload"
+assert_sentinel "pdns_control reload fails" 1
 
 exit "${fail}"
