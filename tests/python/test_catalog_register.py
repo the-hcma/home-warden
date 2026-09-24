@@ -47,6 +47,7 @@ def _base_kwargs(**overrides) -> dict:
     kwargs = {
         "dns_target": "203.0.113.10",
         "cf_headers": {"Authorization": "Bearer x"},
+        "cloudflare_credentials": Path("/nonexistent/cloudflare.ini"),
         "certbot_domains_file": Path("/nonexistent/certbot-domains"),
         "cert_renewer": Path("/nonexistent/cert-renewer"),
         "services_json_path": Path("/nonexistent/services.json"),
@@ -212,6 +213,7 @@ def test_register_service_apply_appends_domain_only_when_not_already_listed() ->
 def test_register_service_apply_wires_dry_run_and_appends_missing_domain() -> None:
     completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
     certbot_domains_file = Path("/nonexistent/certbot-domains")
+    cloudflare_credentials = Path("/nonexistent/cloudflare.ini")
     with (
         patch("app.catalog_register.get_service", return_value=CATALOG["services"][0]),
         patch("app.catalog_register.check_local_dns", return_value=LOCAL_DNS_OK),
@@ -219,18 +221,55 @@ def test_register_service_apply_wires_dry_run_and_appends_missing_domain() -> No
         patch(
             "app.catalog_register.sync_dns_record", return_value=SyncResult("svc", "created", "created")
         ) as mock_sync,
-        patch("app.catalog_register._read_domains", return_value=set()),
+        # First call (pre-append check) sees no domains; second (post-run
+        # verification, after cert-renewer "ran") sees the appended one --
+        # a fixed return_value would either always fail the post-check or
+        # never exercise it.
+        patch("app.catalog_register._read_domains", side_effect=[set(), {"app.example.com"}]),
         patch("app.catalog_register._append_domain") as mock_append,
         patch("subprocess.run", return_value=completed) as mock_run,
         patch("app.catalog_register.render_preview", return_value=OK_PREVIEW),
     ):
-        register_service(
-            "svc", CATALOG, **_base_kwargs(apply=True, proxied=True, certbot_domains_file=certbot_domains_file)
+        results = register_service(
+            "svc",
+            CATALOG,
+            **_base_kwargs(
+                apply=True,
+                proxied=True,
+                certbot_domains_file=certbot_domains_file,
+                cloudflare_credentials=cloudflare_credentials,
+            ),
         )
     assert mock_sync.call_args.kwargs["dry_run"] is False
     assert mock_sync.call_args.kwargs["proxied"] is True
     mock_append.assert_called_once_with(certbot_domains_file, "app.example.com")
     assert mock_run.call_args.kwargs["env"]["CERTBOT_DOMAINS_FILE"] == str(certbot_domains_file)
+    assert mock_run.call_args.kwargs["env"]["CLOUDFLARE_CREDENTIALS"] == str(cloudflare_credentials)
+    cert_result = next(r for r in results if r.step == "cert")
+    assert cert_result.status == "applied"
+
+
+def test_register_service_cert_reports_failed_when_domain_lost_after_run() -> None:
+    # scripts/link-runtime-conf (called internally by cert-renewer) can
+    # replace certbot_domains_file with a symlink to a different file in
+    # a linked worktree, discarding the append -- a 0 exit code alone
+    # must not be trusted as proof the domain reached certbot.
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+    with (
+        patch("app.catalog_register.get_service", return_value=CATALOG["services"][0]),
+        patch("app.catalog_register.check_local_dns", return_value=LOCAL_DNS_OK),
+        patch("app.catalog_register.check_upstream", return_value=UPSTREAM_OK),
+        patch("app.catalog_register.sync_dns_record", return_value=SyncResult("svc", "created", "created")),
+        patch("app.catalog_register._read_domains", side_effect=[set(), set()]),
+        patch("app.catalog_register._append_domain"),
+        patch("subprocess.run", return_value=completed),
+        patch("app.catalog_register.render_preview") as mock_render,
+    ):
+        results = register_service("svc", CATALOG, **_base_kwargs(apply=True))
+    mock_render.assert_not_called()
+    cert_result = next(r for r in results if r.step == "cert")
+    assert cert_result.status == "failed"
+    assert "missing from" in cert_result.detail
 
 
 def test_register_service_nginx_validation_failure_is_reported() -> None:

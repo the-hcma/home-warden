@@ -52,6 +52,7 @@ def register_service(
     *,
     dns_target: str,
     cf_headers: dict[str, str] | None,
+    cloudflare_credentials: Path,
     certbot_domains_file: Path,
     cert_renewer: Path,
     services_json_path: Path,
@@ -89,7 +90,14 @@ def register_service(
     if external_dns.status == "failed":
         return results
 
-    cert = _ensure_cert(service, certbot_domains_file, cert_renewer, apply=apply, cert_timeout=cert_timeout)
+    cert = _ensure_cert(
+        service,
+        certbot_domains_file,
+        cert_renewer,
+        cloudflare_credentials=cloudflare_credentials,
+        apply=apply,
+        cert_timeout=cert_timeout,
+    )
     results.append(cert)
     if cert.status == "failed":
         return results
@@ -117,7 +125,13 @@ def _append_domain(path: Path, domain: str) -> None:
 
 
 def _ensure_cert(
-    service: dict, certbot_domains_file: Path, cert_renewer: Path, *, apply: bool, cert_timeout: float
+    service: dict,
+    certbot_domains_file: Path,
+    cert_renewer: Path,
+    *,
+    cloudflare_credentials: Path,
+    apply: bool,
+    cert_timeout: float,
 ) -> RegisterStepResult:
     domain = service.get("server_name")
     if not domain:
@@ -139,11 +153,16 @@ def _ensure_cert(
             text=True,
             timeout=cert_timeout,
             check=False,
-            # Without this, an explicit --certbot-domains-file diverging
-            # from cert-renewer's own default/env resolution means the
-            # domain this step just appended is never the one
-            # cert-renewer actually reads -- see #110 review.
-            env={**os.environ, "CERTBOT_DOMAINS_FILE": str(certbot_domains_file)},
+            # Without these, an explicit --certbot-domains-file/
+            # --cloudflare-credentials diverging from cert-renewer's own
+            # default/env resolution means the domain this step just
+            # appended, or the credentials this CLI was given, are not
+            # what cert-renewer actually uses -- see #110 review.
+            env={
+                **os.environ,
+                "CERTBOT_DOMAINS_FILE": str(certbot_domains_file),
+                "CLOUDFLARE_CREDENTIALS": str(cloudflare_credentials),
+            },
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         return RegisterStepResult("cert", "failed", f"{cert_renewer} failed to run: {e}")
@@ -151,6 +170,19 @@ def _ensure_cert(
     if proc.returncode != 0:
         output = "\n".join(part for part in (proc.stdout.strip(), proc.stderr.strip()) if part)
         return RegisterStepResult("cert", "failed", f"cert-renewer failed (exit {proc.returncode}): {output}")
+
+    # cert-renewer runs scripts/link-runtime-conf internally, which -- in
+    # a linked worktree -- replaces certbot_domains_file with a symlink
+    # to the primary clone's copy whenever it finds a regular file at
+    # that path, discarding the append above. A 0 exit code alone doesn't
+    # prove *this* domain reached certbot; verify it survived.
+    if domain not in _read_domains(certbot_domains_file):
+        return RegisterStepResult(
+            "cert",
+            "failed",
+            f"{domain} missing from {certbot_domains_file} after cert-renewer ran "
+            "(a linked worktree's scripts/link-runtime-conf may have replaced it with a symlink to a different file)",
+        )
     return RegisterStepResult("cert", "applied", f"cert-renewer completed for {domain}")
 
 

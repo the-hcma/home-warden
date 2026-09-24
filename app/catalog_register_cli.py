@@ -103,6 +103,7 @@ def main() -> int:
         catalog,
         dns_target=args.target,
         cf_headers=cf_headers,
+        cloudflare_credentials=args.cloudflare_credentials,
         certbot_domains_file=args.certbot_domains_file,
         cert_renewer=args.cert_renewer,
         services_json_path=args.services_json,

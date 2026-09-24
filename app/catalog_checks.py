@@ -357,8 +357,12 @@ def check_local_dns(name: str, service: dict, *, local_dns_port: int, timeout: f
     if not zone_found:
         return CheckResult(name, "local_dns", "skip", f"{host} is not served by the local PowerDNS zone")
 
-    a_answers = _resolve_via_authoritative_ns(host, "A", "127.0.0.1", timeout, port=local_dns_port) or []
-    aaaa_answers = _resolve_via_authoritative_ns(host, "AAAA", "127.0.0.1", timeout, port=local_dns_port) or []
+    a_answers = _resolve_via_authoritative_ns(host, "A", "127.0.0.1", timeout, port=local_dns_port)
+    if a_answers is None:
+        return CheckResult(name, "local_dns", "skip", "no local PowerDNS reachable on this host to verify against")
+    aaaa_answers = _resolve_via_authoritative_ns(host, "AAAA", "127.0.0.1", timeout, port=local_dns_port)
+    if aaaa_answers is None:
+        return CheckResult(name, "local_dns", "skip", "no local PowerDNS reachable on this host to verify against")
     answers = a_answers + aaaa_answers
     if not answers:
         return CheckResult(

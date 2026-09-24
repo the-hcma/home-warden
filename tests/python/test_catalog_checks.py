@@ -713,6 +713,29 @@ def test_check_local_dns_no_record_is_fail() -> None:
     assert "no local A/AAAA record" in result.detail
 
 
+def test_check_local_dns_a_query_none_is_skip_not_fail() -> None:
+    # SOA succeeds (zone found) but the A query itself can't be verified
+    # (e.g. the local server reloaded/restarted between probes) -- must
+    # not be coerced into "record missing" the way `or []` would.
+    service = {"kind": "proxy", "upstream": {"host": "backend.internal", "port": 8080}}
+    with patch(
+        "app.catalog_checks._resolve_via_authoritative_ns",
+        side_effect=[["ns1.backend.internal."], None],
+    ):
+        result = check_local_dns("svc", service, local_dns_port=853, timeout=5)
+    assert result.status == "skip"
+
+
+def test_check_local_dns_aaaa_query_none_is_skip_not_fail() -> None:
+    service = {"kind": "proxy", "upstream": {"host": "backend.internal", "port": 8080}}
+    with patch(
+        "app.catalog_checks._resolve_via_authoritative_ns",
+        side_effect=[["ns1.backend.internal."], [], None],
+    ):
+        result = check_local_dns("svc", service, local_dns_port=853, timeout=5)
+    assert result.status == "skip"
+
+
 def test_check_local_dns_ok() -> None:
     service = {"kind": "proxy", "upstream": {"host": "backend.internal", "port": 8080}}
     with patch(
