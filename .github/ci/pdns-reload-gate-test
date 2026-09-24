@@ -20,7 +20,17 @@ cat >"${stub_bin}/systemctl" <<'STUB'
 #!/usr/bin/env bash
 case "$1" in
   show)
-    echo "${STUB_SYSTEMCTL_LOAD_STATE:-loaded}"
+    case "$*" in
+      *--value*)
+        echo "${STUB_SYSTEMCTL_LOAD_STATE:-loaded}"
+        ;;
+      *--property=LoadState*)
+        echo "LoadState=${STUB_SYSTEMCTL_LOAD_STATE:-loaded}"
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
     exit 0
     ;;
   is-active)
