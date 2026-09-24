@@ -2,8 +2,6 @@ version = 1
 revision = 3
 requires-python = ">=3.12"
 
-[options]
-
 [[package]]
 name = "annotated-doc"
 version = "0.0.5"
@@ -405,6 +403,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "itsdangerous" },
     { name = "python-pam" },
+    { name = "pyyaml" },
     { name = "six" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -427,6 +426,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
     { name = "python-pam", specifier = ">=2.0.2" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "six", specifier = ">=1.17.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.4" },
 ]

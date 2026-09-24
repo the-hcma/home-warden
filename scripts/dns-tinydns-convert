@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# One-off conversion of tinydns-format zone data into PowerDNS GeoIP-backend
+# zones.yml + pdns.conf. Thin wrapper around the app.dns_tinydns_convert_cli
+# console script -- see that module's docstring for usage/exit codes.
+# See the-hcma/home-warden#108.
+#
+# Usage:
+#   ./scripts/dns-tinydns-convert path/to/dns/data
+#   ./scripts/dns-tinydns-convert path/to/dns/data --outdir /stash/dns
+
+set -euo pipefail
+
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_dir}"
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "dns-tinydns-convert: install uv (https://docs.astral.sh/uv/) or run 'uv sync' in ${repo_dir}" >&2
+  exit 1
+fi
+
+exec uv run dns-tinydns-convert "$@"

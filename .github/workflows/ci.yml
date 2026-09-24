@@ -195,6 +195,28 @@ jobs:
       - name: Render catalog fixture + nginx -t + Gixy-Next
         run: bash .github/ci/catalog-render-validate
 
+  dns-catalog-validate:
+    name: DNS catalog validate
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: latest
+      - name: Install PowerDNS + GeoIP backend + dig
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          sudo timeout 20 apt-get update -qq
+          sudo timeout 30 apt-get install -y -qq -o DPkg::Lock::Timeout=30 \
+            pdns-server pdns-backend-geoip dnsutils
+      - name: Convert tinydns fixture + pdns_server + dig
+        run: bash .github/ci/dns-catalog-validate
+
   web-build:
     name: Web (typecheck + build)
     needs: guard
