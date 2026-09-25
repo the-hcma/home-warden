@@ -195,10 +195,18 @@ have to rediscover them.
     execution model.** [#43](https://github.com/the-hcma/home-warden/issues/43)
     tracks giving nginx a role account instead of the operator's own uid.
     - **Why pdns never needed this (see AGENTS.md's Local DNS section):**
-      `pdns-server` binds loopback:853, an *unprivileged* port, so a plain
-      system account is sufficient on its own — no root-bind trick
-      required. nginx must bind 80/443, which is the entire reason socket
-      activation exists here; the two aren't parallel cases.
+      853 is still `<1024`, so `pdns-server` needs the same privileged-bind
+      answer nginx does — Debian's `pdns-server` package solves it with
+      `AmbientCapabilities=CAP_NET_BIND_SERVICE` on its own systemd unit,
+      letting the `pdns` account bind without ever being root. That
+      solution shipped for free with the package; home-warden's nginx unit
+      is *not* the distro's own unit (the "Runtime model" section above
+      notes it's masked so it never competes for 80/443), so nothing
+      shipped a bind solution for it — socket activation is home-warden's
+      home-grown answer to the same problem pdns's packaging already
+      solved. The two aren't parallel cases because one already has an
+      off-the-shelf fix and the other doesn't, not because pdns's port
+      happens to be unprivileged (it isn't).
     - **Rejected: adopt the distro package's own `nginx.service` and
       execution model.** Stock nginx's model is a *root* master process for
       the service's entire lifetime, forking unprivileged workers — the
