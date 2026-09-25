@@ -147,7 +147,10 @@ pdns entirely. It restarts pdns only when the drop-in changes. It refuses a
 directory that isn't a specific, non-hidden path under `/home/<user>/` (the
 same allowlist as nginx's sandbox binds), and fails unless the `pdns`
 account can search the directory and read the file, through world bits or
-through a group it belongs to (e.g. `chgrp pdns` plus `g+r`).
+through a group it belongs to (e.g. `chgrp pdns` plus `g+r`). It also fails
+on a `PDNS_ZONES_YAML` that goes through a symlink, since pdns can't follow
+one out of its sandbox — point it at the real path. If `zones.yml` later
+moves out of `/home`, the next `setup-service` run removes the drop-in.
 
 Skipped (with a message, not an error) when `PDNS_ZONES_YAML` is unset and
 the default `~/home/dns/zones.yml` doesn't exist either — installing
