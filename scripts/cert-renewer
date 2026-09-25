@@ -226,8 +226,10 @@ done
 
 if ((dry_run == 0)); then
   chmod -R u+rwX,g+rX,o-rwx "${certbot_config_dir}" || true
-  # live/*/privkey.pem are symlinks; the key files themselves live in archive/.
-  find "${certbot_config_dir}/archive" -type f -name 'privkey*.pem' -exec chmod 640 {} + 2>/dev/null || true
+  # certbot's live/*/privkey.pem are symlinks into archive/ (-type f skips them);
+  # scripts/bootstrap stages real key files directly under live/.
+  find "${certbot_config_dir}/archive" "${certbot_config_dir}/live" -type f -name 'privkey*.pem' \
+    -exec chmod 640 {} + 2>/dev/null || true
   share_certs_with_service_group
 fi
 
