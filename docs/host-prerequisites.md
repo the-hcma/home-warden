@@ -58,9 +58,10 @@ The certbot, healthcheck, and catalog-heal units still run as the operator.
 
 1. Creates the `home-warden` group and system account (no home, no login
    shell) if missing, and adds the operator to that group.
-2. Leaves every file owned by the operator; gives the group read on
-   `CONF_DIR/certs/{live,archive}` and write on nginx's scratch paths
-   (`logs/`, `*_temp/`, access/error logs, pid file).
+2. Leaves every file owned by the operator; gives the group search on
+   `CONF_DIR` and `SCRATCH_DIR`, read on `CONF_DIR/certs/{live,archive}`,
+   and write on nginx's scratch paths (`logs/`, `*_temp/`, access/error logs,
+   pid file).
 3. Renders `User=home-warden`/`Group=home-warden`, restarts the service, and
    fails unless it stays up (see `confirm_running`).
 
@@ -68,7 +69,9 @@ The served conf, its directory, and any static `root`/`alias` must be
 readable by that account (world- or group-readable); `setup-service`
 fails loudly if nginx can't start.
 
-`cert-renewer` re-applies the group to new cert lineages after every run.
+`cert-renewer` re-applies the group to new cert lineages after every run;
+run by hand, it (like `on-deploy` / `nginx-test-and-reload`) takes the group
+from the installed unit's `Group=` unless `SERVICE_GROUP` is set.
 The operator's own login shells only pick up the new group after the next
 login; systemd units pick it up immediately.
 

@@ -14,8 +14,8 @@
 #   HOME_WARDEN_RELOAD     default: 1 (set 0 when systemd ExecStartPost reloads)
 #   CERTBOT_DOMAINS_FILE   default: $repo_dir/conf/certbot-domains
 #   DNS_CLOUDFLARE_PROPAGATION_SECONDS  default: 60 (plugin default 10 is often too short)
-#   SERVICE_GROUP          default: home-warden (group home-warden.service reads certs through;
-#                          skipped when that group does not exist)
+#   SERVICE_GROUP          default: the installed home-warden.service's Group= (the group it
+#                          reads certs through; skipped when the unit has no Group=)
 #
 # Usage:
 #   ./scripts/cert-renewer
@@ -37,6 +37,8 @@ source "${script_dir}/lib/host-guard"
 if ! hw_host_guard_enforce "cert-renewer"; then
   exit 2
 fi
+# shellcheck source=scripts/lib/service-group
+source "${script_dir}/lib/service-group"
 
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 conf_dir="${CONF_DIR:-${HOME}/conf/home-warden}"
@@ -47,7 +49,7 @@ home_warden_reload="${HOME_WARDEN_RELOAD:-1}"
 certbot_domains_file="${CERTBOT_DOMAINS_FILE:-${repo_dir}/conf/certbot-domains}"
 certbot_bin="${CERTBOT:-/usr/bin/certbot}"
 dns_propagation_seconds="${DNS_CLOUDFLARE_PROPAGATION_SECONDS:-60}"
-service_group="${SERVICE_GROUP:-home-warden}"
+service_group="$(hw_service_group)"
 dry_run=0
 
 usage() {
@@ -88,7 +90,12 @@ fi
 # operator's primary group, so hand certs/, live/ and archive/ (never
 # accounts/, which holds the ACME account key) back to that group every run.
 share_certs_with_service_group() {
+  if [[ -z "${service_group}" ]]; then
+    return 0
+  fi
   if ! getent group "${service_group}" >/dev/null 2>&1; then
+    echo "cert-renewer: WARNING: SERVICE_GROUP ${service_group} does not exist —" \
+      "home-warden.service may fail to read new keys" >&2
     return 0
   fi
   if ! chgrp "${service_group}" "${certbot_config_dir}" ||

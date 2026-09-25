@@ -10,7 +10,7 @@
 #                     home-warden-reload.service); default: SCRATCH_DIR's
 #                     existing owner
 #   SERVICE_GROUP    home-warden.service's Group=, given group write on that pid
-#                     file; default: OWNER
+#                     file; default: the installed unit's Group=, else OWNER
 #
 # Exit:
 #   0 — test OK and reload/restart succeeded (or service inactive: skip reload)
@@ -35,11 +35,13 @@ if ! hw_host_guard_enforce "nginx-test-and-reload"; then
 fi
 # shellcheck source=scripts/lib/nginx-pid
 source "${script_dir}/lib/nginx-pid"
+# shellcheck source=scripts/lib/service-group
+source "${script_dir}/lib/service-group"
 
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 home_nginx_conf="${HOME_NGINX_CONF:-}"
 owner="${OWNER:-$(stat -c '%U' "${scratch_dir}" 2>/dev/null || true)}"
-service_group="${SERVICE_GROUP:-${owner}}"
+service_group="$(hw_service_group "${owner}")"
 
 log() {
   local msg=$1

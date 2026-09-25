@@ -700,6 +700,10 @@ grant_service_access() {
       cert_paths+=("${path}")
     fi
   done
+  # The unit bind-mounts CONF_DIR/SCRATCH_DIR, exposing their own modes; a
+  # 027 umask leaves them 750 OWNER:OWNER, so grant search (not listing).
+  run sudo chgrp "${service_group}" "${conf_dir}" "${scratch_dir}"
+  run sudo chmod g+x "${conf_dir}" "${scratch_dir}"
   run sudo chgrp "${service_group}" "${conf_dir}/certs"
   run sudo chmod g+rx "${conf_dir}/certs"
   if ((${#cert_paths[@]})); then

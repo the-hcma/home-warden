@@ -32,9 +32,11 @@ if ! hw_host_guard_enforce "on-deploy"; then
 fi
 # shellcheck source=scripts/lib/nginx-pid
 source "${script_dir}/lib/nginx-pid"
+# shellcheck source=scripts/lib/service-group
+source "${script_dir}/lib/service-group"
 
 owner="${OWNER:-$(id -un)}"
-service_group="${SERVICE_GROUP:-${owner}}"
+service_group="$(hw_service_group "${owner}")"
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 conf_dir="${CONF_DIR:-${HOME}/conf/home-warden}"
 home_nginx_conf="${HOME_NGINX_CONF:-}"

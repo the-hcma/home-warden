@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# scripts/lib/service-group — resolve home-warden.service's Group= for the
+# operator-side scripts that hand files back to it (cert lineages, pid file).
+#
+# The certbot/catalog-heal/reload units pass SERVICE_GROUP explicitly, but a
+# hand-run script (or catalog-register's cert step) does not inherit it. Asking
+# systemd for the installed unit's Group= keeps those runs on whatever group
+# scripts/setup-service actually rendered, including SERVICE_GROUP overrides.
+
+# hw_service_group [fallback] — prints SERVICE_GROUP if set, else the installed
+# home-warden.service's Group=, else fallback (may be empty).
+hw_service_group() {
+  local -r fallback="${1:-}"
+  local unit_group
+
+  if [[ -n "${SERVICE_GROUP:-}" ]]; then
+    printf '%s\n' "${SERVICE_GROUP}"
+    return 0
+  fi
+  unit_group="$(systemctl show --property=Group --value home-warden.service 2>/dev/null || true)"
+  if [[ -n "${unit_group}" ]]; then
+    printf '%s\n' "${unit_group}"
+    return 0
+  fi
+  printf '%s\n' "${fallback}"
+}
