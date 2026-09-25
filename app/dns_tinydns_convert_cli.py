@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 
 from app.dns_tinydns_convert import (
+    ParsedRecord,
     bucket_into_zones,
     parse_tinydns_data,
     render_pdns_conf,
@@ -54,10 +55,18 @@ def main() -> int:
         if not apexes:
             print(f"dns-tinydns-convert: {args.data_file} defines no zones (no 'Z' SOA lines)", file=sys.stderr)
             return 2
-        zones = bucket_into_zones(records, apexes)
+        dropped: list[ParsedRecord] = []
+        zones = bucket_into_zones(records, apexes, dropped)
     except ValueError as e:
         print(f"dns-tinydns-convert: {args.data_file}: {e}", file=sys.stderr)
         return 2
+
+    for rec in dropped:
+        print(
+            f"dns-tinydns-convert: WARNING: skipped implicit PTR {rec.owner} -> {rec.content} "
+            "(its '=' line's reverse zone is not defined by any 'Z' line)",
+            file=sys.stderr,
+        )
 
     args.outdir.mkdir(parents=True, exist_ok=True)
     zones_yaml_path = args.outdir / "zones.yml"

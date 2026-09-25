@@ -28,6 +28,9 @@ class ParsedRecord:
     rtype: str  # "soa" | "ns" | "a" | "ptr" | "cname" | "txt" | "srv"
     content: str
     ttl: int | None = None
+    # True for a record the source never wrote itself -- the PTR tinydns
+    # derives from every `=` line. See bucket_into_zones for why that matters.
+    implicit: bool = False
 
 
 @dataclass(frozen=True)
@@ -47,7 +50,11 @@ class Zone:
     records: dict[str, dict[str, list[RecordValue]]] = field(default_factory=dict)
 
 
-def bucket_into_zones(records: list[ParsedRecord], zone_apexes: list[str]) -> dict[str, Zone]:
+def bucket_into_zones(
+    records: list[ParsedRecord],
+    zone_apexes: list[str],
+    dropped: list[ParsedRecord] | None = None,
+) -> dict[str, Zone]:
     """Group parsed records under the longest-matching zone apex.
 
     `zone_apexes` must already be known (from the file's own SOA lines) --
@@ -56,6 +63,12 @@ def bucket_into_zones(records: list[ParsedRecord], zone_apexes: list[str]) -> di
     whose owner matches no known apex is an error: silently dropping it
     would produce a zone file missing data the source file clearly
     intended to serve.
+
+    The one exception is an *implicit* record (the PTR an `=` line derives)
+    whose reverse zone the file never defines: tinydns never served it
+    authoritatively either, so it is left out rather than failing the whole
+    conversion. Each one is appended to `dropped` (when given) so the caller
+    can report it.
 
     Every zone's default ttl comes from its own SOA line -- there is no
     invented fallback constant. tinydns has its own default for a blank
@@ -80,6 +93,10 @@ def bucket_into_zones(records: list[ParsedRecord], zone_apexes: list[str]) -> di
 
     for rec in records:
         apex = _longest_matching_apex(rec.owner, sorted_apexes)
+        if apex is None and rec.implicit:
+            if dropped is not None:
+                dropped.append(rec)
+            continue
         if apex is None:
             raise ValueError(f"no zone apex matches owner {rec.owner!r} (known zones: {zone_apexes})")
         owner_records = zones[apex].records.setdefault(rec.owner, {})
@@ -315,7 +332,7 @@ def _parse_a_and_ptr(fields: list[str]) -> list[ParsedRecord]:
     ptr_owner = _reverse_dns_owner(ip)
     return [
         ParsedRecord(owner=fqdn, rtype="a", content=ip, ttl=ttl),
-        ParsedRecord(owner=ptr_owner, rtype="ptr", content=_ensure_trailing_dot(fqdn), ttl=ttl),
+        ParsedRecord(owner=ptr_owner, rtype="ptr", content=_ensure_trailing_dot(fqdn), ttl=ttl, implicit=True),
     ]
 
 
