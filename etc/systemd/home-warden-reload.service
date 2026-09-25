@@ -20,6 +20,7 @@ Environment=SCRATCH_DIR=@@SCRATCH_DIR@@
 # scripts/nginx-test-and-reload runs as root here (no User=); OWNER tells it
 # who to hand SCRATCH_DIR/logs/nginx.pid back to after nginx -t (scripts/lib/nginx-pid).
 Environment=OWNER=@@OWNER@@
+Environment=SERVICE_GROUP=@@SERVICE_GROUP@@
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 WorkingDirectory=@@REPO_DIR@@
 ExecStart=@@REPO_DIR@@/scripts/nginx-test-and-reload

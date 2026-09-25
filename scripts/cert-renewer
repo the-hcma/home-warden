@@ -14,6 +14,8 @@
 #   HOME_WARDEN_RELOAD     default: 1 (set 0 when systemd ExecStartPost reloads)
 #   CERTBOT_DOMAINS_FILE   default: $repo_dir/conf/certbot-domains
 #   DNS_CLOUDFLARE_PROPAGATION_SECONDS  default: 60 (plugin default 10 is often too short)
+#   SERVICE_GROUP          default: the installed home-warden.service's Group= (the group it
+#                          reads certs through; skipped when the unit has no Group=)
 #
 # Usage:
 #   ./scripts/cert-renewer
@@ -35,6 +37,8 @@ source "${script_dir}/lib/host-guard"
 if ! hw_host_guard_enforce "cert-renewer"; then
   exit 2
 fi
+# shellcheck source=scripts/lib/service-group
+source "${script_dir}/lib/service-group"
 
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 conf_dir="${CONF_DIR:-${HOME}/conf/home-warden}"
@@ -45,6 +49,7 @@ home_warden_reload="${HOME_WARDEN_RELOAD:-1}"
 certbot_domains_file="${CERTBOT_DOMAINS_FILE:-${repo_dir}/conf/certbot-domains}"
 certbot_bin="${CERTBOT:-/usr/bin/certbot}"
 dns_propagation_seconds="${DNS_CLOUDFLARE_PROPAGATION_SECONDS:-60}"
+service_group="$(hw_service_group "")"
 dry_run=0
 
 usage() {
@@ -79,6 +84,37 @@ done
 if [[ -x "${script_dir}/link-runtime-conf" ]]; then
   "${script_dir}/link-runtime-conf" -q || true
 fi
+
+# Also runs from an EXIT trap: certbot exits non-zero when any one lineage
+# fails, and lineages it did renew in that run still need their keys shared.
+fix_cert_permissions() {
+  chmod -R u+rwX,g+rX,o-rwx "${certbot_config_dir}" || true
+  # certbot's live/*/privkey.pem are symlinks into archive/ (-type f skips them);
+  # scripts/bootstrap stages real key files directly under live/.
+  find "${certbot_config_dir}/archive" "${certbot_config_dir}/live" -type f -name 'privkey*.pem' \
+    -exec chmod 640 {} + 2>/dev/null || true
+  share_certs_with_service_group
+}
+
+# home-warden.service runs as its own account (#43) and reads certs only
+# through SERVICE_GROUP membership. certbot creates new lineages with the
+# operator's primary group, so hand certs/, live/ and archive/ (never
+# accounts/, which holds the ACME account key) back to that group every run.
+share_certs_with_service_group() {
+  if [[ -z "${service_group}" ]]; then
+    return 0
+  fi
+  if ! getent group "${service_group}" >/dev/null 2>&1; then
+    echo "cert-renewer: WARNING: SERVICE_GROUP ${service_group} does not exist —" \
+      "home-warden.service may fail to read new keys" >&2
+    return 0
+  fi
+  if ! chgrp "${service_group}" "${certbot_config_dir}" ||
+    ! chgrp -R "${service_group}" "${certbot_config_dir}/archive" "${certbot_config_dir}/live"; then
+    echo "cert-renewer: WARNING: could not chgrp certs to ${service_group} —" \
+      "is $(id -un) in that group? home-warden.service may fail to read new keys" >&2
+  fi
+}
 
 trim_ws() {
   local s=$1
@@ -143,6 +179,10 @@ cf_args=(
   --preferred-challenges dns-01
 )
 
+if ((dry_run == 0)); then
+  trap fix_cert_permissions EXIT
+fi
+
 for domain in "${domains[@]}"; do
   live_cert="${certbot_config_dir}/live/${domain}/fullchain.pem"
   renewal_conf="${certbot_config_dir}/renewal/${domain}.conf"
@@ -200,8 +240,8 @@ for domain in "${domains[@]}"; do
 done
 
 if ((dry_run == 0)); then
-  chmod -R u+rwX,g+rX,o-rwx "${certbot_config_dir}" || true
-  find "${certbot_config_dir}/live" -type f -name 'privkey.pem' -exec chmod 640 {} \; 2>/dev/null || true
+  trap - EXIT
+  fix_cert_permissions
 fi
 
 if [[ "${home_warden_reload}" == "1" ]] && ((dry_run == 0)); then

@@ -49,6 +49,50 @@ in tracked files.
 - `HOME_WARDEN_SKIP_HOST_GUARD=1` bypasses the check — manual testing only, never set
   it in a unit or timer.
 
+## Dedicated service account
+
+nginx (`home-warden.service`) runs as its own `home-warden` system account,
+not the operator ([#43](https://github.com/the-hcma/home-warden/issues/43)).
+The certbot, healthcheck, and catalog-heal units still run as the operator.
+`setup-service` handles the whole cutover idempotently on every run:
+
+1. Creates the `home-warden` group and system account (no home, no login
+   shell) if missing, and adds the operator to that group.
+2. Leaves every file owned by the operator; gives the group search on
+   `CONF_DIR` and `SCRATCH_DIR`, read on `CONF_DIR/certs/{live,archive}`,
+   and write on nginx's scratch paths (`logs/`, `*_temp/`, access/error logs,
+   pid file).
+3. Renders `User=home-warden`/`Group=home-warden`, restarts the service, and
+   fails unless it stays up (see `confirm_running`).
+
+The served conf, its directory, and any static `root`/`alias` must be
+readable by that account (world- or group-readable); `setup-service`
+fails loudly if nginx can't start.
+
+`cert-renewer` re-applies the group to new cert lineages after every run;
+run by hand, it (like `on-deploy` / `nginx-test-and-reload`) takes the group
+from the installed unit's `Group=` unless `SERVICE_GROUP` is set.
+The operator's own login shells only pick up the new group after the next
+login; systemd units pick it up immediately.
+
+Verify after a cutover:
+
+```bash
+ps -o user,pid,cmd -C nginx               # master + workers as home-warden
+sudo systemctl start home-warden-certbot.service
+sudo systemctl reload home-warden.service  # privileged reload across the uid boundary
+./scripts/healthcheck --check-only
+```
+
+**Rollback** to the operator's uid (group permissions stay in place and are
+harmless):
+
+```bash
+SERVICE_USER="$(id -un)" ./scripts/setup-service
+```
+
+`SERVICE_USER` / `SERVICE_GROUP` override the account and group names.
+
 ## Optional preflight
 
 ```bash
@@ -296,4 +340,4 @@ under a dedicated directory; `setup-service` warns about any it refused.
 - `ConditionHost` pins the units to the designated host (machine-id **or** hostname); see
   [Designated host](#designated-host) for the same guard applied inside the scripts themselves.
 - IPv4-only listens in Milestone 1; dual-stack fd mapping is a follow-up.
-- Certbot runs as the service owner; reload of `home-warden.service` is done via a privileged `ExecStartPost` on the oneshot unit (no passwordless sudo required for the timer).
+- Certbot runs as the operator (not the `home-warden` account nginx uses); reload of `home-warden.service` is done via a privileged `ExecStartPost` on the oneshot unit (no passwordless sudo required for the timer).

@@ -38,6 +38,8 @@ Environment=CONF_DIR=@@CONF_DIR@@
 Environment=CERTBOT_CONFIG_DIR=@@CONF_DIR@@/certs
 Environment=SERVICES_JSON_PATH=@@SERVICES_JSON_PATH@@
 Environment=HOME_WARDEN_RELOAD=0
+# Passed through to scripts/cert-renewer (see home-warden-certbot.service).
+Environment=SERVICE_GROUP=@@SERVICE_GROUP@@
 EnvironmentFile=-@@HOME_DIR@@/.config/home-warden-catalog-heal.env
 ExecStart=@@REPO_DIR@@/scripts/catalog-heal --apply-cert
 # ExecStopPost (not ExecStartPost): catalog-heal exits 1 on any routine

@@ -13,16 +13,24 @@
 # start hits "permission denied" on its own pid file and crash-loops
 # (Restart=on-failure). Call this right after every such nginx -t succeeds.
 
-# hw_fix_nginx_pid_ownership <scratch_dir> <owner>
+#
+# home-warden.service runs as a dedicated account (#43) that is not OWNER, so
+# the file goes back to OWNER:<group> with group write, <group> being the
+# service's Group= (defaults to OWNER when the service still runs as OWNER).
+
+# hw_fix_nginx_pid_ownership <scratch_dir> <owner> [group]
 hw_fix_nginx_pid_ownership() {
   local -r scratch_dir="$1"
   local -r owner="$2"
+  local -r group="${3:-$2}"
   local -r pid_file="${scratch_dir}/logs/nginx.pid"
 
   [[ -f "${pid_file}" ]] || return 0
   if [[ "$(id -u)" -eq 0 ]]; then
-    chown "${owner}:${owner}" "${pid_file}"
+    chown "${owner}:${group}" "${pid_file}"
+    chmod 664 "${pid_file}"
   else
-    sudo chown "${owner}:${owner}" "${pid_file}"
+    sudo chown "${owner}:${group}" "${pid_file}"
+    sudo chmod 664 "${pid_file}"
   fi
 }
