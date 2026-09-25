@@ -286,7 +286,8 @@ such path (e.g. a new static `root`), re-run `./scripts/setup-service`; the
 reload alone passes `nginx -t` (run as root, outside the sandbox) but the
 live workers will get `403`/`404` or fail to load the file. Discovery binds
 single files for file directives and never exposes `/root`, a bare home
-directory, or a hidden path (`~/.ssh`, `~/.config`, …) — keep served files
+directory, a hidden path (`~/.ssh`, `~/.config`, …), or a path with
+characters outside `[A-Za-z0-9._@+-]` — keep served files
 under a dedicated directory; `setup-service` warns about any it refused.
 
 ## Notes

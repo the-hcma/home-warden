@@ -252,6 +252,12 @@ resolve_nginx_extra_read_paths() {
         ;;
       *) target="${path}" ;;
     esac
+    while [[ "${target}" == *//* ]]; do
+      target="${target//\/\//\/}"
+    done
+    if [[ "${target}" != / ]]; then
+      target="${target%/}"
+    fi
     skip=0
     for covered in "${home_nginx_conf_dir}" "${conf_dir}" "${scratch_dir}"; do
       if [[ "${target}" == "${covered}" || "${target}" == "${covered}"/* ]]; then
@@ -263,7 +269,7 @@ resolve_nginx_extra_read_paths() {
     fi
     if ! is_safe_sandbox_bind "${target}"; then
       echo "WARNING: not exposing ${target} (from ${directive}) to the nginx sandbox:" \
-        "/root, a bare home dir, and hidden paths are refused — move it under a dedicated dir" >&2
+        "only plain paths below /home/<user>/ are allowed — move it under a dedicated dir" >&2
       continue
     fi
     printf -- '-%s\n' "${target}"
@@ -304,15 +310,15 @@ resolve_services_json() {
   return 1
 }
 
-# Refuses bind targets that would hand the sandbox far more than one vhost's
-# files: anything under /root, /home or a bare /home/<user>, and any path
-# with a hidden component (~/.ssh, ~/.config, `..`).
+# Accepts only /home/<user>/<segment>[/<segment>...] (target already
+# normalized) where every segment is plain [A-Za-z0-9._@+-] not starting with
+# a dot. That refuses /root, /home, a bare home dir, hidden paths (~/.ssh,
+# ~/.config, `..`), and any character (backslash, `&`, `|`, whitespace) that
+# could escape the sed substitution expand_unit renders these into.
 is_safe_sandbox_bind() {
   local -r target="$1"
-  if [[ "${target}" != /home/*/* || "${target}" == */.* ]]; then
-    return 1
-  fi
-  return 0
+  local -r segment='[A-Za-z0-9_@+-][A-Za-z0-9._@+-]*'
+  [[ "${target}" =~ ^/home/${segment}(/${segment})+$ ]]
 }
 
 is_valid_fqdn() {
