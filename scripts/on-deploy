@@ -43,19 +43,15 @@ readonly error_log="${scratch_dir}/logs/error.log"
 readonly access_log="${scratch_dir}/logs/access.log"
 
 resolve_home_nginx_conf() {
-  local candidate
+  local -r candidate="${HOME}/home/nginx/server/nginx.conf"
   if [[ -n "${home_nginx_conf}" ]]; then
     printf '%s\n' "${home_nginx_conf}"
     return 0
   fi
-  for candidate in \
-    "${HOME}/home/nginx/server/nginx.conf" \
-    /home/house_meister/home/nginx/server/nginx.conf; do
-    if [[ -f "${candidate}" ]]; then
-      printf '%s\n' "${candidate}"
-      return 0
-    fi
-  done
+  if [[ -f "${candidate}" ]]; then
+    printf '%s\n' "${candidate}"
+    return 0
+  fi
   return 1
 }
 

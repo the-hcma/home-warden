@@ -143,11 +143,23 @@ have to rediscover them.
    process — a compromised master or worker can still `accept()` on those
    ports as the service user for as long as the process lives.
 6. **Systemd sandboxing.** ✅ `home-warden.service` now sets
-   `ProtectSystem=strict` + `ProtectHome=true` (with the three paths it
-   actually needs reopened via `ReadOnlyPaths=`/`ReadWritePaths=`),
+   `ProtectSystem=strict` + `ProtectHome=tmpfs` (with the paths it actually
+   needs bound back in via `BindReadOnlyPaths=`/`BindPaths=`),
    `PrivateTmp=true`, `RestrictAddressFamilies=`, and an empty
    `CapabilityBoundingSet=`, on top of `NoNewPrivileges=true`
    ([#42](https://github.com/the-hcma/home-warden/issues/42)).
+   The first rollout used `ProtectHome=true` + `ReadOnlyPaths=`, which
+   masks `/home` with a mode-000 directory: the unprivileged, capability-free
+   service user could not traverse it to reach the reopened paths, and
+   nginx crash-looped on `open() nginx.conf failed (13: Permission denied)`
+   while `setup-service` still reported success. The bind-mount form fixes
+   that, `setup-service` now fails unless the service stays up past one
+   `RestartSec`, and `StartLimitBurst=` stops an endless restart loop.
+   Beyond the conf dir, `CONF_DIR`, and `SCRATCH_DIR`, `setup-service`
+   scans `nginx -T` for `root`/`alias`/`include`/`ssl_*` paths under a
+   home directory and binds those read-only too — so adding such a path to
+   the served conf needs a `setup-service` re-run, not just the
+   conf-watch reload.
    `SystemCallFilter=` is deliberately deferred to a follow-up: it's the one
    directive most likely to manifest as a mysterious runtime failure rather
    than a clean refusal to start, so it needs its own isolated rollout and

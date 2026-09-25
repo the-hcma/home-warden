@@ -100,15 +100,11 @@ resolve_home_nginx_conf() {
     printf '%s\n' "${HOME_NGINX_CONF}"
     return 0
   fi
-  local candidate
-  for candidate in \
-    "${HOME}/home/nginx/server/nginx.conf" \
-    /home/house_meister/home/nginx/server/nginx.conf; do
-    if [[ -f "${candidate}" ]]; then
-      printf '%s\n' "${candidate}"
-      return 0
-    fi
-  done
+  local -r candidate="${HOME}/home/nginx/server/nginx.conf"
+  if [[ -f "${candidate}" ]]; then
+    printf '%s\n' "${candidate}"
+    return 0
+  fi
   return 1
 }
 
@@ -404,7 +400,7 @@ check_certs() {
 }
 
 check_downloads_root() {
-  local root="/home/house_meister/home/nginx/files/downloads"
+  local root="${HOME}/home/nginx/files/downloads"
   if [[ -n "${HOME_NGINX_CONF}" && -f "${HOME_NGINX_CONF}" ]]; then
     local extracted
     extracted="$(grep -E 'root .*/nginx/files/downloads' "${HOME_NGINX_CONF}" | head -n1 | awk '{print $2}' | tr -d ';' || true)"

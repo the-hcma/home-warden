@@ -3,6 +3,11 @@ Description=home-warden nginx (unprivileged)
 Documentation=https://github.com/the-hcma/home-warden/blob/main/docs/architecture-socket-activation.md
 Requires=home-warden.socket
 After=network.target home-warden.socket
+# Give up after a burst of crashes instead of restarting every RestartSec
+# forever; `systemctl reset-failed home-warden.service` (or setup-service)
+# re-arms it once the cause is fixed.
+StartLimitIntervalSec=10min
+StartLimitBurst=20
 
 [Service]
 Type=simple
@@ -22,10 +27,15 @@ NoNewPrivileges=true
 # --- Sandboxing (home-warden#42) ---
 # Whole filesystem read-only except the paths reopened below.
 ProtectSystem=strict
-# Hide other users'/root's home dirs entirely; reopen only our three paths.
-ProtectHome=true
-ReadOnlyPaths=@@HOME_NGINX_CONF_DIR@@ @@CONF_DIR@@
-ReadWritePaths=@@SCRATCH_DIR@@
+# Replace /home, /root and /run/user with an empty tmpfs, then bind back only
+# the paths nginx needs. Not ProtectHome=true + ReadOnlyPaths=: that masks
+# /home with a mode-000 directory, which an unprivileged User= with an empty
+# CapabilityBoundingSet= cannot traverse to reach the reopened paths (EACCES).
+# @@NGINX_EXTRA_READ_PATHS@@ holds root/alias/include/ssl_* locations under a
+# home dir that setup-service found in `nginx -T` outside the paths below.
+ProtectHome=tmpfs
+BindReadOnlyPaths=@@HOME_NGINX_CONF_DIR@@ @@CONF_DIR@@ @@NGINX_EXTRA_READ_PATHS@@
+BindPaths=@@SCRATCH_DIR@@
 # nginx's own temp dirs live under SCRATCH_DIR (-p), never the shared /tmp.
 PrivateTmp=true
 # The inherited 80/443 fds are already open before exec and unaffected by
