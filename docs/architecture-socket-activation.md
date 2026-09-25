@@ -191,6 +191,56 @@ have to rediscover them.
     instead of a one-time root socket-open. Socket activation was preferred
     to keep the long-lived nginx process capability-free; revisit if the
     `NGINX=` fd map ever proves too fragile across nginx versions.
+14. **Direction for gaps #1/#2: a dedicated account, not a switched
+    execution model.** [#43](https://github.com/the-hcma/home-warden/issues/43)
+    tracks giving nginx a role account instead of the operator's own uid.
+    - **Why pdns never needed this (see AGENTS.md's Local DNS section):**
+      853 is still `<1024`, so `pdns-server` needs the same privileged-bind
+      answer nginx does — Debian's `pdns-server` package solves it with
+      `AmbientCapabilities=CAP_NET_BIND_SERVICE` on its own systemd unit,
+      letting the `pdns` account bind without ever being root. That
+      solution shipped for free with the package; home-warden's nginx unit
+      is *not* the distro's own unit (the "Runtime model" section above
+      notes it's masked so it never competes for 80/443), so nothing
+      shipped a bind solution for it — socket activation is home-warden's
+      home-grown answer to the same problem pdns's packaging already
+      solved. The two aren't parallel cases because one already has an
+      off-the-shelf fix and the other doesn't, not because pdns's port
+      happens to be unprivileged (it isn't).
+    - **Rejected: adopt the distro package's own `nginx.service` and
+      execution model.** Stock nginx's model is a *root* master process for
+      the service's entire lifetime, forking unprivileged workers — the
+      opposite of what gap #1's mitigation above (**"privileged bind
+      without a root nginx process"**) buys today. Trading that away for a
+      free account isn't a good trade, and it's a real migration (the
+      `NGINX=` fd map, the `kill -HUP` reload path, `thehcma/home`'s conf
+      assumptions, `ConditionHost`/host-guard, the Gixy-Next CI job) against
+      a design that's already live in production — not a quick fix.
+      Socket activation stays exactly as-is either way.
+    - **Considered and rejected: reuse `www-data`, the account nginx
+      defaults to.** `www-data` (uid 33) ships from Debian/Ubuntu's
+      `base-passwd` package, present on essentially any Debian-derived
+      host regardless of whether nginx is ever installed — nginx's own
+      `nginx.conf` just names it (`user www-data;`) as the account its
+      workers already drop to. Reusing it on `home-warden.service` would
+      cost no new `useradd` step, but unlike `pdns-server`'s account
+      (created specifically for pdns), `www-data` is a *shared*, generic
+      account other packages (PHP-FPM, etc.) may also default to — it only
+      shrinks gap #1's shared-identity exposure rather than closing it,
+      which undercuts the point of #43 on a host already investing this
+      much in isolation (systemd sandboxing above,
+      `ConditionHost`/host-guard, Gixy-Next lint).
+    - **Chosen direction: a dedicated `home-warden` system account.**
+      `scripts/setup-service` gains an idempotent
+      `sudo useradd --system --no-create-home home-warden` step (skipped
+      once the account already exists), alongside its existing one-time
+      root-level provisioning (masking distro nginx, installing units).
+      `home-warden.service` then sets `User=home-warden`/`Group=home-warden`
+      instead of the operator's own account, with `certs/live/*/privkey.pem`
+      kept owned by the operator and made group-readable by `home-warden`
+      (`chmod 640` plus group membership) rather than handing the service
+      account write access to the certs tree at all — closing gap #1 fully,
+      not just shrinking it.
 
 ## Non-goals for this doc
 
