@@ -422,6 +422,32 @@ maybe_create_web_ui_config() {
   done
 }
 
+# pdns_has_access <path> <r|x> — whether the pdns account has that permission
+# on <path>, applying the kernel's owner-then-group-then-other precedence.
+pdns_has_access() {
+  local -r target="$1"
+  local -r bit="$2"
+  local file_group
+  local file_owner
+  local group
+  local -a pdns_groups=()
+
+  file_owner="$(stat -c '%U' "${target}")"
+  file_group="$(stat -c '%G' "${target}")"
+  if [[ "${file_owner}" == "pdns" ]]; then
+    [[ -n "$(find "${target}" -maxdepth 0 -perm "-u=${bit}")" ]]
+    return
+  fi
+  read -r -a pdns_groups <<<"$(id -Gn pdns 2>/dev/null || true)"
+  for group in "${pdns_groups[@]}"; do
+    if [[ "${group}" == "${file_group}" ]]; then
+      [[ -n "$(find "${target}" -maxdepth 0 -perm "-g=${bit}")" ]]
+      return
+    fi
+  done
+  [[ -n "$(find "${target}" -maxdepth 0 -perm "-o=${bit}")" ]]
+}
+
 run() {
   if ((dry_run)); then
     printf 'DRY-RUN:'
@@ -785,9 +811,9 @@ install_pdns_sandbox_dropin() {
       "(not a specific, non-hidden path under /home/<user>/)" >&2
     exit 1
   fi
-  if [[ -z "$(find "${zones_dir}" -maxdepth 0 -perm -o=x)" ||
-    -z "$(find "${pdns_zones_yaml}" -maxdepth 0 -perm -o=r)" ]]; then
-    echo "ERROR: pdns cannot read ${pdns_zones_yaml} — needs o+x on ${zones_dir} and o+r on the file" >&2
+  if ! pdns_has_access "${zones_dir}" x || ! pdns_has_access "${pdns_zones_yaml}" r; then
+    echo "ERROR: pdns cannot read ${pdns_zones_yaml} — needs search on ${zones_dir} and read on the" \
+      "file, via world bits or a group the pdns account is in" >&2
     exit 1
   fi
 

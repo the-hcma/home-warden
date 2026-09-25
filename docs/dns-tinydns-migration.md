@@ -145,8 +145,9 @@ When `zones.yml` lives under `/home`, `setup-service` also installs a
 because the distro unit's `ProtectHome=true` otherwise hides the file from
 pdns entirely. It restarts pdns only when the drop-in changes. It refuses a
 directory that isn't a specific, non-hidden path under `/home/<user>/` (the
-same allowlist as nginx's sandbox binds), and fails unless the directory is
-`o+x` and the file `o+r`.
+same allowlist as nginx's sandbox binds), and fails unless the `pdns`
+account can search the directory and read the file, through world bits or
+through a group it belongs to (e.g. `chgrp pdns` plus `g+r`).
 
 Skipped (with a message, not an error) when `PDNS_ZONES_YAML` is unset and
 the default `~/home/dns/zones.yml` doesn't exist either — installing
