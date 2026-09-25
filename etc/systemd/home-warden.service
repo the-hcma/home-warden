@@ -11,8 +11,11 @@ StartLimitBurst=20
 
 [Service]
 Type=simple
-User=@@OWNER@@
-Group=@@OWNER@@
+# Dedicated system account (home-warden#43), not the operator: it owns
+# nothing, reads certs via group membership only, and can write only the
+# nginx logs/temp paths setup-service hands to its group.
+User=@@SERVICE_USER@@
+Group=@@SERVICE_GROUP@@
 Environment=NGINX=3:4;
 Environment=DEPLOYED_COMMIT=@@DEPLOYED_COMMIT@@
 # -p sets prefix for relative pid/temp/log paths in the home nginx.conf.

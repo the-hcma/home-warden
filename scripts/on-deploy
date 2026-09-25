@@ -34,6 +34,7 @@ fi
 source "${script_dir}/lib/nginx-pid"
 
 owner="${OWNER:-$(id -un)}"
+service_group="${SERVICE_GROUP:-${owner}}"
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 conf_dir="${CONF_DIR:-${HOME}/conf/home-warden}"
 home_nginx_conf="${HOME_NGINX_CONF:-}"
@@ -73,7 +74,8 @@ prepare_scratch() {
   : >>"${service_log}"
   : >>"${error_log}"
   : >>"${access_log}"
-  # Ensure the service user can append (system unit runs as OWNER).
+  # OWNER keeps rw; setup-service grants SERVICE_GROUP (home-warden.service's
+  # Group=) write on the nginx logs.
   chmod u+rw "${service_log}" "${error_log}" "${access_log}" 2>/dev/null || true
 }
 
@@ -85,7 +87,7 @@ validate_nginx_conf() {
   fi
   if sudo -n true 2>/dev/null; then
     if sudo -n nginx -p "${scratch_dir}/" -t -c "${conf}"; then
-      hw_fix_nginx_pid_ownership "${scratch_dir}" "${owner}"
+      hw_fix_nginx_pid_ownership "${scratch_dir}" "${owner}" "${service_group}"
       echo "on-deploy: nginx -t OK (${conf})"
       return 0
     fi

@@ -4,7 +4,7 @@
 #
 # Placeholders: @@OWNER@@ @@SCRATCH_DIR@@ @@CONF_DIR@@ @@HOME_NGINX_CONF@@ @@HOME_DIR@@
 #               @@PDNS_ZONES_YAML@@ @@PDNS_ZONES_YAML_DIR@@ @@SERVICES_JSON_PATH@@
-#               @@NGINX_EXTRA_READ_PATHS@@
+#               @@NGINX_EXTRA_READ_PATHS@@ @@SERVICE_USER@@ @@SERVICE_GROUP@@
 # Injects ConditionHost=|<machine-id> and ConditionHost=|<hostname> (OR).
 #
 # Flow (non-dry-run):
@@ -33,7 +33,14 @@
 #                       enables the catalog-heal timer (see AGENTS.md's
 #                       Catalog Auto-Healing section, #57) when set or when
 #                       the default path below exists; skipped otherwise
-#   OWNER               Service user (default: current user)
+#   OWNER               Operator account that owns the repo, conf, certs and
+#                       scratch, and runs the certbot/healthcheck units
+#                       (default: current user)
+#   SERVICE_USER        Account home-warden.service (nginx) runs as
+#                       (default: home-warden, created as a system account;
+#                       set to OWNER to roll back to the operator's own uid)
+#   SERVICE_GROUP       Group granted cert read + nginx scratch write
+#                       (default: SERVICE_USER)
 #   SCRATCH_DIR         Runtime prefix for nginx -p (default: ~/scratch/home-warden)
 #   CONF_DIR            Durable SSL material (default: ~/conf/home-warden)
 #   XDG_CONFIG_HOME     Base dir for ~/.config-style files (default: ~/.config)
@@ -66,6 +73,8 @@ source "${script_dir}/lib/host-guard"
 source "${script_dir}/lib/nginx-pid"
 
 owner="${OWNER:-$(id -un)}"
+service_user="${SERVICE_USER:-home-warden}"
+service_group="${SERVICE_GROUP:-${service_user}}"
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 conf_dir="${CONF_DIR:-${HOME}/conf/home-warden}"
 home_nginx_conf="${HOME_NGINX_CONF:-}"
@@ -198,6 +207,29 @@ ensure_host_config() {
   hw_current_hostname_short >"${hw_pinned_host_file}"
   hw_current_machine_id >"${hw_pinned_machine_id_file}"
   hostname >"${hw_pinned_host_fqdn_file}" || hw_current_hostname_short >"${hw_pinned_host_fqdn_file}"
+}
+
+# home-warden.service runs as a dedicated system account (#43) so an nginx
+# compromise is not a compromise of the operator's uid. OWNER joins the group
+# so cert-renewer (running as OWNER) can hand renewed keys to it.
+ensure_service_account() {
+  if [[ "${service_user}" == "${owner}" ]]; then
+    echo "SERVICE_USER=${owner}: home-warden.service keeps running as the operator (no dedicated account)"
+    return 0
+  fi
+  if ! getent group "${service_group}" >/dev/null; then
+    echo "Creating system group ${service_group}..."
+    run sudo groupadd --system "${service_group}"
+  fi
+  if ! getent passwd "${service_user}" >/dev/null; then
+    echo "Creating system account ${service_user}..."
+    run sudo useradd --system --gid "${service_group}" --no-create-home \
+      --home-dir /nonexistent --shell /usr/sbin/nologin "${service_user}"
+  fi
+  if ! id -nG "${owner}" | tr ' ' '\n' | grep -qx "${service_group}"; then
+    echo "Adding ${owner} to group ${service_group}..."
+    run sudo usermod --append --groups "${service_group}" "${owner}"
+  fi
 }
 
 resolve_home_nginx_conf() {
@@ -582,7 +614,7 @@ validate_nginx_config() {
     echo "ERROR: nginx -t failed — refusing to install/start home-warden" >&2
     exit 1
   fi
-  hw_fix_nginx_pid_ownership "${scratch_dir}" "${owner}"
+  hw_fix_nginx_pid_ownership "${scratch_dir}" "${owner}" "${service_group}"
   echo "nginx -t OK"
 }
 
@@ -615,6 +647,8 @@ expand_unit() {
       -e "s|@@HOME_DIR@@|${HOME}|g" \
       -e "s|@@DEPLOYED_COMMIT@@|${deployed_commit}|g" \
       -e "s|@@NGINX_EXTRA_READ_PATHS@@|${nginx_extra_read_paths}|g" \
+      -e "s|@@SERVICE_USER@@|${service_user}|g" \
+      -e "s|@@SERVICE_GROUP@@|${service_group}|g" \
       "${src}"
   )"
 
@@ -646,6 +680,44 @@ expand_unit() {
   printf '%s\n' "${generated}" >"${tmp}"
   run sudo install -o root -g root -m 644 "${tmp}" "${dest}"
   rm -f "${tmp}"
+}
+
+# Everything stays owned by OWNER; SERVICE_GROUP gets read on the cert
+# lineages (never certs/accounts/, which holds the ACME account key) and
+# write on exactly the scratch paths nginx itself writes.
+grant_service_access() {
+  local -a cert_paths=()
+  local -a writable_dirs=()
+  local -a writable_files=()
+  local path
+
+  if [[ "${service_user}" == "${owner}" ]]; then
+    return 0
+  fi
+  echo "Granting ${service_group} cert read + nginx scratch write..."
+  for path in "${conf_dir}/certs/archive" "${conf_dir}/certs/live"; do
+    if [[ -d "${path}" ]]; then
+      cert_paths+=("${path}")
+    fi
+  done
+  run sudo chgrp "${service_group}" "${conf_dir}/certs"
+  run sudo chmod g+rx "${conf_dir}/certs"
+  if ((${#cert_paths[@]})); then
+    run sudo chgrp -R "${service_group}" "${cert_paths[@]}"
+    run sudo chmod -R g+rX,o-rwx "${cert_paths[@]}"
+  fi
+
+  for path in logs client_body_temp fastcgi_temp proxy_temp scgi_temp uwsgi_temp; do
+    writable_dirs+=("${scratch_dir}/${path}")
+  done
+  for path in logs/access.log logs/error.log logs/nginx.pid; do
+    if [[ -e "${scratch_dir}/${path}" ]] || ((dry_run)); then
+      writable_files+=("${scratch_dir}/${path}")
+    fi
+  done
+  run sudo chgrp "${service_group}" "${writable_dirs[@]}" "${writable_files[@]}"
+  run sudo chmod g+rwxs "${writable_dirs[@]}"
+  run sudo chmod g+rw "${writable_files[@]}"
 }
 
 install_preview_helper() {
@@ -734,11 +806,13 @@ run_on_deploy() {
   fi
   echo "Running scripts/on-deploy..."
   if ((dry_run)); then
-    echo "DRY-RUN: OWNER=${owner} SCRATCH_DIR=${scratch_dir} CONF_DIR=${conf_dir} HOME_NGINX_CONF=${home_nginx_conf} ${hook}"
+    echo "DRY-RUN: OWNER=${owner} SERVICE_GROUP=${service_group} SCRATCH_DIR=${scratch_dir}" \
+      "CONF_DIR=${conf_dir} HOME_NGINX_CONF=${home_nginx_conf} ${hook}"
     return 0
   fi
   set +e
-  OWNER="${owner}" SCRATCH_DIR="${scratch_dir}" CONF_DIR="${conf_dir}" HOME_NGINX_CONF="${home_nginx_conf}" "${hook}"
+  OWNER="${owner}" SERVICE_GROUP="${service_group}" SCRATCH_DIR="${scratch_dir}" \
+    CONF_DIR="${conf_dir}" HOME_NGINX_CONF="${home_nginx_conf}" "${hook}"
   rc=$?
   set -e
   case "${rc}" in
@@ -770,6 +844,7 @@ print_status() {
   echo "home-warden setup-service status"
   echo "  repo:            ${repo_dir}"
   echo "  owner:           ${owner}"
+  echo "  service user:    ${service_user}:${service_group}"
   echo "  scratch:         ${scratch_dir}"
   echo "  conf:            ${conf_dir}"
   echo "  certs:           ${conf_dir}/certs/live"
@@ -900,6 +975,7 @@ main() {
 
   require_sudo
   check_prerequisites
+  ensure_service_account
   prepare_scratch
   validate_nginx_config
   nginx_extra_read_paths="$(resolve_nginx_extra_read_paths "${nginx_dump}" | paste -sd ' ' -)"
@@ -912,6 +988,8 @@ main() {
   run_on_deploy
   on_deploy_rc=$?
   set -e
+
+  grant_service_access
 
   deployed_commit="$(git -C "${repo_dir}" rev-parse HEAD 2>/dev/null || true)"
   expand_unit "${unit_template_dir}/home-warden.socket" "${system_unit_dir}/home-warden.socket"

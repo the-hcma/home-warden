@@ -14,6 +14,8 @@
 #   HOME_WARDEN_RELOAD     default: 1 (set 0 when systemd ExecStartPost reloads)
 #   CERTBOT_DOMAINS_FILE   default: $repo_dir/conf/certbot-domains
 #   DNS_CLOUDFLARE_PROPAGATION_SECONDS  default: 60 (plugin default 10 is often too short)
+#   SERVICE_GROUP          default: home-warden (group home-warden.service reads certs through;
+#                          skipped when that group does not exist)
 #
 # Usage:
 #   ./scripts/cert-renewer
@@ -45,6 +47,7 @@ home_warden_reload="${HOME_WARDEN_RELOAD:-1}"
 certbot_domains_file="${CERTBOT_DOMAINS_FILE:-${repo_dir}/conf/certbot-domains}"
 certbot_bin="${CERTBOT:-/usr/bin/certbot}"
 dns_propagation_seconds="${DNS_CLOUDFLARE_PROPAGATION_SECONDS:-60}"
+service_group="${SERVICE_GROUP:-home-warden}"
 dry_run=0
 
 usage() {
@@ -79,6 +82,21 @@ done
 if [[ -x "${script_dir}/link-runtime-conf" ]]; then
   "${script_dir}/link-runtime-conf" -q || true
 fi
+
+# home-warden.service runs as its own account (#43) and reads certs only
+# through SERVICE_GROUP membership. certbot creates new lineages with the
+# operator's primary group, so hand certs/, live/ and archive/ (never
+# accounts/, which holds the ACME account key) back to that group every run.
+share_certs_with_service_group() {
+  if ! getent group "${service_group}" >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! chgrp "${service_group}" "${certbot_config_dir}" ||
+    ! chgrp -R "${service_group}" "${certbot_config_dir}/archive" "${certbot_config_dir}/live"; then
+    echo "cert-renewer: WARNING: could not chgrp certs to ${service_group} —" \
+      "is $(id -un) in that group? home-warden.service may fail to read new keys" >&2
+  fi
+}
 
 trim_ws() {
   local s=$1
@@ -201,7 +219,9 @@ done
 
 if ((dry_run == 0)); then
   chmod -R u+rwX,g+rX,o-rwx "${certbot_config_dir}" || true
-  find "${certbot_config_dir}/live" -type f -name 'privkey.pem' -exec chmod 640 {} \; 2>/dev/null || true
+  # live/*/privkey.pem are symlinks; the key files themselves live in archive/.
+  find "${certbot_config_dir}/archive" -type f -name 'privkey*.pem' -exec chmod 640 {} + 2>/dev/null || true
+  share_certs_with_service_group
 fi
 
 if [[ "${home_warden_reload}" == "1" ]] && ((dry_run == 0)); then

@@ -9,6 +9,8 @@
 #                     nginx -t (this script runs as root, via
 #                     home-warden-reload.service); default: SCRATCH_DIR's
 #                     existing owner
+#   SERVICE_GROUP    home-warden.service's Group=, given group write on that pid
+#                     file; default: OWNER
 #
 # Exit:
 #   0 — test OK and reload/restart succeeded (or service inactive: skip reload)
@@ -37,6 +39,7 @@ source "${script_dir}/lib/nginx-pid"
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 home_nginx_conf="${HOME_NGINX_CONF:-}"
 owner="${OWNER:-$(stat -c '%U' "${scratch_dir}" 2>/dev/null || true)}"
+service_group="${SERVICE_GROUP:-${owner}}"
 
 log() {
   local msg=$1
@@ -67,7 +70,7 @@ if ! nginx -p "${scratch_dir}/" -t -c "${home_nginx_conf}"; then
 fi
 log "nginx -t OK"
 if [[ -n "${owner}" ]]; then
-  hw_fix_nginx_pid_ownership "${scratch_dir}" "${owner}"
+  hw_fix_nginx_pid_ownership "${scratch_dir}" "${owner}" "${service_group}"
 fi
 
 if systemctl is-active --quiet home-warden.service 2>/dev/null; then
