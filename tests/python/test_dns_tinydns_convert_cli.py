@@ -44,6 +44,20 @@ def test_cli_no_soa_lines_exits_2(monkeypatch, tmp_path: Path, capsys) -> None:
     assert "no zones" in capsys.readouterr().err
 
 
+def test_cli_warns_on_skipped_implicit_ptr_and_exits_0(monkeypatch, tmp_path: Path, capsys) -> None:
+    data_file = tmp_path / "data"
+    data_file.write_text(
+        "Zexample.com:ns1.example.com.:hostmaster.example.com.:1:16384:2048:1048576:2560:3600\n"
+        "=app.example.com:198.51.100.7\n"
+    )
+    outdir = tmp_path / "out"
+    monkeypatch.setattr(sys, "argv", ["dns-tinydns-convert", str(data_file), "--outdir", str(outdir)])
+    assert main() == 0
+    assert "skipped implicit PTR 7.100.51.198.in-addr.arpa -> app.example.com." in capsys.readouterr().err
+    parsed = yaml.safe_load((outdir / "zones.yml").read_text())
+    assert parsed["domains"][0]["records"]["app.example.com"] == [{"a": "198.51.100.7"}]
+
+
 def test_cli_writes_zones_yaml_and_pdns_conf(monkeypatch, tmp_path: Path, capsys) -> None:
     data_file = tmp_path / "data"
     data_file.write_text(

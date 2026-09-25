@@ -74,7 +74,9 @@ def test_parse_a_and_ptr() -> None:
     records = parse_tinydns_data(line)
     assert records == [
         ParsedRecord(owner="app.example.com", rtype="a", content="203.0.113.2", ttl=86400),
-        ParsedRecord(owner="2.113.0.203.in-addr.arpa", rtype="ptr", content="app.example.com.", ttl=86400),
+        ParsedRecord(
+            owner="2.113.0.203.in-addr.arpa", rtype="ptr", content="app.example.com.", ttl=86400, implicit=True
+        ),
     ]
 
 
@@ -260,6 +262,29 @@ def test_bucket_into_zones_apex_itself_matches() -> None:
     ]
     zones = bucket_into_zones(records, ["example.com"])
     assert zones["example.com"].records["example.com"]["txt"] == [RecordValue("hello")]
+
+
+def test_bucket_into_zones_skips_implicit_ptr_without_reverse_zone() -> None:
+    records = parse_tinydns_data(
+        "Zexample.com:ns1.example.com.:hostmaster.example.com.:1:16384:2048:1048576:2560:3600\n"
+        "=app.example.com:198.51.100.7"
+    )
+    dropped: list[ParsedRecord] = []
+    zones = bucket_into_zones(records, zone_apexes_from_records(records), dropped)
+    assert zones["example.com"].records["app.example.com"]["a"] == [RecordValue("198.51.100.7")]
+    assert [(rec.owner, rec.rtype) for rec in dropped] == [("7.100.51.198.in-addr.arpa", "ptr")]
+
+
+def test_bucket_into_zones_explicit_ptr_without_reverse_zone_still_raises() -> None:
+    records = [
+        ParsedRecord(owner="example.com", rtype="soa", content="soa-content", ttl=3600),
+        ParsedRecord(owner="7.100.51.198.in-addr.arpa", rtype="ptr", content="app.example.com.", ttl=None),
+    ]
+    try:
+        bucket_into_zones(records, ["example.com"], [])
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "no zone apex matches" in str(e)
 
 
 def test_bucket_into_zones_unmatched_owner_raises() -> None:

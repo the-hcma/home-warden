@@ -34,6 +34,8 @@ SCHEMA_SEARCH_PATHS = (
     # Debian/Ubuntu (pdns-backend-sqlite3 package, CI)
     "/usr/share/doc/pdns-backend-sqlite3/schema/schema.sqlite3.sql*",
     "/usr/share/pdns-backend-sqlite3/schema.sqlite3.sql",
+    # Ubuntu 26 (pdns-backend-sqlite3 5.0.x)
+    "/usr/share/pdns-backend-sqlite3/schema/schema.sqlite3.sql",
 )
 
 
