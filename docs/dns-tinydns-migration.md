@@ -130,6 +130,11 @@ directly, **not** `systemctl reload pdns.service` — the distro-packaged
 unit doesn't implement systemd's reload verb at all ("Job type reload is
 not applicable for unit pdns.service").
 
+The reload unit runs as root (for `pdns_control`), but the syntax gate is a
+`uv run` in this repo, so the script drops to `OWNER` (the operator) via
+`runuser` for that step. `uv` is looked up in the operator's
+`~/.local/bin` (the astral.sh installer default) before the system `PATH`.
+
 Logs: `~/scratch/home-warden/pdns-test-and-reload.log`.
 
 ## Spot-checking a live install
