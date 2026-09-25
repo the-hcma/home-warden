@@ -549,12 +549,13 @@ four existing dimensions as the trigger. See
   1 on an unrelated alert-only/cooldown dimension even when it also healed
   a cert — `ExecStartPost` only fires after a oneshot's `ExecStart` exits
   0, so it would skip the reload in exactly that case; `ExecStopPost`
-  always runs. External-DNS detection/alerting needs `DNS_SYNC_TARGET` set
-  in `~/.config/home-warden-catalog-heal.env` (see
-  `etc/home-warden-catalog-heal.env.example`) — cert healing and
-  local-DNS/upstream alerting work without it; actually repairing a
-  flagged DNS record still requires a human to run
-  `catalog-heal --apply-cert --apply-dns` by hand, since the timer itself
+  always runs. External-DNS *detection/alerting* needs only Cloudflare
+  credentials (`conf/cloudflare.ini`) — same as #57's own `dns` dimension
+  — and runs on every timer pass regardless of `DNS_SYNC_TARGET`.
+  `DNS_SYNC_TARGET`, set in `~/.config/home-warden-catalog-heal.env` (see
+  `etc/home-warden-catalog-heal.env.example`), is needed only to *repair*
+  a flagged record, and only once a human runs
+  `catalog-heal --apply-cert --apply-dns` by hand — the timer itself
   never passes `--apply-dns`.
 
 ---
