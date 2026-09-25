@@ -6,9 +6,13 @@
 # `systemctl start home-warden-catalog-heal.service`).
 #
 # Optional env: ~/.config/home-warden-catalog-heal.env (see
-# etc/home-warden-catalog-heal.env.example) -- set DNS_SYNC_TARGET there to
-# enable external-DNS healing, and CATALOG_HEAL_ALERT_TO (plus the
-# operator-saved SMTP settings) to receive mail instead of log-only alerts.
+# etc/home-warden-catalog-heal.env.example) -- external-DNS
+# detection/alerting needs only Cloudflare credentials and runs
+# unconditionally; set DNS_SYNC_TARGET there to let a *repair* actually
+# apply once an operator runs `catalog-heal --apply-cert --apply-dns` by
+# hand after reading the alert (this unit itself never passes
+# --apply-dns), and CATALOG_HEAL_ALERT_TO (plus the operator-saved SMTP
+# settings) to receive mail instead of log-only alerts.
 
 [Unit]
 Description=home-warden catalog auto-heal (oneshot)
@@ -35,7 +39,7 @@ Environment=CERTBOT_CONFIG_DIR=@@CONF_DIR@@/certs
 Environment=SERVICES_JSON_PATH=@@SERVICES_JSON_PATH@@
 Environment=HOME_WARDEN_RELOAD=0
 EnvironmentFile=-@@HOME_DIR@@/.config/home-warden-catalog-heal.env
-ExecStart=@@REPO_DIR@@/scripts/catalog-heal --apply
+ExecStart=@@REPO_DIR@@/scripts/catalog-heal --apply-cert
 # ExecStopPost (not ExecStartPost): catalog-heal exits 1 on any routine
 # alert-only/cooldown/failed dimension (e.g. one unrelated service's
 # upstream being down), not just on a real run failure -- ExecStartPost

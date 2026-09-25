@@ -480,9 +480,9 @@ small subset of domesti-bot's, so adopt the shape, not its full scale.
 ## Catalog Auto-Healing
 
 `app/catalog_heal.py` (CLI: `catalog-heal`, wrapper: `scripts/catalog-heal
-[--apply]`) detects and repairs drift across the catalog's cert/DNS/
-upstream health, reusing `app.catalog_checks.run_all`'s four existing
-dimensions as the trigger. See
+[--apply-cert] [--apply-dns]`) detects and repairs drift across the
+catalog's cert/DNS/upstream health, reusing `app.catalog_checks.run_all`'s
+four existing dimensions as the trigger. See
 [#57](https://github.com/the-hcma/home-warden/issues/57).
 
 - **What actually gets healed, and what only gets alerted**:
@@ -499,10 +499,20 @@ dimensions as the trigger. See
     control (matching this issue's own non-goal and the Service
     Registration Orchestration section's "never created here" stance for
     local DNS above).
-- **Confirm-first, uniformly**: `apply=False` (the CLI default) previews
-  every dimension — including cert and DNS — without writing anything,
-  touching flap-protection state, or sending mail. Only a real `--apply`
-  run acts; a dry run is a manual look, not the scheduled pass.
+- **Confirm-first, per dimension**: `--apply-cert`/`--apply-dns` gate cert
+  and DNS independently — neither one flag applying the other. With
+  neither flag, every dimension previews without writing anything,
+  touching flap-protection state, or sending mail (a dry run is a manual
+  look, not the scheduled pass). Cert renewal is safe unattended (same
+  posture as the existing `cert-renewer` daily timer — a bad attempt just
+  fails, it can't point anything anywhere), so the systemd timer always
+  passes `--apply-cert`. External-DNS repair can silently point a live
+  domain at the wrong place if the drift-detection logic itself has a
+  bug, so the timer never passes `--apply-dns` — only an operator running
+  `catalog-heal --apply-cert --apply-dns` by hand — after reading the
+  alert that `--apply-cert` alone already sent — performs a real DNS
+  write. In any real run (either flag set), a dimension whose own apply
+  flag isn't set reports `alert-only`, not a silent no-op.
 - **Flap protection**: `app.catalog_health_settings.heal_state_path()`
   (default `$SCRATCH_DIR/catalog-heal.state.json`) tracks, per
   service+dimension, a rolling attempt count and last-attempt time —
@@ -528,21 +538,25 @@ dimensions as the trigger. See
   something failed/alert-only/cooling down, 2 usage/config error.
 - **Cadence**: `scripts/setup-service` installs and enables
   `home-warden-catalog-heal.timer`/`.service` (every 15 minutes, always
-  `--apply`) automatically, opt-in via `SERVICES_JSON_PATH` — skipped, not
-  an error, when unset and the default `~/.config/home-warden/services.json`
-  doesn't exist either, mirroring `PDNS_ZONES_YAML`'s opt-in shape above.
-  `HOME_WARDEN_RELOAD=0` disables `scripts/cert-renewer`'s own reload
-  (same as `home-warden-certbot.service`), but the reload trigger itself
-  is `ExecStopPost` rather than that unit's `ExecStartPost`: unlike
-  cert-renewer (which only runs one command and fails only on a real
-  error), `catalog-heal --apply` routinely exits 1 on an unrelated
-  alert-only/cooldown dimension even when it also healed a cert —
-  `ExecStartPost` only fires after a oneshot's `ExecStart` exits 0, so it
-  would skip the reload in exactly that case; `ExecStopPost` always runs.
-  External-DNS healing needs
-  `DNS_SYNC_TARGET` set in `~/.config/home-warden-catalog-heal.env` (see
-  `etc/home-warden-catalog-heal.env.example`) — cert healing and
-  local-DNS/upstream alerting work without it.
+  `--apply-cert`, never `--apply-dns`) automatically, opt-in via
+  `SERVICES_JSON_PATH` — skipped, not an error, when unset and the default
+  `~/.config/home-warden/services.json` doesn't exist either, mirroring
+  `PDNS_ZONES_YAML`'s opt-in shape above. `HOME_WARDEN_RELOAD=0` disables
+  `scripts/cert-renewer`'s own reload (same as `home-warden-certbot.service`),
+  but the reload trigger itself is `ExecStopPost` rather than that unit's
+  `ExecStartPost`: unlike cert-renewer (which only runs one command and
+  fails only on a real error), `catalog-heal --apply-cert` routinely exits
+  1 on an unrelated alert-only/cooldown dimension even when it also healed
+  a cert — `ExecStartPost` only fires after a oneshot's `ExecStart` exits
+  0, so it would skip the reload in exactly that case; `ExecStopPost`
+  always runs. External-DNS *detection/alerting* needs only Cloudflare
+  credentials (`conf/cloudflare.ini`) — same as #57's own `dns` dimension
+  — and runs on every timer pass regardless of `DNS_SYNC_TARGET`.
+  `DNS_SYNC_TARGET`, set in `~/.config/home-warden-catalog-heal.env` (see
+  `etc/home-warden-catalog-heal.env.example`), is needed only to *repair*
+  a flagged record, and only once a human runs
+  `catalog-heal --apply-cert --apply-dns` by hand — the timer itself
+  never passes `--apply-dns`.
 
 ---
 
