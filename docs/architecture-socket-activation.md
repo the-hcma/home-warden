@@ -217,17 +217,19 @@ have to rediscover them.
       assumptions, `ConditionHost`/host-guard, the Gixy-Next CI job) against
       a design that's already live in production — not a quick fix.
       Socket activation stays exactly as-is either way.
-    - **Considered and rejected: reuse the OS nginx package's own
-      `www-data` account.** `scripts/setup-service` already hard-requires
-      the `nginx` package for the binary alone, and its postinst creates
-      `www-data` as a side effect — genuinely free, no new `useradd` step.
-      But unlike `pdns-server`'s account (created specifically for pdns),
-      `www-data` is a *shared*, generic Debian `base-passwd` account other
-      packages (PHP-FPM, etc.) may also default to — it only shrinks gap
-      #1's shared-identity exposure rather than closing it, which
-      undercuts the point of #43 on a host already investing this much in
-      isolation (systemd sandboxing above, `ConditionHost`/host-guard,
-      Gixy-Next lint).
+    - **Considered and rejected: reuse `www-data`, the account nginx
+      defaults to.** `www-data` (uid 33) ships from Debian/Ubuntu's
+      `base-passwd` package, present on essentially any Debian-derived
+      host regardless of whether nginx is ever installed — nginx's own
+      `nginx.conf` just names it (`user www-data;`) as the account its
+      workers already drop to. Reusing it on `home-warden.service` would
+      cost no new `useradd` step, but unlike `pdns-server`'s account
+      (created specifically for pdns), `www-data` is a *shared*, generic
+      account other packages (PHP-FPM, etc.) may also default to — it only
+      shrinks gap #1's shared-identity exposure rather than closing it,
+      which undercuts the point of #43 on a host already investing this
+      much in isolation (systemd sandboxing above,
+      `ConditionHost`/host-guard, Gixy-Next lint).
     - **Chosen direction: a dedicated `home-warden` system account.**
       `scripts/setup-service` gains an idempotent
       `sudo useradd --system --no-create-home home-warden` step (skipped
