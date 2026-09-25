@@ -7,8 +7,11 @@
 #
 # Optional env: ~/.config/home-warden-catalog-heal.env (see
 # etc/home-warden-catalog-heal.env.example) -- set DNS_SYNC_TARGET there to
-# enable external-DNS healing, and CATALOG_HEAL_ALERT_TO (plus the
-# operator-saved SMTP settings) to receive mail instead of log-only alerts.
+# enable external-DNS *detection/alerting* (this unit never passes
+# --apply-dns: a real DNS repair always needs an operator to run
+# `catalog-heal --apply-cert --apply-dns` by hand after reading the
+# alert), and CATALOG_HEAL_ALERT_TO (plus the operator-saved SMTP
+# settings) to receive mail instead of log-only alerts.
 
 [Unit]
 Description=home-warden catalog auto-heal (oneshot)
@@ -35,7 +38,7 @@ Environment=CERTBOT_CONFIG_DIR=@@CONF_DIR@@/certs
 Environment=SERVICES_JSON_PATH=@@SERVICES_JSON_PATH@@
 Environment=HOME_WARDEN_RELOAD=0
 EnvironmentFile=-@@HOME_DIR@@/.config/home-warden-catalog-heal.env
-ExecStart=@@REPO_DIR@@/scripts/catalog-heal --apply
+ExecStart=@@REPO_DIR@@/scripts/catalog-heal --apply-cert
 # ExecStopPost (not ExecStartPost): catalog-heal exits 1 on any routine
 # alert-only/cooldown/failed dimension (e.g. one unrelated service's
 # upstream being down), not just on a real run failure -- ExecStartPost

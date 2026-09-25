@@ -3,13 +3,19 @@
 
 Usage:
   catalog-heal --target 203.0.113.10
-  catalog-heal --target 203.0.113.10 --apply
+  catalog-heal --target 203.0.113.10 --apply-cert
+  catalog-heal --target 203.0.113.10 --apply-cert --apply-dns
 
-Confirm-first: without --apply, every dimension previews what it would do
-without changing anything, sending mail, or touching flap-protection
-state (matches app.catalog_register's own contract) -- review the plan,
-then re-run with --apply. The systemd timer (see AGENTS.md's Catalog
-Auto-Healing section) always passes --apply.
+Confirm-first, per dimension: with neither --apply-cert nor --apply-dns,
+every dimension previews what it would do without changing anything,
+sending mail, or touching flap-protection state (matches
+app.catalog_register's own contract). --apply-cert lets cert renewal
+actually run (safe unattended, same as the existing cert-renewer daily
+timer); --apply-dns lets external-DNS repair actually run (can silently
+repoint a live domain if the drift check itself is wrong, so it's
+withheld from the timer -- an operator passes it by hand after reading
+the alert). The systemd timer (see AGENTS.md's Catalog Auto-Healing
+section) always passes --apply-cert and never --apply-dns.
 
 Exit: 0 nothing needs attention, 1 something failed/alert-only/cooling
 down, 2 usage/config error.
@@ -78,7 +84,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--attempt-window-sec", type=float, default=heal_attempt_window_seconds())
     parser.add_argument("--resend-sec", type=float, default=heal_alert_resend_seconds())
     parser.add_argument("--alert-to", default=heal_alert_to())
-    parser.add_argument("--apply", action="store_true", help="Actually heal/alert (default: preview only)")
+    parser.add_argument("--apply-cert", action="store_true", help="Actually renew certs (default: preview only)")
+    parser.add_argument("--apply-dns", action="store_true", help="Actually repair external DNS (default: preview only)")
     parser.add_argument("--verbose", "-v", action="store_true")
     return parser
 
@@ -121,7 +128,8 @@ def main() -> int:
         local_dns_port=args.local_dns_port,
         timeout=args.timeout,
         max_retries=args.max_retries,
-        apply=args.apply,
+        apply_cert=args.apply_cert,
+        apply_dns=args.apply_dns,
         proxied=args.proxied,
         cloudflare_credentials=args.cloudflare_credentials,
         certbot_domains_file=args.certbot_domains_file,

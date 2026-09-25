@@ -28,7 +28,8 @@ def test_cli_help_exits_cleanly() -> None:
         [sys.executable, "-m", "app.catalog_heal_cli", "--help"], capture_output=True, text=True, timeout=10
     )
     assert proc.returncode == 0
-    assert "--apply" in proc.stdout
+    assert "--apply-cert" in proc.stdout
+    assert "--apply-dns" in proc.stdout
 
 
 def test_cli_non_positive_timeout_exits_2(monkeypatch, capsys) -> None:
@@ -144,11 +145,12 @@ def test_cli_exits_1_on_failed_result(monkeypatch, tmp_path: Path, capsys) -> No
     assert out[0]["action"] == "failed"
 
 
-def test_cli_wires_apply_and_target_into_heal_catalog(monkeypatch, tmp_path: Path) -> None:
-    # A swapped wire-up (e.g. apply always False) would silently make
-    # --apply a no-op with every other CLI test still passing, since they
-    # discard the kwargs heal_catalog was actually called with -- capture
-    # them here instead of just returning a fixed result.
+def test_cli_wires_apply_flags_and_target_into_heal_catalog(monkeypatch, tmp_path: Path) -> None:
+    # A swapped wire-up (e.g. either flag always False) would silently make
+    # --apply-cert/--apply-dns a no-op with every other CLI test still
+    # passing, since they discard the kwargs heal_catalog was actually
+    # called with -- capture them here instead of just returning a fixed
+    # result.
     catalog_path = _write_catalog(tmp_path)
     creds = _write_credentials(tmp_path)
     monkeypatch.setattr(
@@ -162,7 +164,8 @@ def test_cli_wires_apply_and_target_into_heal_catalog(monkeypatch, tmp_path: Pat
             str(creds),
             "--target",
             "203.0.113.10",
-            "--apply",
+            "--apply-cert",
+            "--apply-dns",
             "--proxied",
         ],
     )
@@ -175,9 +178,40 @@ def test_cli_wires_apply_and_target_into_heal_catalog(monkeypatch, tmp_path: Pat
 
     monkeypatch.setattr("app.catalog_heal_cli.heal_catalog", _capture)
     main()
-    assert captured["kwargs"]["apply"] is True
+    assert captured["kwargs"]["apply_cert"] is True
+    assert captured["kwargs"]["apply_dns"] is True
     assert captured["kwargs"]["proxied"] is True
     assert captured["kwargs"]["dns_target"] == "203.0.113.10"
+
+
+def test_cli_apply_cert_without_apply_dns_wires_independently(monkeypatch, tmp_path: Path) -> None:
+    # The systemd timer only ever passes --apply-cert -- pin that
+    # --apply-dns stays False when omitted, independently of --apply-cert.
+    catalog_path = _write_catalog(tmp_path)
+    creds = _write_credentials(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "catalog-heal",
+            "--services-json",
+            str(catalog_path),
+            "--cloudflare-credentials",
+            str(creds),
+            "--apply-cert",
+        ],
+    )
+    monkeypatch.setattr("app.catalog_heal_cli.enforce_host_guard", lambda caller: True)
+    captured: dict = {}
+
+    def _capture(catalog, **kw):
+        captured["kwargs"] = kw
+        return [HealStepResult("svc", "cert", "ok", "valid")]
+
+    monkeypatch.setattr("app.catalog_heal_cli.heal_catalog", _capture)
+    main()
+    assert captured["kwargs"]["apply_cert"] is True
+    assert captured["kwargs"]["apply_dns"] is False
 
 
 if __name__ == "__main__":

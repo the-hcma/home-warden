@@ -14,12 +14,23 @@ home-warden doesn't own (see AGENTS.md's Service Registration
 Orchestration section and #57's own non-goals) -- surfacing loudly is the
 honest "fix" for both.
 
-Confirm-first like catalog_register: `apply=False` (the default) previews
-every dimension without changing anything or sending any alert -- a dry
-run is a manual look, not a scheduled pass, so it neither mutates
-flap-protection state nor counts against the alert-resend window. Only a
-real `--apply` run (the systemd timer's own invocation) touches
-`heal_state_path()` or sends mail.
+Confirm-first, but *per dimension*: `apply_cert`/`apply_dns` gate cert and
+DNS independently rather than sharing one flag. Neither set (the CLI
+default) previews every dimension without changing anything or sending
+any alert -- a dry run is a manual look, not a scheduled pass, so it
+neither mutates flap-protection state nor counts against the
+alert-resend window. Cert healing is safe to run unattended (matches
+`scripts/cert-renewer`'s existing daily timer, and a bad cert-renewal
+attempt just fails, it doesn't point anything anywhere) so the systemd
+timer always passes `--apply-cert`. External-DNS healing can silently
+repoint a live domain if the drift-detection logic itself has a bug, so
+the timer never passes `--apply-dns` -- a real DNS repair only happens
+when an operator runs `catalog-heal --apply-dns` by hand after reading
+the alert. A real run (either apply flag set) touches `heal_state_path()` and sends
+mail; a dimension whose own apply flag is unset in a real run still
+reports `alert-only`, not `would-heal` -- "would-heal" means "this is a
+dry-run preview, nothing acted", while "alert-only" means "this run was
+real, but this dimension wasn't authorized to write".
 """
 
 from __future__ import annotations
@@ -64,7 +75,8 @@ def heal_catalog(
     local_dns_port: int,
     timeout: float,
     max_retries: int,
-    apply: bool,
+    apply_cert: bool,
+    apply_dns: bool,
     proxied: bool = False,
     cloudflare_credentials: Path,
     certbot_domains_file: Path,
@@ -88,8 +100,9 @@ def heal_catalog(
         max_retries=max_retries,
     )
 
+    real_run = apply_cert or apply_dns
     services_by_name = {s.get("name", "<unnamed>"): s for s in catalog.get("services") or []}
-    state = _load_state(state_path) if apply else {}
+    state = _load_state(state_path) if real_run else {}
     now = time.time()
 
     results = [
@@ -102,7 +115,9 @@ def heal_catalog(
             cf_headers=cf_headers,
             timeout=timeout,
             max_retries=max_retries,
-            apply=apply,
+            real_run=real_run,
+            apply_cert=apply_cert,
+            apply_dns=apply_dns,
             proxied=proxied,
             cloudflare_credentials=cloudflare_credentials,
             certbot_domains_file=certbot_domains_file,
@@ -115,7 +130,7 @@ def heal_catalog(
         for check in checks
     ]
 
-    if apply:
+    if real_run:
         for result in results:
             _maybe_alert(
                 result, state, now=now, resend_seconds=resend_seconds, smtp_config=smtp_config, alert_to=alert_to
@@ -135,7 +150,9 @@ def _heal_one(
     cf_headers: dict[str, str] | None,
     timeout: float,
     max_retries: int,
-    apply: bool,
+    real_run: bool,
+    apply_cert: bool,
+    apply_dns: bool,
     proxied: bool,
     cloudflare_credentials: Path,
     certbot_domains_file: Path,
@@ -152,8 +169,12 @@ def _heal_one(
     if check.dimension not in _ACTIONABLE_DIMENSIONS:
         return HealStepResult(check.service, check.dimension, "alert-only", check.detail)
 
-    if not apply:
+    if not real_run:
         return HealStepResult(check.service, check.dimension, "would-heal", check.detail)
+
+    dimension_apply = apply_cert if check.dimension == "cert" else apply_dns
+    if not dimension_apply:
+        return HealStepResult(check.service, check.dimension, "alert-only", check.detail)
 
     key = f"{check.service}:{check.dimension}"
     entry = state.setdefault(key, {})
