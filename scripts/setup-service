@@ -216,7 +216,10 @@ resolve_home_nginx_conf() {
 # references under /home or /root is invisible unless bind-mounted back in.
 # Prints one `-<path>` per line (the `-` makes systemd skip a path that has
 # since disappeared instead of refusing to start) for every such location not
-# already covered by HOME_NGINX_CONF's dir, CONF_DIR, or SCRATCH_DIR.
+# already covered by HOME_NGINX_CONF's dir, CONF_DIR, or SCRATCH_DIR. File
+# directives bind just the file; only root/alias and glob includes bind a
+# directory. The conf is not trusted to widen the sandbox arbitrarily: see
+# is_safe_sandbox_bind for what is refused.
 resolve_nginx_extra_read_paths() {
   local -r dump="$1"
   local covered
@@ -240,7 +243,14 @@ resolve_nginx_extra_read_paths() {
     fi
     case "${directive}" in
       alias | root) target="${path%/}" ;;
-      *) target="$(dirname "${path}")" ;;
+      include)
+        if [[ "${path}" == *[*?[]* ]]; then
+          target="$(dirname "${path}")"
+        else
+          target="${path}"
+        fi
+        ;;
+      *) target="${path}" ;;
     esac
     skip=0
     for covered in "${home_nginx_conf_dir}" "${conf_dir}" "${scratch_dir}"; do
@@ -248,9 +258,15 @@ resolve_nginx_extra_read_paths() {
         skip=1
       fi
     done
-    if ((skip == 0)); then
-      printf -- '-%s\n' "${target}"
+    if ((skip)); then
+      continue
     fi
+    if ! is_safe_sandbox_bind "${target}"; then
+      echo "WARNING: not exposing ${target} (from ${directive}) to the nginx sandbox:" \
+        "/root, a bare home dir, and hidden paths are refused — move it under a dedicated dir" >&2
+      continue
+    fi
+    printf -- '-%s\n' "${target}"
   done < <(
     sed -nE "s/^[[:space:]]*(${directive_re})[[:space:]]+([^;[:space:]]+)[[:space:]]*;.*\$/\1 \2/p" \
       <<<"${dump}"
@@ -286,6 +302,17 @@ resolve_services_json() {
     return 0
   fi
   return 1
+}
+
+# Refuses bind targets that would hand the sandbox far more than one vhost's
+# files: anything under /root, /home or a bare /home/<user>, and any path
+# with a hidden component (~/.ssh, ~/.config, `..`).
+is_safe_sandbox_bind() {
+  local -r target="$1"
+  if [[ "${target}" != /home/*/* || "${target}" == */.* ]]; then
+    return 1
+  fi
+  return 0
 }
 
 is_valid_fqdn() {

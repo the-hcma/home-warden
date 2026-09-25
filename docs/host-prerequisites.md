@@ -284,7 +284,10 @@ was bound at install time — the conf's own directory, `CONF_DIR`,
 directory that `setup-service` found via `nginx -T`. If an edit adds a new
 such path (e.g. a new static `root`), re-run `./scripts/setup-service`; the
 reload alone passes `nginx -t` (run as root, outside the sandbox) but the
-live workers will get `403`/`404` or fail to load the file.
+live workers will get `403`/`404` or fail to load the file. Discovery binds
+single files for file directives and never exposes `/root`, a bare home
+directory, or a hidden path (`~/.ssh`, `~/.config`, …) — keep served files
+under a dedicated directory; `setup-service` warns about any it refused.
 
 ## Notes
 
