@@ -18,8 +18,13 @@ Type=oneshot
 # scripts/pdns-test-and-reload) can find the pin under the operator's
 # ~/.config, not /root/.config.
 Environment=HOME=@@HOME_DIR@@
+# scripts/pdns-test-and-reload runs its uv-backed syntax gate as OWNER (via
+# runuser, so nothing root-owned lands in OWNER's uv cache or .venv), then
+# pdns_control as root. @@HOME_DIR@@/.local/bin first: the astral.sh uv
+# installer's default per-user location, as in home-warden-catalog-heal.service.
+Environment=OWNER=@@OWNER@@
 Environment=PDNS_ZONES_YAML=@@PDNS_ZONES_YAML@@
-Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=@@HOME_DIR@@/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 WorkingDirectory=@@REPO_DIR@@
 ExecStart=@@REPO_DIR@@/scripts/pdns-test-and-reload
 TimeoutStartSec=2min

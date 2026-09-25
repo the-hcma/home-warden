@@ -6,6 +6,11 @@
 # Env:
 #   PDNS_ZONES_YAML  path to thehcma/home's dns/zones.yml (required unless
 #                    default resolves)
+#   OWNER            account the syntax gate runs as when this script runs as
+#                    root (home-warden-pdns-reload.service): the gate execs
+#                    `uv run` in this repo, which must not leave root-owned
+#                    files in OWNER's uv cache or .venv; default: the repo's
+#                    owner. pdns_control itself still runs as root.
 #   PDNS_SERVICE     systemd unit name for the distro pdns-server package
 #                    (default: pdns.service -- the *package* is
 #                    pdns-server, but the *unit* Debian/Ubuntu installs is
@@ -45,12 +50,24 @@ pdns_zones_yaml="${PDNS_ZONES_YAML:-}"
 readonly pdns_zones_yaml
 pdns_service="${PDNS_SERVICE:-pdns.service}"
 readonly pdns_service
+owner="${OWNER:-$(stat -c '%U' "${script_dir}/.." 2>/dev/null || true)}"
+readonly owner
 
 log() {
   local -r msg=$1
   local ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '%s %s\n' "${ts}" "${msg}"
+}
+
+run_zones_check() {
+  local -r zones_yaml="$1"
+
+  if [[ "$(id -u)" -ne 0 || -z "${owner}" || "${owner}" == "root" ]]; then
+    "${script_dir}/dns-zones-yaml-check" "${zones_yaml}"
+    return
+  fi
+  runuser -u "${owner}" -- "${script_dir}/dns-zones-yaml-check" "${zones_yaml}"
 }
 
 if [[ -z "${pdns_zones_yaml}" ]]; then
@@ -64,7 +81,7 @@ if [[ ! -f "${pdns_zones_yaml}" ]]; then
 fi
 
 log "dns-zones-yaml-check ${pdns_zones_yaml}"
-if "${script_dir}/dns-zones-yaml-check" "${pdns_zones_yaml}"; then
+if run_zones_check "${pdns_zones_yaml}"; then
   log "syntax OK"
 else
   wrapper_status=$?
@@ -94,4 +111,13 @@ if pdns_control reload; then
 else
   log "FAIL: pdns_control reload failed"
   exit 1
+fi
+
+# reload rereads the YAML but keeps the packet and query caches, so a removed
+# record keeps answering (~20s) and a new one stays NXDOMAIN (negquery-cache-ttl,
+# 60s) after "reload OK" -- long enough to fail a catalog-register run (#128).
+if pdns_control purge >/dev/null; then
+  log "cache purge OK"
+else
+  log "WARN: pdns_control purge failed — stale answers until cache TTLs expire"
 fi
