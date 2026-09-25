@@ -218,7 +218,9 @@ resolve_home_nginx_conf() {
 # since disappeared instead of refusing to start) for every such location not
 # already covered by HOME_NGINX_CONF's dir, CONF_DIR, or SCRATCH_DIR. File
 # directives bind just the file; only root/alias and glob includes bind a
-# directory. The conf is not trusted to widen the sandbox arbitrarily: see
+# directory. The whole argument up to `;` is captured so a path the allowlist
+# can't take (e.g. a quoted one with a space) is warned about, never silently
+# dropped. The conf is not trusted to widen the sandbox arbitrarily: see
 # is_safe_sandbox_bind for what is refused.
 resolve_nginx_extra_read_paths() {
   local -r dump="$1"
@@ -274,7 +276,7 @@ resolve_nginx_extra_read_paths() {
     fi
     printf -- '-%s\n' "${target}"
   done < <(
-    sed -nE "s/^[[:space:]]*(${directive_re})[[:space:]]+([^;[:space:]]+)[[:space:]]*;.*\$/\1 \2/p" \
+    sed -nE "s/^[[:space:]]*(${directive_re})[[:space:]]+([^;]+);.*\$/\1 \2/p" \
       <<<"${dump}"
   ) | sort -u
 }
