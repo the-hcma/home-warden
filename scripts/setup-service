@@ -4,6 +4,7 @@
 #
 # Placeholders: @@OWNER@@ @@SCRATCH_DIR@@ @@CONF_DIR@@ @@HOME_NGINX_CONF@@ @@HOME_DIR@@
 #               @@PDNS_ZONES_YAML@@ @@PDNS_ZONES_YAML_DIR@@ @@SERVICES_JSON_PATH@@
+#               @@NGINX_EXTRA_READ_PATHS@@
 # Injects ConditionHost=|<machine-id> and ConditionHost=|<hostname> (OR).
 #
 # Flow (non-dry-run):
@@ -73,6 +74,8 @@ pdns_enabled=0
 services_json="${SERVICES_JSON_PATH:-}"
 catalog_heal_enabled=0
 deployed_commit="${DEPLOYED_COMMIT:-}"
+nginx_dump=""
+nginx_extra_read_paths=""
 owner_home="$(getent passwd "${owner}" | cut -d: -f6 || true)"
 readonly owner_home
 preview_conf="${scratch_dir}/${preview_dir_name}/nginx.conf"
@@ -84,6 +87,20 @@ readonly preview_helper_source
 readonly default_home_nginx_conf="${HOME}/home/nginx/server/nginx.conf"
 readonly default_pdns_zones_yaml="${HOME}/home/dns/zones.yml"
 readonly default_services_json="${HOME}/.config/home-warden/services.json"
+# nginx directives whose argument is a filesystem path the sandbox may need.
+readonly -a nginx_path_directives=(
+  alias
+  auth_basic_user_file
+  include
+  root
+  ssl_certificate
+  ssl_certificate_key
+  ssl_client_certificate
+  ssl_crl
+  ssl_dhparam
+  ssl_password_file
+  ssl_trusted_certificate
+)
 
 confirm_host=0
 dry_run=0
@@ -193,6 +210,51 @@ resolve_home_nginx_conf() {
     return 0
   fi
   return 1
+}
+
+# home-warden.service runs with ProtectHome=tmpfs, so any file the served conf
+# references under /home or /root is invisible unless bind-mounted back in.
+# Prints one `-<path>` per line (the `-` makes systemd skip a path that has
+# since disappeared instead of refusing to start) for every such location not
+# already covered by HOME_NGINX_CONF's dir, CONF_DIR, or SCRATCH_DIR.
+resolve_nginx_extra_read_paths() {
+  local -r dump="$1"
+  local covered
+  local directive
+  local directive_re
+  local home_nginx_conf_dir
+  local path
+  local skip
+  local target
+
+  directive_re="$(
+    IFS='|'
+    printf '%s' "${nginx_path_directives[*]}"
+  )"
+  home_nginx_conf_dir="$(dirname "${home_nginx_conf}")"
+  while read -r directive path; do
+    path="${path//\"/}"
+    path="${path//\'/}"
+    if [[ "${path}" != /home/* && "${path}" != /root/* ]] || [[ "${path}" == *'$'* ]]; then
+      continue
+    fi
+    case "${directive}" in
+      alias | root) target="${path%/}" ;;
+      *) target="$(dirname "${path}")" ;;
+    esac
+    skip=0
+    for covered in "${home_nginx_conf_dir}" "${conf_dir}" "${scratch_dir}"; do
+      if [[ "${target}" == "${covered}" || "${target}" == "${covered}"/* ]]; then
+        skip=1
+      fi
+    done
+    if ((skip == 0)); then
+      printf -- '-%s\n' "${target}"
+    fi
+  done < <(
+    sed -nE "s/^[[:space:]]*(${directive_re})[[:space:]]+([^;[:space:]]+)[[:space:]]*;.*\$/\1 \2/p" \
+      <<<"${dump}"
+  ) | sort -u
 }
 
 # Opt-in, unlike resolve_home_nginx_conf: pdns is not a required part of
@@ -474,12 +536,14 @@ validate_nginx_config() {
   # with "duplicate" — instead let -t run, then hand the pid file back to
   # OWNER (scripts/lib/nginx-pid) so it doesn't leave the unprivileged
   # home-warden.service unable to write its own pid on the next start.
-  echo "Validating nginx config (sudo nginx -t)..."
+  # -T is -t plus a dump of the effective config (includes expanded), which
+  # resolve_nginx_extra_read_paths scans for paths the sandbox must expose.
+  echo "Validating nginx config (sudo nginx -T)..."
   if ((dry_run)); then
-    echo "DRY-RUN: sudo nginx -p ${scratch_dir}/ -t -c ${home_nginx_conf}"
+    echo "DRY-RUN: sudo nginx -p ${scratch_dir}/ -T -c ${home_nginx_conf}"
     return 0
   fi
-  if ! sudo nginx -p "${scratch_dir}/" -t -c "${home_nginx_conf}"; then
+  if ! nginx_dump="$(sudo nginx -p "${scratch_dir}/" -T -c "${home_nginx_conf}")"; then
     echo "ERROR: nginx -t failed — refusing to install/start home-warden" >&2
     exit 1
   fi
@@ -515,6 +579,7 @@ expand_unit() {
       -e "s|@@REPO_DIR@@|${repo_dir}|g" \
       -e "s|@@HOME_DIR@@|${HOME}|g" \
       -e "s|@@DEPLOYED_COMMIT@@|${deployed_commit}|g" \
+      -e "s|@@NGINX_EXTRA_READ_PATHS@@|${nginx_extra_read_paths}|g" \
       "${src}"
   )"
 
@@ -658,6 +723,10 @@ run_on_deploy() {
 }
 
 
+service_restart_count() {
+  systemctl show --property=NRestarts --value home-warden.service 2>/dev/null || echo 0
+}
+
 print_status() {
   local pinned_host pinned_machine_id
   pinned_host="$(hw_first_line "${hw_pinned_host_file}")"
@@ -725,16 +794,35 @@ mask_distro_nginx() {
   fi
 }
 
+# Type=simple reports "active" the moment nginx execs, even if it exits a
+# moment later and Restart= loops it — so watch past one RestartSec and fail
+# on any restart or non-active state rather than trusting a single probe.
 confirm_running() {
+  local -r settle_seconds=10
+  local i
+  local initial_restarts
   local nginx_procs
-  echo "Confirming home-warden is up..."
+  local restarts
+  local state
+
+  echo "Confirming home-warden is up (watching ${settle_seconds}s for crash/restart)..."
+  initial_restarts="$(service_restart_count)"
+  for ((i = 0; i < settle_seconds; i++)); do
+    sleep 1
+    state="$(systemctl is-active home-warden.service 2>/dev/null || true)"
+    restarts="$(service_restart_count)"
+    if [[ "${state}" != "active" || "${restarts}" != "${initial_restarts}" ]]; then
+      systemctl --no-pager --full status home-warden.socket home-warden.service || true
+      echo "ERROR: home-warden.service is not staying up" \
+        "(state=${state}, restarts ${initial_restarts}->${restarts})" >&2
+      echo "  last lines of ${scratch_dir}/home-warden.log:" >&2
+      tail -n 5 "${scratch_dir}/home-warden.log" >&2 || true
+      exit 1
+    fi
+  done
   systemctl --no-pager --full status home-warden.socket home-warden.service || true
   nginx_procs="$(ps -o user,pid,cmd -C nginx 2>/dev/null || true)"
-  if [[ -n "${nginx_procs}" ]]; then
-    echo "${nginx_procs}"
-  else
-    echo "WARNING: no nginx processes visible yet (socket may wait for traffic)" >&2
-  fi
+  echo "${nginx_procs}"
 }
 
 main() {
@@ -779,6 +867,10 @@ main() {
   check_prerequisites
   prepare_scratch
   validate_nginx_config
+  nginx_extra_read_paths="$(resolve_nginx_extra_read_paths "${nginx_dump}" | paste -sd ' ' -)"
+  if [[ -n "${nginx_extra_read_paths}" ]]; then
+    echo "Extra read-only paths exposed to the nginx sandbox: ${nginx_extra_read_paths}"
+  fi
 
   local on_deploy_rc=0
   set +e
@@ -812,6 +904,9 @@ main() {
   mask_distro_nginx
 
   run sudo systemctl daemon-reload
+  # Clears a StartLimitBurst= trip (or a socket failed by it) left over from
+  # a previous broken deploy, so the start below is not refused outright.
+  run sudo systemctl reset-failed home-warden.service home-warden.socket 2>/dev/null || true
   run sudo systemctl enable --now home-warden.socket
   run sudo systemctl enable --now home-warden-certbot.timer
   run sudo systemctl enable --now home-warden-reload.path

@@ -278,6 +278,14 @@ HOME_NGINX_CONF=/path/to/nginx.conf ./scripts/nginx-test-and-reload
 Editor save storms / temp files in the conf directory may trigger extra runs;
 `-t` still prevents applying a broken conf.
 
+**Sandbox caveat:** `home-warden.service` only sees the parts of `/home` it
+was bound at install time — the conf's own directory, `CONF_DIR`,
+`SCRATCH_DIR`, and any `root`/`alias`/`include`/`ssl_*` path under a home
+directory that `setup-service` found via `nginx -T`. If an edit adds a new
+such path (e.g. a new static `root`), re-run `./scripts/setup-service`; the
+reload alone passes `nginx -t` (run as root, outside the sandbox) but the
+live workers will get `403`/`404` or fail to load the file.
+
 ## Notes
 
 - Units are **system** (not user linger): systemd binds 80/443 and passes fds via `Environment=NGINX=3:4;`.

@@ -49,8 +49,6 @@ log() {
 if [[ -z "${home_nginx_conf}" ]]; then
   if [[ -f "${HOME}/home/nginx/server/nginx.conf" ]]; then
     home_nginx_conf="${HOME}/home/nginx/server/nginx.conf"
-  elif [[ -f /home/house_meister/home/nginx/server/nginx.conf ]]; then
-    home_nginx_conf=/home/house_meister/home/nginx/server/nginx.conf
   else
     log "ERROR: set HOME_NGINX_CONF"
     exit 2
