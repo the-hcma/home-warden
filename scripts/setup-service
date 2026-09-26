@@ -55,6 +55,7 @@ repo_dir="$(cd "${script_dir}/.." && pwd)"
 readonly repo_dir
 readonly unit_template_dir="${repo_dir}/etc/systemd"
 readonly system_unit_dir="/etc/systemd/system"
+readonly runtime_unit_dir="/run/systemd/system"
 readonly logrotate_template="${repo_dir}/etc/logrotate/home-warden"
 readonly logrotate_dest="/etc/logrotate.d/home-warden"
 readonly preview_dir_name="web-ui-preview"
@@ -319,10 +320,14 @@ remove_legacy_service_account() {
       return 0
     fi
   done
-  for unit_file in "${system_unit_dir}"/*.service "${system_unit_dir}"/*.d/*.conf; do
+  # Whitespace-tolerant, and list-aware for SupplementaryGroups=; erring wide
+  # only keeps the account, erring narrow breaks a unit that still needs it.
+  for unit_file in "${system_unit_dir}"/*.service "${system_unit_dir}"/*.d/*.conf \
+    "${runtime_unit_dir}"/*.service "${runtime_unit_dir}"/*.d/*.conf; do
     if [[ -f "${unit_file}" && " ${rendered_units[*]} " != *" ${unit_file} "* ]] &&
       grep --quiet --extended-regexp \
-        "^(User|Group)=${legacy}\$|SERVICE_GROUP=${legacy}\$" "${unit_file}"; then
+        "^[[:space:]]*(User|Group|SupplementaryGroups)[[:space:]]*=(.*[[:space:]])?${legacy}([[:space:]].*)?\$|SERVICE_GROUP=\"?${legacy}\"?([[:space:]].*)?\$" \
+        "${unit_file}"; then
       referencing_units+=("${unit_file}")
     fi
   done
