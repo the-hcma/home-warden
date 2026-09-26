@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # scripts/lib/nginx-sandbox-binds — which paths from the served nginx conf
-# home-warden.service's sandbox must bind back in, and which it refuses.
+# home-warden.service's sandbox must bind back in, and which it refuses; plus
+# which directories home-warden-reload.path must watch beyond the conf's own.
 #
 # home-warden.service runs with ProtectHome=tmpfs, so any file the served conf
 # references under /home or /root is invisible unless bind-mounted back in
@@ -61,6 +62,51 @@ nginx_path_directives=(
   ssl_trusted_certificate
 )
 readonly -a nginx_path_directives
+
+# resolve_nginx_reload_watch_dirs <nginx -T dump> [<watched dir>...]
+# Prints, one per line, the directory of every ssl_crl / ssl_client_certificate
+# path the conf references, minus the dirs already watched. nginx rereads
+# those files only on reload, so home-warden-reload.path watches their
+# directories: a directory watch catches an atomic-rename republish, which a
+# watch on the file itself would lose track of (#151). A PathModified= watch
+# is not recursive, so only an exact match counts as already watched. Paths
+# systemd would misparse (whitespace, quotes, a `$` variable) are warned
+# about and skipped.
+resolve_nginx_reload_watch_dirs() {
+  local -r dump="$1"
+  shift
+  local -a watched_dirs=("$@")
+  local directive
+  local dir
+  local path
+  local skip
+  local watched
+
+  while read -r directive path; do
+    path="${path//\"/}"
+    path="${path//\'/}"
+    if [[ ! "${path}" =~ ^/[A-Za-z0-9._@+/-]+$ ]]; then
+      echo "WARNING: not watching ${path} (from ${directive}) for reloads:" \
+        "only plain absolute paths are supported" >&2
+      continue
+    fi
+    dir="$(dirname "${path}")"
+    while [[ "${dir}" == *//* ]]; do
+      dir="${dir//\/\//\/}"
+    done
+    skip=0
+    for watched in "${watched_dirs[@]}"; do
+      if [[ "${dir}" == "${watched%/}" ]]; then
+        skip=1
+      fi
+    done
+    if ((skip == 0)); then
+      printf '%s\n' "${dir}"
+    fi
+  done < <(
+    sed -nE 's/^[[:space:]]*(ssl_client_certificate|ssl_crl)[[:space:]]+([^;]+);.*$/\1 \2/p' <<<"${dump}"
+  ) | sort -u
+}
 
 # resolve_nginx_extra_read_paths <nginx -T dump> [<covered dir>...]
 # Prints one `-<path>` per line (the `-` makes systemd skip a path that has
