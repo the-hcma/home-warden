@@ -240,9 +240,26 @@ ensure_host_config() {
 # and an nginx compromise is not a compromise of the operator's uid. OWNER
 # joins the group so cert-renewer (running as OWNER) can hand renewed keys to it.
 ensure_service_account() {
+  local -a fields=()
+  local passwd_entry
+
   if [[ "${service_user}" == "${owner}" ]]; then
     echo "SERVICE_USER=${owner}: home-warden.service keeps running as the operator (no dedicated account)"
     return 0
+  fi
+  if passwd_entry="$(getent passwd "${service_user}")"; then
+    IFS=: read -r -a fields <<<"${passwd_entry}"
+    if [[ "${fields[5]:-}" != "/nonexistent" || "${fields[6]:-}" != */nologin ]]; then
+      echo "ERROR: ${service_user} exists but is not a locked system account" \
+        "(home=${fields[5]:-?}, shell=${fields[6]:-?}); nginx must not run as a login account." \
+        "Pick another SERVICE_USER or see docs/host-prerequisites.md#nginx-service-account" >&2
+      exit 1
+    fi
+  else
+    echo "nginx will run as a dedicated, locked system account (${service_user}), not ${owner}:"
+    echo "  a compromised nginx worker then can't read ${owner}'s files or reach sibling services,"
+    echo "  and it gets only group read on certs + write on its own scratch paths."
+    echo "  See docs/host-prerequisites.md#nginx-service-account."
   fi
   if ! getent group "${service_group}" >/dev/null; then
     echo "Creating system group ${service_group}..."

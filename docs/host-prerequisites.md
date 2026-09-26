@@ -17,11 +17,27 @@ home-warden only ever acts on the one host it has been explicitly pinned to (see
 [Designated host](#designated-host) below). On the intended host, for the first
 install:
 
-```bash
-# Optional: set conf path if not at ~/home/nginx/server/nginx.conf
-# export HOME_NGINX_CONF=/path/to/nginx/server/nginx.conf
-./scripts/setup-service --confirm-host   # or omit and answer the interactive prompt
-```
+1. **Check prerequisites** (see [Optional preflight](#optional-preflight)):
+
+   ```bash
+   ./scripts/bootstrap
+   ```
+
+2. **Create the nginx service account.** nginx runs as its own locked
+   `home-warden-nginx` system account, never as you. `setup-service` creates
+   it for you in the next step; read
+   [nginx service account](#nginx-service-account) for why, and for the exact
+   commands if you'd rather create and inspect it by hand first.
+
+3. **Install and start:**
+
+   ```bash
+   # Optional: set conf path if not at ~/home/nginx/server/nginx.conf
+   # export HOME_NGINX_CONF=/path/to/nginx/server/nginx.conf
+   ./scripts/setup-service --confirm-host   # or omit and answer the interactive prompt
+   ```
+
+4. **Verify** as in [nginx service account](#verify).
 
 Subsequent runs on the same host need no flag:
 
@@ -49,29 +65,57 @@ in tracked files.
 - `HOME_WARDEN_SKIP_HOST_GUARD=1` bypasses the check — manual testing only, never set
   it in a unit or timer.
 
-## Dedicated service account
+## nginx service account
 
-nginx (`home-warden.service`) runs as its own `home-warden-nginx` system
-account, not the operator
-([#43](https://github.com/the-hcma/home-warden/issues/43)). The account is
-named after its one job
-([#132](https://github.com/the-hcma/home-warden/issues/132)) so no other
-home-warden component picks up nginx's cert and scratch access by reusing it.
-The certbot, healthcheck, and catalog-heal units still run as the operator.
-`setup-service` handles the whole cutover idempotently on every run:
+nginx (`home-warden.service`) runs as its own locked system account,
+`home-warden-nginx`, with a group of the same name. The certbot, healthcheck,
+and catalog-heal units keep running as you, the operator.
 
-1. Creates the `home-warden-nginx` group and system account (no home, no
-   login shell) if missing, and adds the operator to that group.
-2. Leaves every file owned by the operator and grants the group only what
-   nginx needs (see the matrix below).
-3. Renders `User=home-warden-nginx`/`Group=home-warden-nginx`, restarts the
-   service whenever `User=` changed, and fails unless it stays up and the
-   nginx master really runs as that account (see `confirm_running`).
-4. Removes the #43-era `home-warden` account once nginx is up under the new
-   one (see [Upgrading from a #43 install](#upgrading-from-a-43-install)).
+### Why a dedicated account
 
-A single group covers both cert read and scratch write. Split out a
-separate cert-read group only once a second TLS consumer actually exists.
+- **A compromised nginx must not be a compromised operator.** nginx is the
+  one process here that parses untrusted traffic from the internet. Running
+  it as your own uid would hand a worker exploit your files, your SSH keys,
+  and every sibling service running under your account
+  ([#43](https://github.com/the-hcma/home-warden/issues/43)).
+- **Locked, and owns nothing.** It's a system account with no home
+  (`/nonexistent`), no login shell (`nologin`), and no files of its own.
+  There is nothing to log in as, and nothing it can modify beyond its own
+  scratch paths.
+- **Named after its one job.** `home-warden-nginx`, not `home-warden`:
+  other home-warden components (the web UI backend, catalog-heal, the pdns
+  reload helper) that later want their own identity should get their own,
+  rather than silently sharing nginx's cert and scratch access by reusing a
+  project-wide name
+  ([#132](https://github.com/the-hcma/home-warden/issues/132)).
+- **You join its group.** `cert-renewer` runs as you and hands every renewed
+  cert lineage back to the group. That `chgrp` only works if you're a member.
+- **One group for now.** The same group covers cert read and scratch write.
+  Split out a separate cert-read group only once a second TLS consumer
+  actually exists.
+
+### Create it
+
+`setup-service` creates the account on its first run and explains why as it
+does. `./scripts/bootstrap` reports whether the account exists and is locked.
+To create it by hand first (same commands `setup-service` runs):
+
+```bash
+sudo groupadd --system home-warden-nginx
+sudo useradd --system --gid home-warden-nginx --no-create-home \
+  --home-dir /nonexistent --shell /usr/sbin/nologin home-warden-nginx
+sudo usermod --append --groups home-warden-nginx "$(id -un)"
+getent passwd home-warden-nginx   # …:/nonexistent:/usr/sbin/nologin
+```
+
+Your current login shell only picks up the new group after you log in again;
+systemd units pick it up immediately. `setup-service` refuses to run nginx as
+an existing account of that name that isn't locked this way.
+
+### What it can reach
+
+`setup-service` leaves every file owned by you and grants the group only what
+nginx needs, re-applying this on every run:
 
 | Path | Access for `home-warden-nginx` | How |
 | --- | --- | --- |
@@ -83,52 +127,54 @@ separate cert-read group only once a second TLS consumer actually exists.
 | access/error logs, `nginx.pid` | write | group `rw` |
 | served conf, its dir, static `root`/`alias` | read | world- or group-readable, bind-mounted read-only |
 
-Everything else under the operator's home is hidden by the unit's
-`ProtectHome=tmpfs`. The served conf must stay readable by that account;
-`setup-service` fails loudly if nginx can't start.
+Everything else under your home is hidden by the unit's `ProtectHome=tmpfs`.
+The served conf must stay readable by that account; `setup-service` fails
+loudly if nginx can't start.
 
-### Upgrading from a #43 install
+`setup-service` then renders `User=home-warden-nginx` /
+`Group=home-warden-nginx`, restarts nginx whenever `User=` changed, and fails
+unless nginx stays up and its master really runs as that account (see
+`confirm_running`). `cert-renewer` run by hand (like `on-deploy` /
+`nginx-test-and-reload`) takes the group from the installed unit's `Group=`
+unless `SERVICE_GROUP` is set.
 
-A host that already runs nginx as the #43 `home-warden` account migrates in
-one plain `./scripts/setup-service` run, with no manual steps. The run creates
-`home-warden-nginx`, moves the group grants over, and restarts nginx under
-the new account. Once that restart is confirmed, it removes `home-warden`:
-
-- anything under `CONF_DIR`/`SCRATCH_DIR` still owned by `home-warden`
-  (typically only the old `nginx.pid`) is handed to the operator, and
-  anything still in the `home-warden` group moves to `home-warden-nginx`;
-- the account and its group are deleted.
-
-Removal is skipped, with a warning, while any process still runs as
-`home-warden` or any installed unit still names it. It is also skipped when
-the existing `home-warden` account is not the locked system account #43
-created (home `/nonexistent`, a `nologin` shell). Setting
-`SERVICE_USER=home-warden` (or `SERVICE_GROUP=home-warden`) keeps the old
-name and skips removal entirely.
-
-`cert-renewer` re-applies the group to new cert lineages after every run;
-run by hand, it (like `on-deploy` / `nginx-test-and-reload`) takes the group
-from the installed unit's `Group=` unless `SERVICE_GROUP` is set.
-The operator's own login shells only pick up the new group after the next
-login; systemd units pick it up immediately.
-
-Verify after a cutover:
+### Verify
 
 ```bash
-ps -o user:20,pid,cmd -C nginx            # master + workers as home-warden-nginx
+ps -o user:20,pid,cmd -C nginx             # master + workers as home-warden-nginx
 sudo systemctl start home-warden-certbot.service
 sudo systemctl reload home-warden.service  # privileged reload across the uid boundary
 ./scripts/healthcheck --check-only
 ```
 
-**Rollback** to the operator's uid (group permissions stay in place and are
+### Overrides and rollback
+
+`SERVICE_USER` / `SERVICE_GROUP` override the account and group names.
+**Rollback** to your own uid (group permissions stay in place and are
 harmless):
 
 ```bash
 SERVICE_USER="$(id -un)" ./scripts/setup-service
 ```
 
-`SERVICE_USER` / `SERVICE_GROUP` override the account and group names.
+### Upgrading from a #43 install
+
+Hosts installed before #132 run nginx as a `home-warden` account. One plain
+`./scripts/setup-service` run migrates them with no manual steps:
+
+1. It creates `home-warden-nginx`, moves the group grants over, and restarts
+   nginx under the new account. The old master may log one harmless
+   `unlink() … nginx.pid failed` alert on exit, since it has already lost
+   write on `logs/`.
+2. Once the restart is confirmed, it hands anything under
+   `CONF_DIR`/`SCRATCH_DIR` still owned by `home-warden` to you, moves
+   anything still in the `home-warden` group to `home-warden-nginx`, and
+   deletes the `home-warden` account and group.
+
+Removal is skipped, with a warning, while any process still runs as
+`home-warden`, while any installed unit still names it, or when that account
+isn't the locked system account #43 created. `SERVICE_USER=home-warden` (or
+`SERVICE_GROUP=home-warden`) keeps the old name and skips removal entirely.
 
 ## Optional preflight
 

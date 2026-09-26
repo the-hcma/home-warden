@@ -274,7 +274,7 @@ have to rediscover them.
       with no access to the operator's mode-750 home still reach those
       paths. `SERVICE_USER=<operator>` re-renders the old identity as a
       rollback; see
-      [host-prerequisites.md](./host-prerequisites.md#dedicated-service-account).
+      [host-prerequisites.md](./host-prerequisites.md#nginx-service-account).
     - **Renamed to `home-warden-nginx`**
       ([#132](https://github.com/the-hcma/home-warden/issues/132)): the
       account and its single group are named after nginx, with the grants

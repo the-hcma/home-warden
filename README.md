@@ -59,9 +59,13 @@ management (live today), and eventually DNS itself. See
 ./scripts/bootstrap                # verify prerequisites
 ./scripts/bootstrap --fix-packages # optional: sudo apt-get install -y missing packages
 ./scripts/bootstrap --fix          # optional: scratch, dhparam, staging certs
-./scripts/setup-service            # nginx -t, install units, start service
+./scripts/setup-service            # nginx account, nginx -t, install units, start service
 systemctl status home-warden.socket home-warden.service
 ```
+
+nginx runs as its own locked `home-warden-nginx` system account, never the
+operator; `setup-service` creates it. Why, and how to create it by hand:
+[docs/host-prerequisites.md](./docs/host-prerequisites.md#nginx-service-account).
 
 ## Quick status
 
