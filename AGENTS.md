@@ -227,16 +227,10 @@ blocking upstream issues are fixed and a released version can be pinned.
  `catalog-render-validate` CI job runs it with
  `HOME_WARDEN_REQUIRE_NGINX=1` so a skip there fails.
 - **Gaps go upstream**: something `tiny-pki` should provide gets an issue
- in `the-hcma/tiny-pki` rather than a local workaround. Open ones:
- [tiny-pki#117](https://github.com/the-hcma/tiny-pki/issues/117) (no store
- locking — a concurrent CRL refresh can drop a revocation; blocks a CRL
- refresh timer),
- [tiny-pki#118](https://github.com/the-hcma/tiny-pki/issues/118)
- (store-level operations only in private CLI helpers),
- [tiny-pki#119](https://github.com/the-hcma/tiny-pki/issues/119) (CA key
- shares a directory with the CA cert/CRL nginx must read). home-warden's
- own: [#148](https://github.com/the-hcma/home-warden/issues/148)
- (single-file sandbox bind pins a stale CRL).
+ in `the-hcma/tiny-pki` rather than a local workaround; gaps in
+ home-warden itself get an issue here. #49's "Evaluation status" section
+ is the live list of what's been verified, the open gaps, and which ones
+ block landing.
 
 ---
 
