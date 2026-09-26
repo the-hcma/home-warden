@@ -207,6 +207,39 @@ home-warden's private CA issues mTLS client certificates only, never server cert
 
 ---
 
+## Private Client CA (tiny-pki)
+
+Client certificates for mTLS (the catalog's `client_cert` fields) come from
+a private CA built on [the-hcma/tiny-pki](https://github.com/the-hcma/tiny-pki)
+— see [#49](https://github.com/the-hcma/home-warden/issues/49). Work in
+progress: `tiny-pki` has no release yet, so it is pinned to a commit on
+GitHub (`tiny-pki[cli] @ git+https://github.com/the-hcma/tiny-pki@<sha>`
+in `pyproject.toml`), and this integration stays in a draft PR until the
+blocking upstream issues are fixed and a released version can be pinned.
+
+- **Wrapper**: `scripts/client-pki` runs the `tiny-pki` CLI against
+ home-warden's store (`HOME_WARDEN_PKI_STORE`, default `conf/pki`,
+ gitignored like `conf/cloudflare.ini`); every verb passes through.
+- **Validation**: `tests/python/test_client_pki_mtls.py` issues a CA,
+ server and client cert with the CLI, runs a throwaway unprivileged nginx
+ with `ssl_verify_client on` + `ssl_crl`, and checks accepted → revoke →
+ reload → rejected. It skips without nginx, but the
+ `catalog-render-validate` CI job runs it with
+ `HOME_WARDEN_REQUIRE_NGINX=1` so a skip there fails.
+- **Gaps go upstream**: something `tiny-pki` should provide gets an issue
+ in `the-hcma/tiny-pki` rather than a local workaround. Open ones:
+ [tiny-pki#117](https://github.com/the-hcma/tiny-pki/issues/117) (no store
+ locking — a concurrent CRL refresh can drop a revocation; blocks a CRL
+ refresh timer),
+ [tiny-pki#118](https://github.com/the-hcma/tiny-pki/issues/118)
+ (store-level operations only in private CLI helpers),
+ [tiny-pki#119](https://github.com/the-hcma/tiny-pki/issues/119) (CA key
+ shares a directory with the CA cert/CRL nginx must read). home-warden's
+ own: [#148](https://github.com/the-hcma/home-warden/issues/148)
+ (single-file sandbox bind pins a stale CRL).
+
+---
+
 ## Development
 
 ```bash

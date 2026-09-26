@@ -32,6 +32,7 @@ dependencies = [
     "python-pam>=2.1.0",
     "pyyaml>=6.0.3",
     "six>=1.17.0",
+    "tiny-pki[cli] @ git+https://github.com/the-hcma/tiny-pki@47ffebe472220f4da7ef2c6a36d6119ddedc38bb",
     "uvicorn[standard]>=0.53.0",
 ]
 
