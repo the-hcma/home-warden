@@ -95,8 +95,9 @@ sudo apt-get install pdns-server pdns-backend-geoip pdns-recursor
 No MaxMind/GeoLite database is needed — `render_pdns_conf` emits
 `geoip-database-files=` empty, and this repo's design deliberately never
 uses geo expansions (plain `records:` only). `dns/recursor.conf` (in
-`thehcma/home`) stays hand-maintained and unchanged; it already forwards
-these zones' queries to loopback:853.
+`thehcma/home`) stays hand-maintained; it must forward every zone in
+`zones.yml` to loopback:853. The reload-on-edit path below checks that on
+every run and names any zone it's missing.
 
 `pdns-server` does not pull in `pdns-backend-geoip`, and its stock
 `/etc/powerdns/pdns.conf` binds `0.0.0.0:53`, which crash-loops against the
@@ -177,8 +178,62 @@ The reload unit runs as root (for `pdns_control`), but the syntax gate is a
 `uv run` in this repo, so the script drops to `OWNER` (the operator) via
 `runuser` for that step. `uv` is looked up in the operator's
 `~/.local/bin` (the astral.sh installer default) before the system `PATH`.
+After `pdns_control reload`, it runs `pdns_control purge`, since reload
+keeps pdns's packet and negative caches.
+
+When `pdns-recursor.service` is installed and active, the same run then:
+
+1. runs `rec_control reload-zones`, which rereads `forward_zones` from the
+   recursor's config, so a zone just added there takes effect without a
+   restart;
+2. wipes the recursor's cache for each zone in `zones.yml`
+   (`rec_control wipe-cache <zone>$`), so a removed record stops answering
+   immediately instead of after its TTL;
+3. asks the recursor (on `127.0.0.1`, with the AD bit set) for each zone's
+   SOA and compares it with the authoritative server's, and exits 3 if any
+   zone doesn't match. A zone that also exists publicly would otherwise
+   pass by resolving upstream. For each such zone it logs the exact fix: the
+   `forward_zones` entry to add for `NXDOMAIN` or a different SOA, or a
+   negative trust anchor for a DNSSEC `SERVFAIL` (see Recursor pitfalls
+   above).
+
+So adding a new zone apex to `zones.yml` fails the reload unit until the
+recursor forwards it. Add the zone to the recursor's config, then touch
+`zones.yml` to rerun the check. `PDNS_RECURSOR_SERVICE`,
+`PDNS_RECURSOR_ADDRESS` and `PDNS_AUTH_FORWARDER` override the unit name,
+the probe address and the suggested forwarder. A host with no recursor
+installed skips these steps.
 
 Logs: `~/scratch/home-warden/pdns-test-and-reload.log`.
+
+## Host resolver
+
+nginx resolves `upstream.host` through the host's own resolver, not by
+asking PowerDNS directly. On a stock Ubuntu host that's `systemd-resolved`,
+which forwards everything to the DHCP-provided LAN resolvers and never
+consults the local recursor. A name that exists only in `zones.yml` then
+answers on loopback:853 but can't be resolved on the host itself (#139).
+
+`check_local_dns` (used by `catalog-register`, `catalog-heal` and
+`catalog-health-check`) catches this: once the authoritative server has the
+record, it also resolves the name via `getent ahosts` and fails with
+"local PowerDNS has … but this host cannot resolve it" if that doesn't work.
+
+To fix it, route the local zones to the recursor on `127.0.0.1` with a
+`systemd-resolved` drop-in, one `~` routing domain per zone apex in
+`zones.yml`:
+
+```ini
+# /etc/systemd/resolved.conf.d/home-warden-local-zones.conf
+[Resolve]
+DNS=127.0.0.1
+Domains=~<your-zone> ~<reverse-zone>.in-addr.arpa
+```
+
+Then run `sudo systemctl restart systemd-resolved` and confirm with
+`resolvectl query <name>.<your-zone>`. The `~` prefix makes these routing
+domains, so queries under them are sent to the recursor rather than the LAN
+resolvers.
 
 ## Spot-checking a live install
 

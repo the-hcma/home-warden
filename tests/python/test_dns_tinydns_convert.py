@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from app.dns_tinydns_convert import (
@@ -604,6 +605,20 @@ def test_validate_zones_yaml_syntax_missing_required_key_raises(tmp_path: Path) 
         raise AssertionError("expected ValueError")
     except ValueError as e:
         assert "missing required key 'records'" in str(e)
+
+
+@pytest.mark.parametrize("domain_line", ["domain:", 'domain: ""', 'domain: "."', "domain: 42"])
+def test_validate_zones_yaml_syntax_empty_or_non_string_domain_raises(tmp_path: Path, domain_line: str) -> None:
+    path = tmp_path / "zones.yml"
+    path.write_text(f"domains:\n  - {domain_line}\n    ttl: 3600\n    records: {{}}\n")
+    with pytest.raises(ValueError, match=r"domains\[0\]\.domain must be a non-empty string"):
+        validate_zones_yaml_syntax(path)
+
+
+def test_validate_zones_yaml_syntax_returns_parsed_document(tmp_path: Path) -> None:
+    path = tmp_path / "zones.yml"
+    path.write_text("domains:\n  - domain: example.com\n    ttl: 3600\n    records: {}\n")
+    assert validate_zones_yaml_syntax(path)["domains"][0]["domain"] == "example.com"
 
 
 def test_validate_zones_yaml_syntax_non_mapping_records_raises(tmp_path: Path) -> None:
