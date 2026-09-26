@@ -86,6 +86,33 @@ def test_paths_outside_home_and_variables_are_ignored() -> None:
     assert stderr == ""
 
 
+def test_reload_watch_dirs_cover_crl_and_client_ca_only() -> None:
+    dirs, stderr = _watch_dirs(
+        "ssl_crl /home/op/pki/ca/crl.pem;\n"
+        'ssl_client_certificate "/home/op/pki/ca/ca.crt";\n'
+        "ssl_client_certificate /etc/nginx/client-ca/ca.crt;\n"
+        "ssl_trusted_certificate /home/op/chains/upstream.pem;\n"
+        "ssl_certificate /home/op/tls/site/fullchain.pem;\n"
+    )
+    assert dirs == ["/etc/nginx/client-ca", "/home/op/pki/ca"]
+    assert stderr == ""
+
+
+def test_reload_watch_dirs_skip_only_exactly_watched_dirs() -> None:
+    dirs, _ = _watch_dirs(
+        "ssl_crl /home/op/home/nginx/server/crl.pem;\nssl_crl /home/op/home/nginx/server/pki/crl.pem;\n"
+    )
+    assert dirs == ["/home/op/home/nginx/server/pki"]
+
+
+def test_reload_watch_dirs_warn_on_paths_systemd_would_misparse() -> None:
+    dirs, stderr = _watch_dirs(
+        'ssl_crl "/home/op/my pki/crl.pem";\nssl_crl /home/op/$host/crl.pem;\nssl_crl crl.pem;\n'
+    )
+    assert dirs == []
+    assert stderr.count("not watching") == 3
+
+
 def test_root_alias_and_glob_include_bind_directories() -> None:
     binds, _ = _resolve(
         "root /home/op/www/site/;\nalias /home/op/www/files;\ninclude /home/op/snippets/*.conf;\n"
@@ -129,3 +156,22 @@ def _resolve(dump: str, stub_key_dirs: list[str] | None = None) -> tuple[list[st
         timeout=10,
     )
     return result.stdout.split(), result.stderr
+
+
+def _watch_dirs(dump: str) -> tuple[list[str], str]:
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; shift; resolve_nginx_reload_watch_dirs "$@"',
+            "bash",
+            str(LIB),
+            dump,
+            "/home/op/home/nginx/server/",
+        ],
+        capture_output=True,
+        check=True,
+        text=True,
+        timeout=10,
+    )
+    return result.stdout.splitlines(), result.stderr

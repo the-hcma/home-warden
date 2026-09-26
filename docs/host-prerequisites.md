@@ -349,7 +349,7 @@ systemctl status home-warden.socket home-warden.service \
 | `home-warden.service` | nginx (`-p` scratch, `-c` home conf) | `sudo systemctl reload\|restart home-warden.service` |
 | `home-warden-certbot.timer` | Daily 04:30 → cert renewer | `systemctl list-timers home-warden-certbot.timer`; `sudo systemctl start home-warden-certbot.service` for a one-shot run |
 | `home-warden-certbot.service` | Oneshot renewer (no `[Install]`) | Activated by the timer or manual `start` |
-| `home-warden-reload.path` | Watches nginx conf file + directory | Enabled by setup-service; `systemctl status home-warden-reload.path` |
+| `home-warden-reload.path` | Watches nginx conf file + directory, plus CRL / client CA directories (drop-in) | Enabled by setup-service; `systemctl status home-warden-reload.path` |
 | `home-warden-reload.service` | Oneshot: `nginx -t` then reload (no `[Install]`) | Activated only by the path unit |
 | `home-warden-healthcheck.timer` | Every minute → healthcheck | `systemctl list-timers home-warden-healthcheck.timer`; `sudo systemctl start home-warden-healthcheck.service` |
 | `home-warden-healthcheck.service` | Oneshot probe + optional email (no `[Install]`) | Activated by the timer or manual `start` |
@@ -385,6 +385,17 @@ Logs (also listed above):
 `HOME_NGINX_CONF` and its parent directory (`PathModified=`). Typical editor
 saves (rename into place) and in-place edits (`sed -i`) both fire the path unit.
 Systemd debounces bursts into one activation.
+
+nginx rereads a CRL or client CA bundle only on reload, so a revoke has to
+trigger one too. `setup-service` finds the directory of every `ssl_crl` and
+`ssl_client_certificate` path in the served conf (via `nginx -T`) and watches
+each one through a generated drop-in,
+`/etc/systemd/system/home-warden-reload.path.d/home-warden-client-pki.conf`.
+The drop-in is removed once the conf names none
+([#151](https://github.com/the-hcma/home-warden/issues/151)). Watching the
+directory, not the file, catches a CRL republished by atomic rename. Re-run
+`./scripts/setup-service` after adding such a directive, just as for a new
+sandbox path (see the sandbox caveat below).
 
 **What runs:** `home-warden-reload.service` executes
 `scripts/nginx-test-and-reload` as root:
