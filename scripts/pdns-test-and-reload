@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fail-closed: dns-zones-yaml-check syntax gate, then pdns_control reload,
-# then the recursor: rec_control reload-zones, a cache wipe per zone, and an
+# rediscover and purge, then the recursor: rec_control reload-zones, a cache wipe per zone, and an
 # SOA probe of every zone apex through it (#127).
 # Used by home-warden-pdns-reload.service (systemd path unit) -- mirrors
 # scripts/nginx-test-and-reload's pattern for the pdns side.
@@ -31,7 +31,7 @@
 #
 # Exit:
 #   0 — syntax OK and reload succeeded (or service inactive: skip reload)
-#   1 — pdns_control reload or rec_control reload-zones failed
+#   1 — pdns_control reload/rediscover or rec_control reload-zones failed
 #   2 — usage / missing file / syntax check failed / unknown unit
 #   3 — reloaded, but the recursor does not answer for one or more zones, or
 #       that can't be verified (no dig)
@@ -195,6 +195,19 @@ if pdns_control reload; then
   log "reload OK"
 else
   log "FAIL: pdns_control reload failed"
+  exit 1
+fi
+
+# reload does not refresh pdns's zone cache (the list of zones it is
+# authoritative for, refreshed every zone-cache-refresh-interval, default
+# 300s), so a new zone apex stays REFUSED and a removed one keeps answering
+# until then; rediscover refreshes it (verified on pdns 5.0 GeoIP, #145).
+# Runs before the purge so a REFUSED already in the packet cache is dropped.
+log "pdns_control rediscover"
+if pdns_control rediscover >/dev/null; then
+  log "rediscover OK"
+else
+  log "FAIL: pdns_control rediscover failed — a new zone stays REFUSED until the zone cache refreshes"
   exit 1
 fi
 
