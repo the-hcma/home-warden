@@ -33,7 +33,8 @@
 #   0 — syntax OK and reload succeeded (or service inactive: skip reload)
 #   1 — pdns_control reload or rec_control reload-zones failed
 #   2 — usage / missing file / syntax check failed / unknown unit
-#   3 — reloaded, but the recursor does not answer for one or more zones
+#   3 — reloaded, but the recursor does not answer for one or more zones, or
+#       that can't be verified (no dig)
 #
 # Note: this calls `pdns_control reload`, not `systemctl reload
 # "${pdns_service}"` -- the distro-packaged pdns.service does not
@@ -233,8 +234,8 @@ for zone in "${zones[@]}"; do
 done
 
 if ! command -v dig >/dev/null 2>&1; then
-  log "WARN: dig not found — cannot verify the recursor answers for each zone"
-  exit 0
+  log "FAIL: dig not found — cannot verify the recursor answers for each zone (install bind9-dnsutils)"
+  exit 3
 fi
 unanswered=0
 for zone in "${zones[@]}"; do

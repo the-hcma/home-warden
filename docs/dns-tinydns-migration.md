@@ -89,8 +89,11 @@ DNSSEC, any tinydns line type not in the table above.
 ## Packages (Ubuntu/Debian)
 
 ```bash
-sudo apt-get install pdns-server pdns-backend-geoip pdns-recursor
+sudo apt-get install pdns-server pdns-backend-geoip pdns-recursor bind9-dnsutils
 ```
+
+`bind9-dnsutils` provides `dig`, which the reload-on-edit path needs to
+verify the recursor (see below); without it, that path fails.
 
 No MaxMind/GeoLite database is needed — `render_pdns_conf` emits
 `geoip-database-files=` empty, and this repo's design deliberately never
@@ -195,7 +198,7 @@ When `pdns-recursor.service` is installed and active, the same run then:
    pass by resolving upstream. For each such zone it logs the exact fix: the
    `forward_zones` entry to add for `NXDOMAIN` or a different SOA, or a
    negative trust anchor for a DNSSEC `SERVFAIL` (see Recursor pitfalls
-   above).
+   above). A missing `dig` also exits 3, since the check can't run.
 
 So adding a new zone apex to `zones.yml` fails the reload unit until the
 recursor forwards it. Add the zone to the recursor's config, then touch
