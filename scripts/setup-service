@@ -87,6 +87,8 @@ host_resolver_mode="${PDNS_HOST_RESOLVER:-}"
 readonly host_resolver_mode
 recursor_address="${PDNS_RECURSOR_ADDRESS:-127.0.0.1}"
 readonly recursor_address
+recursor_service="${PDNS_RECURSOR_SERVICE:-pdns-recursor.service}"
+readonly recursor_service
 resolved_dropin_changed=0
 services_json="${SERVICES_JSON_PATH:-}"
 catalog_heal_enabled=0
@@ -838,8 +840,9 @@ install_host_resolver_dropin() {
     echo "ERROR: PDNS_HOST_RESOLVER=1 needs an active systemd-resolved.service" >&2
     exit 1
   fi
-  if ! systemctl is-active --quiet pdns-recursor.service; then
-    echo "ERROR: PDNS_HOST_RESOLVER=1 routes zones to pdns-recursor.service, which is not active" >&2
+  if ! systemctl is-active --quiet "${recursor_service}"; then
+    echo "ERROR: PDNS_HOST_RESOLVER=1 routes zones to ${recursor_service}, which is not active" \
+      "(check PDNS_RECURSOR_SERVICE)" >&2
     exit 1
   fi
   if ! zone_list="$("${script_dir}/dns-zones-yaml-check" --list-zones "${pdns_zones_yaml}")"; then
