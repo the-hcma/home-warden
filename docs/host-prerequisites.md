@@ -412,7 +412,17 @@ directory that `setup-service` found via `nginx -T`. If an edit adds a new
 such path (e.g. a new static `root`), re-run `./scripts/setup-service`; the
 reload alone passes `nginx -t` (run as root, outside the sandbox) but the
 live workers will get `403`/`404` or fail to load the file. Discovery binds
-single files for file directives and never exposes `/root`, a bare home
+single files for most file directives, but binds the containing directory for
+`ssl_crl`, `ssl_client_certificate`, and `ssl_trusted_certificate`: those files
+are typically republished by atomic rename (a CRL refresh, a rotated CA
+bundle), and a single-file bind pins the old inode, so nginx would keep
+reading the stale file across reloads
+([#148](https://github.com/the-hcma/home-warden/issues/148)). Keep such a file
+in a dedicated, key-free directory, since that whole directory becomes
+readable to the sandbox; if the directory holds a private key (`*.key`,
+`*.p12`, `*.pfx`, or a PEM `PRIVATE KEY` block), discovery falls back to a
+single-file bind and warns, trading freshness for keeping the key out of the
+sandbox. Discovery never exposes `/root`, a bare home
 directory, a hidden path (`~/.ssh`, `~/.config`, …), or a path with
 characters outside `[A-Za-z0-9._@+-]` — keep served files
 under a dedicated directory; `setup-service` warns about any it refused.
