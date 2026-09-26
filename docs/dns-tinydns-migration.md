@@ -221,7 +221,22 @@ record, it also resolves the name via `getent ahosts` and fails with
 
 To fix it, route the local zones to the recursor on `127.0.0.1` with a
 `systemd-resolved` drop-in, one `~` routing domain per zone apex in
-`zones.yml`:
+`zones.yml`. `setup-service` writes it for you when pdns wiring is on:
+
+```bash
+PDNS_HOST_RESOLVER=1 ./scripts/setup-service
+```
+
+It lists the zones from `zones.yml`, requires `systemd-resolved` and
+`pdns-recursor` to be active, and restarts `systemd-resolved` only when the
+drop-in changes. Re-run it with `PDNS_HOST_RESOLVER=1` after adding a zone
+apex. `PDNS_HOST_RESOLVER=0` removes the drop-in. When the variable is
+unset, `setup-service` leaves an existing drop-in as it is, so a re-run that
+forgets the variable doesn't silently drop host-wide DNS routing.
+`PDNS_RECURSOR_ADDRESS` overrides the `127.0.0.1` it points at.
+
+The generated file looks like this (write it by hand if you'd rather not
+opt in):
 
 ```ini
 # /etc/systemd/resolved.conf.d/home-warden-local-zones.conf
