@@ -72,15 +72,23 @@ exit 0
 STUB
 chmod +x "${stub_bin}/rec_control"
 
-# Mimics `dig +noall +comments +answer <zone> SOA`: the header comment, plus
-# the SOA record when the stubbed status is NOERROR.
+# `dig +short ... <zone> SOA` is the authoritative query: print its SOA data.
+# Otherwise mimic the recursor's `dig +noall +comments +answer <zone> SOA`:
+# the header comment, plus the SOA record when the stubbed status is
+# NOERROR. STUB_DIG_RECURSOR_SERIAL makes that SOA differ from the
+# authoritative one, as when the recursor resolves a public zone upstream.
 cat >"${stub_bin}/dig" <<'STUB'
 #!/usr/bin/env bash
 zone="${@: -2:1}"
+if [[ " $* " == *" +short "* ]]; then
+  printf 'ns.%s. hostmaster.%s. 1 7200 1800 604800 900\n' "${zone}" "${zone}"
+  exit 0
+fi
 status="${STUB_DIG_STATUS:-NOERROR}"
 printf ';; ->>HEADER<<- opcode: QUERY, status: %s, id: 1\n' "${status}"
 if [[ "${status}" == "NOERROR" ]]; then
-  printf '%s.\t3600\tIN\tSOA\tns.%s. hostmaster.%s. 1 7200 1800 604800 900\n' "${zone}" "${zone}" "${zone}"
+  printf '%s.\t3600\tIN\tSOA\tns.%s. hostmaster.%s. %s 7200 1800 604800 900\n' \
+    "${zone}" "${zone}" "${zone}" "${STUB_DIG_RECURSOR_SERIAL:-1}"
 fi
 STUB
 chmod +x "${stub_bin}/dig"
@@ -234,7 +242,13 @@ assert_sentinel "recursor installed but inactive" 1
 assert_rec_control "recursor installed but inactive" ""
 assert_output "recursor installed but inactive" "not active — skip recursor reload"
 
-# Case 12: a zones.yml entry with an empty domain fails the gate (exit 2)
+# Case 12: the recursor answers NOERROR with a different SOA, as for a public
+# zone it resolves upstream instead of forwarding -- still a failure.
+PDNS_ZONES_YAML="${two_zones}" STUB_DIG_RECURSOR_SERIAL=2026092601 \
+  run_case "recursor resolves zones upstream" 3 "${repo_dir}/scripts/pdns-test-and-reload"
+assert_output "recursor resolves zones upstream" "recursor answers a different SOA for example.com"
+
+# Case 13: a zones.yml entry with an empty domain fails the gate (exit 2)
 # instead of becoming a bogus zone for the recursor probes.
 empty_domain="${work_dir}/empty-domain.yml"
 printf 'domains:\n  - domain: ""\n    ttl: 3600\n    records: {}\n' >"${empty_domain}"

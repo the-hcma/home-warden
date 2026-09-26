@@ -25,7 +25,8 @@
 #                    recursor step is skipped when that default isn't
 #                    installed, but an explicitly set unit must exist)
 #   PDNS_RECURSOR_ADDRESS  address the zone probes query (default: 127.0.0.1)
-#   PDNS_AUTH_FORWARDER    authoritative address:port suggested as the
+#   PDNS_AUTH_FORWARDER    authoritative IPv4-address:port whose SOA answers
+#                    the recursor's must match, also suggested as the
 #                    forwarder in a missing-zone message (default: 127.0.0.1:853)
 #
 # Exit:
@@ -67,6 +68,10 @@ owner="${OWNER:-$(stat -c '%U' "${script_dir}/.." 2>/dev/null || true)}"
 readonly owner
 pdns_auth_forwarder="${PDNS_AUTH_FORWARDER:-127.0.0.1:853}"
 readonly pdns_auth_forwarder
+pdns_auth_host="${pdns_auth_forwarder%:*}"
+readonly pdns_auth_host
+pdns_auth_port="${pdns_auth_forwarder##*:}"
+readonly pdns_auth_port
 recursor_address="${PDNS_RECURSOR_ADDRESS:-127.0.0.1}"
 readonly recursor_address
 recursor_service="${PDNS_RECURSOR_SERVICE:-pdns-recursor.service}"
@@ -79,13 +84,18 @@ log() {
   printf '%s %s\n' "${ts}" "${msg}"
 }
 
-# probe_recursor_zone <zone> — whether the recursor answers the zone's SOA.
+# probe_recursor_zone <zone> — whether the recursor answers the zone's SOA
+# with the same data as the local authoritative server. A zone that also
+# exists publicly (split horizon) resolves upstream when it isn't forwarded,
+# so a bare NOERROR+SOA would not prove forwarding.
 # +adflag matches glibc's trust-ad clients: a recursor that validates DNSSEC
 # SERVFAILs a zone under a made-up TLD for them unless it has a negative
 # trust anchor, even when forwarding works.
 probe_recursor_zone() {
   local -r zone="$1"
   local answer
+  local auth_soa
+  local recursor_soa
   local status
 
   if ! answer="$(dig +tries=1 +time=3 +adflag +noall +comments +answer "@${recursor_address}" "${zone}" SOA)"; then
@@ -93,8 +103,19 @@ probe_recursor_zone() {
     return 1
   fi
   status="$(sed -n -E 's/.*status: ([A-Z]+).*/\1/p' <<<"${answer}")"
-  if [[ "${status}" == "NOERROR" ]] && grep -q -E '[[:space:]]SOA[[:space:]]' <<<"${answer}"; then
-    return 0
+  recursor_soa="$(awk '$4 == "SOA" { $1 = $2 = $3 = $4 = ""; sub(/^ +/, ""); print; exit }' <<<"${answer}")"
+  if [[ "${status}" == "NOERROR" && -n "${recursor_soa}" ]]; then
+    if ! auth_soa="$(dig +short +tries=1 +time=3 -p "${pdns_auth_port}" "@${pdns_auth_host}" "${zone}" SOA)"; then
+      log "FAIL: the authoritative server on ${pdns_auth_forwarder} did not answer for ${zone}"
+      return 1
+    fi
+    if [[ "${recursor_soa}" == "${auth_soa}" ]]; then
+      return 0
+    fi
+    log "FAIL: recursor answers a different SOA for ${zone} than ${pdns_auth_forwarder} — it resolves the" \
+      "zone elsewhere instead of forwarding it; add it to recursor.forward_zones (zone: ${zone}," \
+      "forwarders: [${pdns_auth_forwarder}]), then touch zones.yml to rerun this"
+    return 1
   fi
   if [[ "${status}" == "SERVFAIL" ]]; then
     log "FAIL: recursor answers SERVFAIL for ${zone} — if it validates DNSSEC, add ${zone} to" \

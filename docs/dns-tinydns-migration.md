@@ -190,9 +190,12 @@ When `pdns-recursor.service` is installed and active, the same run then:
    (`rec_control wipe-cache <zone>$`), so a removed record stops answering
    immediately instead of after its TTL;
 3. asks the recursor (on `127.0.0.1`, with the AD bit set) for each zone's
-   SOA, and exits 3 if any zone doesn't answer. For each one it logs the
-   exact fix: the `forward_zones` entry to add for `NXDOMAIN`, or a negative
-   trust anchor for a DNSSEC `SERVFAIL` (see Recursor pitfalls above).
+   SOA and compares it with the authoritative server's, and exits 3 if any
+   zone doesn't match. A zone that also exists publicly would otherwise
+   pass by resolving upstream. For each such zone it logs the exact fix: the
+   `forward_zones` entry to add for `NXDOMAIN` or a different SOA, or a
+   negative trust anchor for a DNSSEC `SERVFAIL` (see Recursor pitfalls
+   above).
 
 So adding a new zone apex to `zones.yml` fails the reload unit until the
 recursor forwards it. Add the zone to the recursor's config, then touch

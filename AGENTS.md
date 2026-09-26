@@ -328,7 +328,9 @@ work in `thehcma/home#16` (private repo) it relocates.
  `systemctl reload pdns.service`, which the distro-packaged unit doesn't
  implement at all. When `pdns-recursor` is installed, it then runs
  `rec_control reload-zones`, wipes the recursor cache per zone, and probes
- each zone apex's SOA through the recursor, exiting 3 with the exact
+ each zone apex's SOA through the recursor — which must match the
+ authoritative server's, or a public split-horizon zone resolved upstream
+ would pass — exiting 3 with the exact
  `forward_zones` entry (or negative trust anchor) to add for any zone that
  doesn't answer — the recursor config itself stays hand-maintained
  ([#127](https://github.com/the-hcma/home-warden/issues/127)). This ordering (syntax gate before reload, never the
