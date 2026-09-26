@@ -23,7 +23,7 @@ systemd (root) ── home-warden.socket
    │
    │  fds 3, 4 passed on activation; Environment=NGINX=3:4;
    ▼
-home-warden.service   User=home-warden  Group=home-warden
+home-warden.service   User=home-warden-nginx  Group=home-warden-nginx
    nginx -p ~/scratch/home-warden/ -c <thehcma/home nginx.conf> -g 'daemon off;'
    │
    ├─► proxy_pass → sibling app upstreams (bunnify, domesti-bot, …)
@@ -35,7 +35,7 @@ home-warden.service   User=home-warden  Group=home-warden
   per-connection; `FreeBind=true`: bind is allowed before the address is
   fully local, useful on boot).
 - **`home-warden.service`** is also a *system* unit, but drops to `User=`/
-  `Group=` (the dedicated `home-warden` system account, gap #14) before
+  `Group=` (the dedicated `home-warden-nginx` system account, gap #14) before
   `exec`ing nginx.
   `Requires=`/`After=home-warden.socket` ties its lifecycle to the socket.
 - **Fd handoff**: stock nginx does not speak systemd's `LISTEN_FDS` protocol.
@@ -123,12 +123,16 @@ current design, tracked here so a future change (or a future agent) doesn't
 have to rediscover them.
 
 1. **Shared unprivileged identity.** ✅ nginx now runs as a dedicated
-   `home-warden` system account (no home, no shell, owns nothing) instead of
-   the operator's uid, so a worker compromise no longer reaches sibling
-   linger apps or the operator's files
+   `home-warden-nginx` system account (no home, no shell, owns nothing)
+   instead of the operator's uid, so a worker compromise no longer reaches
+   sibling linger apps or the operator's files
    ([#43](https://github.com/the-hcma/home-warden/issues/43); see gap #14).
+   The account is named after nginx rather than the project
+   ([#132](https://github.com/the-hcma/home-warden/issues/132)), so other
+   home-warden components that later want their own identity don't inherit
+   nginx's cert and scratch access by reusing it.
 2. **TLS private keys readable by that uid.** Partly mitigated: keys stay
-   owned by the operator, and `home-warden` reads them only through group
+   owned by the operator, and `home-warden-nginx` reads them only through group
    membership (`chmod 640`), with no write access to the certs tree and no
    access to `certs/accounts/` (the ACME account key). A process compromise
    still exposes every vhost's private key nginx serves — inherent to one
@@ -270,7 +274,17 @@ have to rediscover them.
       with no access to the operator's mode-750 home still reach those
       paths. `SERVICE_USER=<operator>` re-renders the old identity as a
       rollback; see
-      [host-prerequisites.md](./host-prerequisites.md#dedicated-service-account).
+      [host-prerequisites.md](./host-prerequisites.md#nginx-service-account).
+    - **Renamed to `home-warden-nginx`**
+      ([#132](https://github.com/the-hcma/home-warden/issues/132)): the
+      account and its single group are named after nginx, with the grants
+      unchanged in scope (search on `CONF_DIR`/`SCRATCH_DIR`, read on the
+      cert lineages, write on nginx's scratch paths; the full matrix is in
+      host-prerequisites.md). A separate cert-read group waits for a second
+      TLS consumer. `setup-service` migrates a #43 host in one run: it
+      restarts nginx under the new account, hands anything the old
+      `home-warden` account still owns to the operator, and deletes that
+      account once nothing runs as it or names it.
 
 ## Non-goals for this doc
 

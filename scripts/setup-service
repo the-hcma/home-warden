@@ -37,8 +37,10 @@
 #                       scratch, and runs the certbot/healthcheck units
 #                       (default: current user)
 #   SERVICE_USER        Account home-warden.service (nginx) runs as
-#                       (default: home-warden, created as a system account;
-#                       set to OWNER to roll back to the operator's own uid)
+#                       (default: home-warden-nginx, created as a system
+#                       account; set to OWNER to roll back to the operator's
+#                       own uid). The #43 `home-warden` account is migrated
+#                       off and removed.
 #   SERVICE_GROUP       Group granted cert read + nginx scratch write
 #                       (default: SERVICE_USER)
 #   SCRATCH_DIR         Runtime prefix for nginx -p (default: ~/scratch/home-warden)
@@ -53,6 +55,7 @@ repo_dir="$(cd "${script_dir}/.." && pwd)"
 readonly repo_dir
 readonly unit_template_dir="${repo_dir}/etc/systemd"
 readonly system_unit_dir="/etc/systemd/system"
+readonly runtime_unit_dir="/run/systemd/system"
 readonly logrotate_template="${repo_dir}/etc/logrotate/home-warden"
 readonly logrotate_dest="/etc/logrotate.d/home-warden"
 readonly preview_dir_name="web-ui-preview"
@@ -66,6 +69,7 @@ readonly preview_conf_path_dir="/usr/local/etc"
 readonly preview_conf_path_dest="${preview_conf_path_dir}/home-warden-preview-conf-path"
 readonly home_warden_config_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/home-warden"
 readonly home_warden_config_path="${home_warden_config_dir}/config.toml"
+readonly legacy_service_account="home-warden"
 
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/host-guard
@@ -75,7 +79,7 @@ source "${script_dir}/lib/host-guard"
 source "${script_dir}/lib/nginx-pid"
 
 owner="${OWNER:-$(id -un)}"
-service_user="${SERVICE_USER:-home-warden}"
+service_user="${SERVICE_USER:-home-warden-nginx}"
 service_group="${SERVICE_GROUP:-${service_user}}"
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 conf_dir="${CONF_DIR:-${HOME}/conf/home-warden}"
@@ -90,6 +94,9 @@ readonly recursor_address
 recursor_service="${PDNS_RECURSOR_SERVICE:-pdns-recursor.service}"
 readonly recursor_service
 resolved_dropin_changed=0
+# Units this run renders; their old contents do not count as still using
+# the legacy account (see remove_legacy_service_account).
+rendered_units=()
 services_json="${SERVICES_JSON_PATH:-}"
 catalog_heal_enabled=0
 deployed_commit="${DEPLOYED_COMMIT:-}"
@@ -232,13 +239,31 @@ ensure_host_config() {
   hostname >"${hw_pinned_host_fqdn_file}" || hw_current_hostname_short >"${hw_pinned_host_fqdn_file}"
 }
 
-# home-warden.service runs as a dedicated system account (#43) so an nginx
-# compromise is not a compromise of the operator's uid. OWNER joins the group
-# so cert-renewer (running as OWNER) can hand renewed keys to it.
+# home-warden.service runs as a dedicated system account (#43), named after
+# its one job (#132) so no other component reuses nginx's cert/scratch access,
+# and an nginx compromise is not a compromise of the operator's uid. OWNER
+# joins the group so cert-renewer (running as OWNER) can hand renewed keys to it.
 ensure_service_account() {
+  local -a fields=()
+  local passwd_entry
+
   if [[ "${service_user}" == "${owner}" ]]; then
     echo "SERVICE_USER=${owner}: home-warden.service keeps running as the operator (no dedicated account)"
     return 0
+  fi
+  if passwd_entry="$(getent passwd "${service_user}")"; then
+    IFS=: read -r -a fields <<<"${passwd_entry}"
+    if [[ "${fields[5]:-}" != "/nonexistent" || "${fields[6]:-}" != */nologin ]]; then
+      echo "ERROR: ${service_user} exists but is not a locked system account" \
+        "(home=${fields[5]:-?}, shell=${fields[6]:-?}); nginx must not run as a login account." \
+        "Pick another SERVICE_USER or see docs/host-prerequisites.md#nginx-service-account" >&2
+      exit 1
+    fi
+  else
+    echo "nginx will run as a dedicated, locked system account (${service_user}), not ${owner}:"
+    echo "  a compromised nginx worker then can't read ${owner}'s files or reach sibling services,"
+    echo "  and it gets only group read on certs + write on its own scratch paths."
+    echo "  See docs/host-prerequisites.md#nginx-service-account."
   fi
   if ! getent group "${service_group}" >/dev/null; then
     echo "Creating system group ${service_group}..."
@@ -252,6 +277,87 @@ ensure_service_account() {
   if ! id -nG "${owner}" | tr ' ' '\n' | grep -qx "${service_group}"; then
     echo "Adding ${owner} to group ${service_group}..."
     run sudo usermod --append --groups "${service_group}" "${owner}"
+  fi
+}
+
+# #43 named nginx's account `home-warden`; #132 renamed it after its one job.
+# Once home-warden.service runs as the new account nothing should need the old
+# one, so hand whatever it still owns to OWNER / SERVICE_GROUP and delete it.
+# A same-named account that isn't the locked one #43 created is left alone.
+remove_legacy_service_account() {
+  local -r legacy="${legacy_service_account}"
+  local -a fields=()
+  local -a process_units=()
+  local -a referencing_units=()
+  local -a scan_dirs=()
+  local dir
+  local passwd_entry
+  local process_unit
+  local unit_file
+
+  if [[ "${service_user}" == "${legacy}" || "${service_group}" == "${legacy}" ]]; then
+    return 0
+  fi
+  if passwd_entry="$(getent passwd "${legacy}")"; then
+    IFS=: read -r -a fields <<<"${passwd_entry}"
+    if [[ "${fields[5]:-}" != "/nonexistent" || "${fields[6]:-}" != */nologin ]]; then
+      echo "WARNING: account ${legacy} is not the locked system account #43 created" \
+        "(home=${fields[5]:-?}, shell=${fields[6]:-?}) — leaving it alone" >&2
+      return 0
+    fi
+  elif ! getent group "${legacy}" >/dev/null; then
+    return 0
+  fi
+  # home-warden.service is restarted onto SERVICE_USER before this runs (the
+  # --dry-run preview has not restarted it yet), so only other units count.
+  if getent passwd "${legacy}" >/dev/null; then
+    mapfile -t process_units < <(ps -o unit= -u "${legacy}" 2>/dev/null || true)
+  fi
+  for process_unit in "${process_units[@]}"; do
+    if [[ "${process_unit}" != "home-warden.service" ]]; then
+      echo "WARNING: processes outside home-warden.service (${process_unit}) still run as" \
+        "${legacy} — keeping the account; re-run setup-service once they exit" >&2
+      return 0
+    fi
+  done
+  # Whitespace-tolerant, and list-aware for SupplementaryGroups=; erring wide
+  # only keeps the account, erring narrow breaks a unit that still needs it.
+  for unit_file in "${system_unit_dir}"/*.service "${system_unit_dir}"/*.d/*.conf \
+    "${runtime_unit_dir}"/*.service "${runtime_unit_dir}"/*.d/*.conf; do
+    if [[ -f "${unit_file}" && " ${rendered_units[*]} " != *" ${unit_file} "* ]] &&
+      grep --quiet --extended-regexp \
+        "^[[:space:]]*(User|Group|SupplementaryGroups)[[:space:]]*=(.*[[:space:]])?${legacy}([[:space:]].*)?\$|SERVICE_GROUP=\"?${legacy}\"?([[:space:]].*)?\$" \
+        "${unit_file}"; then
+      referencing_units+=("${unit_file}")
+    fi
+  done
+  if ((${#referencing_units[@]})); then
+    echo "WARNING: keeping ${legacy}, still referenced by: ${referencing_units[*]}" >&2
+    return 0
+  fi
+
+  echo "Removing the legacy ${legacy} account (replaced by ${service_user})..."
+  for dir in "${conf_dir}" "${scratch_dir}"; do
+    if [[ -d "${dir}" ]]; then
+      scan_dirs+=("${dir}")
+    fi
+  done
+  if ((${#scan_dirs[@]})); then
+    if getent passwd "${legacy}" >/dev/null; then
+      run sudo find "${scan_dirs[@]}" -user "${legacy}" -exec chown --no-dereference "${owner}" {} +
+    fi
+    if getent group "${legacy}" >/dev/null; then
+      run sudo find "${scan_dirs[@]}" -group "${legacy}" \
+        -exec chgrp --no-dereference "${service_group}" {} +
+    fi
+  fi
+  if getent passwd "${legacy}" >/dev/null; then
+    run sudo userdel "${legacy}"
+  fi
+  # userdel only drops the same-named group when it has no other members, and
+  # OWNER is one; groupdel does not mind supplementary members.
+  if getent group "${legacy}" >/dev/null; then
+    run sudo groupdel "${legacy}"
   fi
 }
 
@@ -677,6 +783,7 @@ expand_unit() {
   local home_nginx_conf_dir
   local pdns_zones_yaml_dir
 
+  rendered_units+=("${dest}")
   home_nginx_conf_dir="$(dirname "${home_nginx_conf}")"
   pdns_zones_yaml_dir="$(dirname "${pdns_zones_yaml}")"
   host_name="$(hw_first_line "${hw_pinned_host_file}")"
@@ -752,7 +859,7 @@ grant_service_access() {
   # The unit bind-mounts CONF_DIR/SCRATCH_DIR, exposing their own modes; a
   # 027 umask leaves them 750 OWNER:OWNER, so grant search (not listing).
   run sudo chgrp "${service_group}" "${conf_dir}" "${scratch_dir}"
-  run sudo chmod g+x "${conf_dir}" "${scratch_dir}"
+  run sudo chmod g=x "${conf_dir}" "${scratch_dir}"
   run sudo chgrp "${service_group}" "${conf_dir}/certs"
   run sudo chmod g+rx "${conf_dir}/certs"
   if ((${#cert_paths[@]})); then
@@ -1101,10 +1208,12 @@ mask_distro_nginx() {
 # on any restart or non-active state rather than trusting a single probe.
 confirm_running() {
   local -r settle_seconds=10
+  local expected_ids
   local i
   local initial_restarts
   local nginx_procs
   local restarts
+  local running_ids
   local state
 
   echo "Confirming home-warden is up (watching ${settle_seconds}s for crash/restart)..."
@@ -1125,6 +1234,35 @@ confirm_running() {
   systemctl --no-pager --full status home-warden.socket home-warden.service || true
   nginx_procs="$(ps -o user,pid,cmd -C nginx 2>/dev/null || true)"
   echo "${nginx_procs}"
+  expected_ids="$(service_account_ids)"
+  running_ids="$(nginx_master_ids)"
+  if [[ "${running_ids}" != "${expected_ids}" ]]; then
+    echo "ERROR: nginx master runs as uid:gid ${running_ids:-?}," \
+      "expected ${service_user}:${service_group} (${expected_ids})" >&2
+    exit 1
+  fi
+}
+
+# uid:gid of the running nginx master (ps truncates long user names, so
+# compare ids); empty when home-warden.service has no main process.
+nginx_master_ids() {
+  local main_pid
+
+  main_pid="$(systemctl show --property=MainPID --value home-warden.service 2>/dev/null || true)"
+  if [[ -z "${main_pid}" || "${main_pid}" == 0 ]]; then
+    return 0
+  fi
+  ps -o uid=,gid= -p "${main_pid}" 2>/dev/null | awk '{ print $1 ":" $2 }' || true
+}
+
+# uid:gid home-warden.service should run as (SERVICE_USER / SERVICE_GROUP).
+service_account_ids() {
+  local gid
+  local uid
+
+  uid="$(id -u "${service_user}" 2>/dev/null || true)"
+  gid="$(getent group "${service_group}" 2>/dev/null | cut -d: -f3 || true)"
+  printf '%s:%s\n' "${uid}" "${gid}"
 }
 
 main() {
@@ -1236,6 +1374,9 @@ main() {
       # restart (not reload): unit Environment=DEPLOYED_COMMIT=… only refreshes on a new process
       echo "Restarting home-warden.service (on-deploy changed)..."
       run sudo systemctl restart home-warden.service
+    elif [[ "$(nginx_master_ids)" != "$(service_account_ids)" ]]; then
+      echo "Restarting home-warden.service (nginx not yet running as ${service_user}:${service_group})..."
+      run sudo systemctl restart home-warden.service
     fi
   else
     echo "Starting home-warden.service..."
@@ -1245,6 +1386,7 @@ main() {
   if ((dry_run == 0)); then
     confirm_running
   fi
+  remove_legacy_service_account
 
   echo
   echo "Follow logs:"

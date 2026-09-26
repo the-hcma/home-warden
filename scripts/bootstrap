@@ -8,7 +8,7 @@
 #   ./scripts/bootstrap --json         # machine-readable summary on stdout (never runs apt)
 #
 # Env overrides (same as setup-service):
-#   HOME_NGINX_CONF  OWNER  SCRATCH_DIR  CONF_DIR
+#   HOME_NGINX_CONF  OWNER  SCRATCH_DIR  CONF_DIR  SERVICE_USER  SERVICE_GROUP
 
 set -euo pipefail
 
@@ -33,6 +33,8 @@ OWNER="${OWNER:-$(id -un)}"
 SCRATCH_DIR="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 CONF_DIR="${CONF_DIR:-${HOME}/conf/home-warden}"
 HOME_NGINX_CONF="${HOME_NGINX_CONF:-}"
+SERVICE_USER="${SERVICE_USER:-home-warden-nginx}"
+SERVICE_GROUP="${SERVICE_GROUP:-${SERVICE_USER}}"
 
 do_fix=0
 do_fix_packages=0
@@ -506,6 +508,39 @@ check_home_warden_units() {
   fi
 }
 
+# nginx runs as its own locked system account, never the operator (#43, #132);
+# see docs/host-prerequisites.md#nginx-service-account for why and how.
+check_service_account() {
+  local -a fields=()
+  local passwd_entry
+
+  if [[ "${SERVICE_USER}" == "${OWNER}" ]]; then
+    record warn service_account "SERVICE_USER=${OWNER}: nginx would run as the operator (rollback mode)"
+    return 0
+  fi
+  if ! passwd_entry="$(getent passwd "${SERVICE_USER}")"; then
+    record warn service_account \
+      "${SERVICE_USER} account missing — setup-service creates it (docs/host-prerequisites.md#nginx-service-account)"
+  else
+    IFS=: read -r -a fields <<<"${passwd_entry}"
+    if [[ "${fields[5]:-}" == "/nonexistent" && "${fields[6]:-}" == */nologin ]]; then
+      record pass service_account "${SERVICE_USER} is a locked system account"
+    else
+      record fail service_account \
+        "${SERVICE_USER} is not locked (home=${fields[5]:-?}, shell=${fields[6]:-?}) — nginx must not run as a login account"
+    fi
+  fi
+  if getent group "${SERVICE_GROUP}" >/dev/null &&
+    id -nG "${OWNER}" | tr ' ' '\n' | grep -qx "${SERVICE_GROUP}"; then
+    record pass service_group "${OWNER} is in ${SERVICE_GROUP} (cert-renewer can hand it renewed keys)"
+  else
+    record warn service_group "${OWNER} not in ${SERVICE_GROUP} yet — setup-service adds it"
+  fi
+  if [[ "${SERVICE_USER}" != home-warden ]] && getent passwd home-warden >/dev/null; then
+    record warn legacy_service_account "#43-era home-warden account present — setup-service migrates off and removes it"
+  fi
+}
+
 print_json() {
   local row status code message first=1 rest
   printf '{"pass":%d,"warn":%d,"fail":%d,"scratch_dir":%s,"conf_dir":%s,"home_nginx_conf":%s,"checks":[' \
@@ -572,6 +607,7 @@ main() {
   check_distro_nginx
   check_ports
   check_home_warden_units
+  check_service_account
 
   if ((json_out)); then
     print_json
