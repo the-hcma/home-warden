@@ -173,6 +173,32 @@ def _cf_request(
     raise last_err
 
 
+def _host_resolves(host: str, timeout: float) -> bool | None:
+    """Can this host's own resolver (NSS, i.e. what nginx's proxy_pass and
+    check_upstream use) resolve `host`? Asked via `getent ahosts` rather
+    than socket.getaddrinfo, which takes no timeout.
+
+    Returns None when that can't be determined (no `getent`, a timeout, or
+    an unexpected exit) -- callers treat that as "couldn't verify", like
+    _resolve_via_authoritative_ns's None.
+    """
+    try:
+        proc = subprocess.run(
+            ["getent", "ahosts", host],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode == 0:
+        return True
+    if proc.returncode == 2:
+        return False
+    return None
+
+
 def _resolve_via_authoritative_ns(
     domain: str, record_type: str, nameserver: str, timeout: float, *, port: int | None = None
 ) -> list[str] | None:
@@ -326,6 +352,10 @@ def check_local_dns(name: str, service: dict, *, local_dns_port: int, timeout: f
     matching zone does an empty A/AAAA answer count as a real miss --
     otherwise "not our zone" is reported as skip, not fail.
 
+    A record the authoritative server has still fails when this host's own
+    resolver can't resolve the name (#139): nginx's proxy_pass goes through
+    that resolver, not PowerDNS.
+
     Read-only like the other dimensions: a missing record (in a zone this
     server *is* authoritative for) is reported as a failure to fix by
     hand (add it to thehcma/home's dns/zones.yml and reload), never
@@ -370,6 +400,17 @@ def check_local_dns(name: str, service: dict, *, local_dns_port: int, timeout: f
             "local_dns",
             "fail",
             f"no local A/AAAA record for {host} -- add one to thehcma/home's dns/zones.yml and reload first",
+        )
+    # The authoritative server having the record is not enough: nginx resolves
+    # upstream.host through this host's own resolver, which may never ask the
+    # local recursor (#139).
+    if _host_resolves(host, timeout) is False:
+        return CheckResult(
+            name,
+            "local_dns",
+            "fail",
+            f"local PowerDNS has {host} (A/AAAA={', '.join(answers)}) but this host cannot resolve it -- "
+            "route the local zones to the recursor (docs/dns-tinydns-migration.md, Host resolver)",
         )
     return CheckResult(name, "local_dns", "ok", f"A/AAAA={', '.join(answers)}")
 

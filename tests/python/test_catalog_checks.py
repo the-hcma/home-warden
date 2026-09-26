@@ -28,6 +28,7 @@ from app.catalog_checks import (
     CheckResult,
     SyncResult,
     _cf_request,
+    _host_resolves,
     _resolve_via_authoritative_ns,
     candidate_zone_names,
     check_cert,
@@ -501,6 +502,38 @@ def test_cf_request_forwards_method_and_body() -> None:
     assert sent_req.data == b'{"type": "A", "name": "app.example.com", "content": "203.0.113.10"}'
 
 
+# --- _host_resolves ---------------------------------------------------------
+
+
+def test_host_resolves_found() -> None:
+    with patch(
+        "subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="")
+    ) as mock_run:
+        assert _host_resolves("backend.example.internal", timeout=5) is True
+    assert mock_run.call_args.args[0] == ["getent", "ahosts", "backend.example.internal"]
+    assert mock_run.call_args.kwargs["timeout"] == 5
+
+
+def test_host_resolves_not_found() -> None:
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=2, stdout="")):
+        assert _host_resolves("backend.example.internal", timeout=5) is False
+
+
+def test_host_resolves_unexpected_exit_returns_none() -> None:
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=3, stdout="")):
+        assert _host_resolves("backend.example.internal", timeout=5) is None
+
+
+def test_host_resolves_getent_missing_returns_none() -> None:
+    with patch("subprocess.run", side_effect=FileNotFoundError):
+        assert _host_resolves("backend.example.internal", timeout=5) is None
+
+
+def test_host_resolves_timeout_returns_none() -> None:
+    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="getent", timeout=5)):
+        assert _host_resolves("backend.example.internal", timeout=5) is None
+
+
 # --- _resolve_via_authoritative_ns ----------------------------------------
 
 
@@ -739,22 +772,58 @@ def test_check_local_dns_aaaa_query_none_is_skip_not_fail() -> None:
 
 def test_check_local_dns_ok() -> None:
     service = {"kind": "proxy", "upstream": {"host": "backend.internal", "port": 8080}}
-    with patch(
-        "app.catalog_checks._resolve_via_authoritative_ns",
-        side_effect=[["ns1.backend.internal."], ["10.0.0.5"], []],
+    with (
+        patch(
+            "app.catalog_checks._resolve_via_authoritative_ns",
+            side_effect=[["ns1.backend.internal."], ["10.0.0.5"], []],
+        ),
+        patch("app.catalog_checks._host_resolves", return_value=True),
     ):
         result = check_local_dns("svc", service, local_dns_port=853, timeout=5)
     assert result.status == "ok"
     assert "10.0.0.5" in result.detail
 
 
+def test_check_local_dns_host_cannot_resolve_is_fail() -> None:
+    # #139: the authoritative server has the record, but the host's own
+    # resolver never asks the local recursor, so nginx couldn't use it.
+    service = {"kind": "proxy", "upstream": {"host": "backend.internal", "port": 8080}}
+    with (
+        patch(
+            "app.catalog_checks._resolve_via_authoritative_ns",
+            side_effect=[["ns1.backend.internal."], ["10.0.0.5"], []],
+        ),
+        patch("app.catalog_checks._host_resolves", return_value=False),
+    ):
+        result = check_local_dns("svc", service, local_dns_port=853, timeout=5)
+    assert result.status == "fail"
+    assert "this host cannot resolve it" in result.detail
+    assert "10.0.0.5" in result.detail
+
+
+def test_check_local_dns_host_resolution_unknown_is_ok() -> None:
+    service = {"kind": "proxy", "upstream": {"host": "backend.internal", "port": 8080}}
+    with (
+        patch(
+            "app.catalog_checks._resolve_via_authoritative_ns",
+            side_effect=[["ns1.backend.internal."], ["10.0.0.5"], []],
+        ),
+        patch("app.catalog_checks._host_resolves", return_value=None),
+    ):
+        result = check_local_dns("svc", service, local_dns_port=853, timeout=5)
+    assert result.status == "ok"
+
+
 def test_check_local_dns_aaaa_only_is_ok() -> None:
     # A-only queries would false-fail an IPv6-only backend -- AAAA must
     # also be checked, not just A.
     service = {"kind": "proxy", "upstream": {"host": "backend.internal", "port": 8080}}
-    with patch(
-        "app.catalog_checks._resolve_via_authoritative_ns",
-        side_effect=[["ns1.backend.internal."], [], ["::1"]],
+    with (
+        patch(
+            "app.catalog_checks._resolve_via_authoritative_ns",
+            side_effect=[["ns1.backend.internal."], [], ["::1"]],
+        ),
+        patch("app.catalog_checks._host_resolves", return_value=True),
     ):
         result = check_local_dns("svc", service, local_dns_port=853, timeout=5)
     assert result.status == "ok"
