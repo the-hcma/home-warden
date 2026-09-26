@@ -202,11 +202,12 @@ def render_zones_yaml(zones: dict[str, Zone]) -> str:
     return header + yaml.safe_dump({"domains": domains}, sort_keys=False, default_flow_style=False)
 
 
-def validate_zones_yaml_syntax(path: Path) -> None:
+def validate_zones_yaml_syntax(path: Path) -> dict:
     """Lightweight, offline check that `path` is well-formed GeoIP-backend
     YAML: valid YAML, a top-level mapping with a non-empty `domains` list,
-    each entry a mapping carrying `domain`/`ttl`/`records`. Raises
-    ValueError describing the first problem found.
+    each entry a mapping carrying a non-empty string `domain`, plus `ttl`
+    and `records`. Returns the parsed document; raises ValueError
+    describing the first problem found.
 
     This is deliberately *not* the real acceptance test -- it catches a
     hand-edit typo/shape mistake (a missing colon, a renamed key) before
@@ -226,6 +227,8 @@ def validate_zones_yaml_syntax(path: Path) -> None:
         raise ValueError(f"missing file: {path}")
     try:
         data = yaml.safe_load(path.read_text())
+    except OSError as e:
+        raise ValueError(f"cannot read {path}: {e}") from e
     except yaml.YAMLError as e:
         raise ValueError(f"invalid YAML in {path}: {e}") from e
     if not isinstance(data, dict):
@@ -239,8 +242,11 @@ def validate_zones_yaml_syntax(path: Path) -> None:
         for key in ("domain", "ttl", "records"):
             if key not in entry:
                 raise ValueError(f"{path}: domains[{i}] missing required key {key!r}")
+        if not isinstance(entry["domain"], str) or not entry["domain"].strip("."):
+            raise ValueError(f"{path}: domains[{i}].domain must be a non-empty string")
         if not isinstance(entry["records"], dict):
             raise ValueError(f"{path}: domains[{i}].records must be a mapping")
+    return data
 
 
 def zone_apexes_from_records(records: list[ParsedRecord]) -> list[str]:

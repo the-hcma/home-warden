@@ -178,9 +178,10 @@ def _host_resolves(host: str, timeout: float) -> bool | None:
     check_upstream use) resolve `host`? Asked via `getent ahosts` rather
     than socket.getaddrinfo, which takes no timeout.
 
-    Returns None when that can't be determined (no `getent`, a timeout, or
-    an unexpected exit) -- callers treat that as "couldn't verify", like
-    _resolve_via_authoritative_ns's None.
+    A lookup that outlasts `timeout` counts as False: a resolver that hangs
+    that long fails nginx too. Returns None only when the lookup can't run
+    at all (no `getent`, or an unexpected exit) -- callers treat that as
+    "couldn't verify", like _resolve_via_authoritative_ns's None.
     """
     try:
         proc = subprocess.run(
@@ -190,8 +191,10 @@ def _host_resolves(host: str, timeout: float) -> bool | None:
             timeout=timeout,
             check=False,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except FileNotFoundError:
         return None
+    except subprocess.TimeoutExpired:
+        return False
     if proc.returncode == 0:
         return True
     if proc.returncode == 2:
@@ -404,7 +407,16 @@ def check_local_dns(name: str, service: dict, *, local_dns_port: int, timeout: f
     # The authoritative server having the record is not enough: nginx resolves
     # upstream.host through this host's own resolver, which may never ask the
     # local recursor (#139).
-    if _host_resolves(host, timeout) is False:
+    host_resolves = _host_resolves(host, timeout)
+    if host_resolves is None:
+        return CheckResult(
+            name,
+            "local_dns",
+            "skip",
+            f"local PowerDNS has {host} (A/AAAA={', '.join(answers)}), but this host's own resolution of it "
+            "could not be checked (getent unavailable)",
+        )
+    if not host_resolves:
         return CheckResult(
             name,
             "local_dns",

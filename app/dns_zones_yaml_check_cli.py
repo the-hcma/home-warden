@@ -27,8 +27,6 @@ import argparse
 import sys
 from pathlib import Path
 
-import yaml
-
 from app.dns_tinydns_convert import validate_zones_yaml_syntax
 
 
@@ -46,7 +44,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_arg_parser().parse_args()
     try:
-        validate_zones_yaml_syntax(args.zones_yaml)
+        data = validate_zones_yaml_syntax(args.zones_yaml)
     except ValueError as e:
         print(f"dns-zones-yaml-check: {e}", file=sys.stderr)
         return 2
@@ -54,8 +52,8 @@ def main() -> int:
         print(f"dns-zones-yaml-check: {args.zones_yaml}: OK")
         return 0
     print(f"dns-zones-yaml-check: {args.zones_yaml}: OK", file=sys.stderr)
-    for entry in yaml.safe_load(args.zones_yaml.read_text())["domains"]:
-        print(str(entry["domain"]).rstrip("."))
+    for entry in data["domains"]:
+        print(entry["domain"].rstrip("."))
     return 0
 
 

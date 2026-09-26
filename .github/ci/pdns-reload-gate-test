@@ -92,6 +92,7 @@ sentinel="${work_dir}/pdns_control.called"
 export STUB_PDNS_CONTROL_SENTINEL="${sentinel}"
 rec_control_log="${work_dir}/rec_control.log"
 export STUB_REC_CONTROL_LOG="${rec_control_log}"
+last_output="${work_dir}/last-run.out"
 
 fail=0
 
@@ -100,7 +101,8 @@ run_case() {
   shift 2
   rm -f "${sentinel}" "${rec_control_log}"
   local actual_exit=0
-  "$@" || actual_exit=$?
+  "$@" >"${last_output}" 2>&1 || actual_exit=$?
+  cat "${last_output}"
   if [[ "${actual_exit}" != "${expected_exit}" ]]; then
     echo "FAIL (${desc}): expected exit ${expected_exit}, got ${actual_exit}" >&2
     fail=1
@@ -119,6 +121,17 @@ assert_sentinel() {
     fail=1
   else
     echo "OK (${desc}): pdns_control invocation as expected (called=${expect_called})"
+  fi
+}
+
+# assert_output <desc> <fixed string the last run must have logged>
+assert_output() {
+  local -r desc="$1" expected="$2"
+  if grep -q -F -- "${expected}" "${last_output}"; then
+    echo "OK (${desc}): logged '${expected}'"
+  else
+    echo "FAIL (${desc}): output never mentioned '${expected}'" >&2
+    fail=1
   fi
 }
 
@@ -200,14 +213,34 @@ assert_rec_control "unknown PDNS_RECURSOR_SERVICE unit" ""
 PDNS_ZONES_YAML="${two_zones}" STUB_DIG_STATUS=NXDOMAIN \
   run_case "recursor does not forward zones" 3 "${repo_dir}/scripts/pdns-test-and-reload"
 assert_rec_control "recursor does not forward zones" $'reload-zones\nwipe-cache example.com$\nwipe-cache example.net$'
+assert_output "recursor does not forward zones" "add it to recursor.forward_zones (zone: example.net"
 
-# Case 9: DNSSEC-bogus SERVFAIL is also a failure, not a pass.
+# Case 9: DNSSEC-bogus SERVFAIL is also a failure, not a pass, with the
+# negative-trust-anchor hint rather than the forward_zones one.
 PDNS_ZONES_YAML="${two_zones}" STUB_DIG_STATUS=SERVFAIL \
   run_case "recursor SERVFAILs zones" 3 "${repo_dir}/scripts/pdns-test-and-reload"
+assert_output "recursor SERVFAILs zones" "add example.com to dnssec.negative_trustanchors"
 
 # Case 10: rec_control reload-zones fails -- exit 1, no cache wipes.
 PDNS_ZONES_YAML="${two_zones}" STUB_REC_CONTROL_RELOAD_EXIT=1 \
   run_case "rec_control reload-zones fails" 1 "${repo_dir}/scripts/pdns-test-and-reload"
 assert_rec_control "rec_control reload-zones fails" "reload-zones"
+
+# Case 11: recursor installed but not active -- pdns reloads, the recursor
+# step is skipped, exit 0.
+PDNS_ZONES_YAML="${two_zones}" STUB_RECURSOR_LOAD_STATE=loaded STUB_RECURSOR_ACTIVE_EXIT=3 \
+  run_case "recursor installed but inactive" 0 "${repo_dir}/scripts/pdns-test-and-reload"
+assert_sentinel "recursor installed but inactive" 1
+assert_rec_control "recursor installed but inactive" ""
+assert_output "recursor installed but inactive" "not active — skip recursor reload"
+
+# Case 12: a zones.yml entry with an empty domain fails the gate (exit 2)
+# instead of becoming a bogus zone for the recursor probes.
+empty_domain="${work_dir}/empty-domain.yml"
+printf 'domains:\n  - domain: ""\n    ttl: 3600\n    records: {}\n' >"${empty_domain}"
+PDNS_ZONES_YAML="${empty_domain}" \
+  run_case "empty domain in zones.yml" 2 "${repo_dir}/scripts/pdns-test-and-reload"
+assert_sentinel "empty domain in zones.yml" 0
+assert_rec_control "empty domain in zones.yml" ""
 
 exit "${fail}"

@@ -529,9 +529,10 @@ def test_host_resolves_getent_missing_returns_none() -> None:
         assert _host_resolves("backend.example.internal", timeout=5) is None
 
 
-def test_host_resolves_timeout_returns_none() -> None:
+def test_host_resolves_timeout_counts_as_not_resolving() -> None:
+    # A resolver that hangs past the check's budget fails nginx too.
     with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="getent", timeout=5)):
-        assert _host_resolves("backend.example.internal", timeout=5) is None
+        assert _host_resolves("backend.example.internal", timeout=5) is False
 
 
 # --- _resolve_via_authoritative_ns ----------------------------------------
@@ -801,7 +802,7 @@ def test_check_local_dns_host_cannot_resolve_is_fail() -> None:
     assert "10.0.0.5" in result.detail
 
 
-def test_check_local_dns_host_resolution_unknown_is_ok() -> None:
+def test_check_local_dns_host_resolution_unknown_is_skip() -> None:
     service = {"kind": "proxy", "upstream": {"host": "backend.internal", "port": 8080}}
     with (
         patch(
@@ -811,7 +812,8 @@ def test_check_local_dns_host_resolution_unknown_is_ok() -> None:
         patch("app.catalog_checks._host_resolves", return_value=None),
     ):
         result = check_local_dns("svc", service, local_dns_port=853, timeout=5)
-    assert result.status == "ok"
+    assert result.status == "skip"
+    assert "could not be checked" in result.detail
 
 
 def test_check_local_dns_aaaa_only_is_ok() -> None:
