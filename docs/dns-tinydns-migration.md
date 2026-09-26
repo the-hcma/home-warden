@@ -98,6 +98,36 @@ uses geo expansions (plain `records:` only). `dns/recursor.conf` (in
 `thehcma/home`) stays hand-maintained and unchanged; it already forwards
 these zones' queries to loopback:853.
 
+`pdns-server` does not pull in `pdns-backend-geoip`, and its stock
+`/etc/powerdns/pdns.conf` binds `0.0.0.0:53`, which crash-loops against the
+recursor and `systemd-resolved` on the same host. `apt` restarts pdns as
+part of installing the backend, so expect that restart to fail until the
+generated `pdns.conf` replaces the stock one:
+
+```bash
+sudo cp -a /etc/powerdns/pdns.conf /etc/powerdns/pdns.conf.dist
+sudo install -o root -g pdns -m 640 <outdir>/pdns.conf /etc/powerdns/pdns.conf
+```
+
+Point `geoip-zones-file=` in that copy at the live `zones.yml` (the
+converter writes the path of the file it just generated).
+
+Recursor pitfalls found on the designated host (#128), for the
+hand-maintained `recursor.conf`:
+
+- **DNSSEC.** Recursor ≥ 4.5 validates whenever a client sets the AD or DO
+  bit (`dig` and glibc's `trust-ad` both set AD). A forwarded zone under a
+  TLD the root proves nonexistent (a made-up internal TLD) then comes back
+  bogus, i.e. `SERVFAIL`. Add a negative trust anchor per such zone
+  (`dnssec.negative_trustanchors` in YAML config, `rec_control add-nta` at
+  runtime). Zones under a real, unsigned parent, and RFC 1918 reverse zones,
+  are unaffected.
+- **Old-style `forward-zones=`.** `;` separates extra forwarders for the
+  *same* zone, not a fallback list: `a=127.0.0.1:853;1.1.1.1` also sends
+  zone `a` to 1.1.1.1. Pdns-recursor 5.x can print the YAML equivalent of
+  an old-style file with `rec_control show-yaml <file>`, which makes this
+  visible.
+
 ## Install and reload-on-edit wiring
 
 `scripts/setup-service` installs and enables the reload units
@@ -108,6 +138,19 @@ opt-in via `PDNS_ZONES_YAML`:
 ```bash
 PDNS_ZONES_YAML=/path/to/thehcma/home/dns/zones.yml ./scripts/setup-service
 ```
+
+When `zones.yml` lives under `/home`, `setup-service` also installs a
+`pdns.service` drop-in (`/etc/systemd/system/pdns.service.d/home-warden.conf`:
+`ProtectHome=tmpfs` plus a read-only bind of the `zones.yml` directory),
+because the distro unit's `ProtectHome=true` otherwise hides the file from
+pdns entirely. It restarts pdns only when the drop-in changes. It refuses a
+directory that isn't a specific, non-hidden path under `/home/<user>/` (the
+same allowlist as nginx's sandbox binds), and fails unless the `pdns`
+account can search the directory and read the file, through world bits or
+through a group it belongs to (e.g. `chgrp pdns` plus `g+r`). It also fails
+on a `PDNS_ZONES_YAML` that goes through a symlink, since pdns can't follow
+one out of its sandbox — point it at the real path. If `zones.yml` later
+moves out of `/home`, the next `setup-service` run removes the drop-in.
 
 Skipped (with a message, not an error) when `PDNS_ZONES_YAML` is unset and
 the default `~/home/dns/zones.yml` doesn't exist either — installing
