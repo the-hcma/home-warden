@@ -972,6 +972,11 @@ install_reload_watch_dropin() {
   local tmp
   local -a watch_lines=()
 
+  if ((dry_run)); then
+    # validate_nginx_config skips nginx -T in a dry run, so there is no dump to decide from.
+    echo "DRY-RUN: would regenerate ${reload_watch_dropin_dest} from nginx -T (not run in a dry run)"
+    return 0
+  fi
   current="$(cat "${reload_watch_dropin_dest}" 2>/dev/null || true)"
   dirs="$(resolve_nginx_reload_watch_dirs "${nginx_dump}" "$(dirname "${home_nginx_conf}")")"
   if [[ -z "${dirs}" ]]; then
@@ -993,11 +998,6 @@ install_reload_watch_dropin() {
     return 0
   fi
   reload_watch_dropin_changed=1
-  if ((dry_run)); then
-    echo "DRY-RUN: would write ${reload_watch_dropin_dest}"
-    printf '%s\n' "${generated}"
-    return 0
-  fi
   tmp="$(mktemp)"
   printf '%s\n' "${generated}" >"${tmp}"
   run sudo install -d -m 755 "$(dirname "${reload_watch_dropin_dest}")"
