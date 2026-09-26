@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# Fail-closed: dns-zones-yaml-check syntax gate, then pdns_control reload.
+# Fail-closed: dns-zones-yaml-check syntax gate, then pdns_control reload,
+# then the recursor: rec_control reload-zones, a cache wipe per zone, and an
+# SOA probe of every zone apex through it (#127).
 # Used by home-warden-pdns-reload.service (systemd path unit) -- mirrors
 # scripts/nginx-test-and-reload's pattern for the pdns side.
+#
+# The recursor config itself (forward_zones, negative trust anchors) stays
+# hand-maintained; a zone the recursor does not answer for fails this run
+# with the entry to add, rather than being written here.
 #
 # Env:
 #   PDNS_ZONES_YAML  path to thehcma/home's dns/zones.yml (required unless
@@ -15,11 +21,18 @@
 #                    (default: pdns.service -- the *package* is
 #                    pdns-server, but the *unit* Debian/Ubuntu installs is
 #                    just "pdns")
+#   PDNS_RECURSOR_SERVICE  recursor unit (default: pdns-recursor.service; the
+#                    recursor step is skipped when that default isn't
+#                    installed, but an explicitly set unit must exist)
+#   PDNS_RECURSOR_ADDRESS  address the zone probes query (default: 127.0.0.1)
+#   PDNS_AUTH_FORWARDER    authoritative address:port suggested as the
+#                    forwarder in a missing-zone message (default: 127.0.0.1:853)
 #
 # Exit:
 #   0 — syntax OK and reload succeeded (or service inactive: skip reload)
-#   1 — pdns_control reload failed
-#   2 — usage / missing file / syntax check failed
+#   1 — pdns_control reload or rec_control reload-zones failed
+#   2 — usage / missing file / syntax check failed / unknown unit
+#   3 — reloaded, but the recursor does not answer for one or more zones
 #
 # Note: this calls `pdns_control reload`, not `systemctl reload
 # "${pdns_service}"` -- the distro-packaged pdns.service does not
@@ -52,22 +65,55 @@ pdns_service="${PDNS_SERVICE:-pdns.service}"
 readonly pdns_service
 owner="${OWNER:-$(stat -c '%U' "${script_dir}/.." 2>/dev/null || true)}"
 readonly owner
+pdns_auth_forwarder="${PDNS_AUTH_FORWARDER:-127.0.0.1:853}"
+readonly pdns_auth_forwarder
+recursor_address="${PDNS_RECURSOR_ADDRESS:-127.0.0.1}"
+readonly recursor_address
+recursor_service="${PDNS_RECURSOR_SERVICE:-pdns-recursor.service}"
+readonly recursor_service
 
 log() {
-  local -r msg=$1
+  local -r msg="$*"
   local ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '%s %s\n' "${ts}" "${msg}"
+}
+
+# probe_recursor_zone <zone> — whether the recursor answers the zone's SOA.
+# +adflag matches glibc's trust-ad clients: a recursor that validates DNSSEC
+# SERVFAILs a zone under a made-up TLD for them unless it has a negative
+# trust anchor, even when forwarding works.
+probe_recursor_zone() {
+  local -r zone="$1"
+  local answer
+  local status
+
+  if ! answer="$(dig +tries=1 +time=3 +adflag +noall +comments +answer "@${recursor_address}" "${zone}" SOA)"; then
+    log "FAIL: recursor ${recursor_address} did not answer for ${zone}"
+    return 1
+  fi
+  status="$(sed -n -E 's/.*status: ([A-Z]+).*/\1/p' <<<"${answer}")"
+  if [[ "${status}" == "NOERROR" ]] && grep -q -E '[[:space:]]SOA[[:space:]]' <<<"${answer}"; then
+    return 0
+  fi
+  if [[ "${status}" == "SERVFAIL" ]]; then
+    log "FAIL: recursor answers SERVFAIL for ${zone} — if it validates DNSSEC, add ${zone} to" \
+      "dnssec.negative_trustanchors in its config, then touch zones.yml to rerun this"
+    return 1
+  fi
+  log "FAIL: recursor answers ${status:-no status} for ${zone} SOA — add it to recursor.forward_zones" \
+    "(zone: ${zone}, forwarders: [${pdns_auth_forwarder}]), then touch zones.yml to rerun this"
+  return 1
 }
 
 run_zones_check() {
   local -r zones_yaml="$1"
 
   if [[ "$(id -u)" -ne 0 || -z "${owner}" || "${owner}" == "root" ]]; then
-    "${script_dir}/dns-zones-yaml-check" "${zones_yaml}"
+    "${script_dir}/dns-zones-yaml-check" --list-zones "${zones_yaml}"
     return
   fi
-  runuser -u "${owner}" -- "${script_dir}/dns-zones-yaml-check" "${zones_yaml}"
+  runuser -u "${owner}" -- "${script_dir}/dns-zones-yaml-check" --list-zones "${zones_yaml}"
 }
 
 if [[ -z "${pdns_zones_yaml}" ]]; then
@@ -81,7 +127,7 @@ if [[ ! -f "${pdns_zones_yaml}" ]]; then
 fi
 
 log "dns-zones-yaml-check ${pdns_zones_yaml}"
-if run_zones_check "${pdns_zones_yaml}"; then
+if zone_list="$(run_zones_check "${pdns_zones_yaml}")"; then
   log "syntax OK"
 else
   wrapper_status=$?
@@ -121,3 +167,51 @@ if pdns_control purge >/dev/null; then
 else
   log "WARN: pdns_control purge failed — stale answers until cache TTLs expire"
 fi
+
+readarray -t zones <<<"${zone_list}"
+readonly zones
+
+recursor_load_state="$(systemctl show --property=LoadState --value "${recursor_service}" 2>/dev/null || true)"
+readonly recursor_load_state
+if [[ "${recursor_load_state}" == "not-found" ]]; then
+  if [[ -n "${PDNS_RECURSOR_SERVICE:-}" ]]; then
+    log "ERROR: unknown systemd unit: ${recursor_service} (check PDNS_RECURSOR_SERVICE)"
+    exit 2
+  fi
+  log "${recursor_service} not installed — skip recursor reload"
+  exit 0
+fi
+if ! systemctl is-active --quiet "${recursor_service}"; then
+  log "${recursor_service} not active — skip recursor reload"
+  exit 0
+fi
+
+# reload-zones rereads forward_zones from the recursor's config, so a zone the
+# operator just added there takes effect without a restart (verified on
+# pdns-recursor 5.3, #127).
+log "rec_control reload-zones"
+if ! rec_control reload-zones >/dev/null; then
+  log "FAIL: rec_control reload-zones failed"
+  exit 1
+fi
+for zone in "${zones[@]}"; do
+  if ! rec_control wipe-cache "${zone}\$" >/dev/null; then
+    log "WARN: rec_control wipe-cache ${zone}\$ failed — the recursor may serve stale answers until TTLs expire"
+  fi
+done
+
+if ! command -v dig >/dev/null 2>&1; then
+  log "WARN: dig not found — cannot verify the recursor answers for each zone"
+  exit 0
+fi
+unanswered=0
+for zone in "${zones[@]}"; do
+  if ! probe_recursor_zone "${zone}"; then
+    unanswered=$((unanswered + 1))
+  fi
+done
+if ((unanswered)); then
+  log "FAIL: recursor does not answer for ${unanswered} of ${#zones[@]} zone(s)"
+  exit 3
+fi
+log "recursor answers for all ${#zones[@]} zone(s)"
