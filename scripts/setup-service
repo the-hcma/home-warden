@@ -830,6 +830,10 @@ install_host_resolver_dropin() {
     return 0
   fi
 
+  if ((!pdns_enabled)); then
+    echo "ERROR: PDNS_HOST_RESOLVER=1 needs pdns wiring — set PDNS_ZONES_YAML (no zones.yml found)" >&2
+    exit 1
+  fi
   if ! systemctl is-active --quiet systemd-resolved.service; then
     echo "ERROR: PDNS_HOST_RESOLVER=1 needs an active systemd-resolved.service" >&2
     exit 1
@@ -1181,8 +1185,8 @@ main() {
     expand_unit "${unit_template_dir}/home-warden-pdns-reload.service" "${system_unit_dir}/home-warden-pdns-reload.service"
     expand_unit "${unit_template_dir}/home-warden-pdns-reload.path" "${system_unit_dir}/home-warden-pdns-reload.path"
     install_pdns_sandbox_dropin
-    install_host_resolver_dropin
   fi
+  install_host_resolver_dropin
   expand_unit "${unit_template_dir}/home-warden-healthcheck.service" "${system_unit_dir}/home-warden-healthcheck.service"
   expand_unit "${unit_template_dir}/home-warden-healthcheck.timer" "${system_unit_dir}/home-warden-healthcheck.timer"
   if ((catalog_heal_enabled)); then
@@ -1209,9 +1213,9 @@ main() {
     if ((pdns_dropin_changed)); then
       run sudo systemctl try-restart pdns.service
     fi
-    if ((resolved_dropin_changed)); then
-      run sudo systemctl restart systemd-resolved.service
-    fi
+  fi
+  if ((resolved_dropin_changed)); then
+    run sudo systemctl restart systemd-resolved.service
   fi
   run sudo systemctl enable --now home-warden-healthcheck.timer
   if ((catalog_heal_enabled)); then
