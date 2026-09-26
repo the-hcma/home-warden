@@ -339,8 +339,19 @@ work in `thehcma/home#16` (private repo) it relocates.
   against stub `systemctl`/`pdns_control` binaries. `scripts/setup-service`
   installs and enables these reload units automatically, opt-in via
   `PDNS_ZONES_YAML` (skipped, not an error, when unset and the default
-  `~/home/dns/zones.yml` doesn't exist either) — see
-  docs/dns-tinydns-migration.md.
+ `~/home/dns/zones.yml` doesn't exist either) — see
+ docs/dns-tinydns-migration.md.
+- **Host resolver**: `app.catalog_checks.check_local_dns` also resolves
+ `upstream.host` via `getent ahosts` once the authoritative server has it,
+ failing when this host's own resolver can't — nginx's `proxy_pass` goes
+ through that resolver, not PowerDNS
+ ([#139](https://github.com/the-hcma/home-warden/issues/139)). The fix is
+ routing the local zones to the recursor: `PDNS_HOST_RESOLVER=1
+ ./scripts/setup-service` writes a `systemd-resolved` drop-in
+ (`/etc/systemd/resolved.conf.d/home-warden-local-zones.conf`) with one `~`
+ routing domain per `zones.yml` zone, `PDNS_HOST_RESOLVER=0` removes it,
+ and unset leaves an existing one untouched — host-wide DNS routing is not
+ something a forgotten variable should silently undo.
 - Full usage, packages, install/reload steps, the record-mapping
   reference table, and the validation workflow:
   [docs/dns-tinydns-migration.md](./docs/dns-tinydns-migration.md).
