@@ -257,6 +257,12 @@ assert_output "portless PDNS_AUTH_FORWARDER" "PDNS_AUTH_FORWARDER must be IPv4-a
 PDNS_ZONES_YAML="${two_zones}" PDNS_RECURSOR_ADDRESS=127.0.0.1:53 \
   run_case "PDNS_RECURSOR_ADDRESS with a port" 2 "${repo_dir}/scripts/pdns-test-and-reload"
 assert_sentinel "PDNS_RECURSOR_ADDRESS with a port" 0
+for bad_address in 1:2:3 abcd 1234 : 256.0.0.1; do
+  PDNS_ZONES_YAML="${two_zones}" PDNS_RECURSOR_ADDRESS="${bad_address}" \
+    run_case "PDNS_RECURSOR_ADDRESS=${bad_address}" 2 "${repo_dir}/scripts/pdns-test-and-reload"
+done
+PDNS_ZONES_YAML="${two_zones}" PDNS_AUTH_FORWARDER=999.0.0.1:853 \
+  run_case "out-of-range PDNS_AUTH_FORWARDER" 2 "${repo_dir}/scripts/pdns-test-and-reload"
 PDNS_ZONES_YAML="${two_zones}" PDNS_RECURSOR_ADDRESS=::1 \
   run_case "IPv6 PDNS_RECURSOR_ADDRESS" 0 "${repo_dir}/scripts/pdns-test-and-reload"
 
