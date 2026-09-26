@@ -11,7 +11,8 @@ StartLimitBurst=20
 
 [Service]
 Type=simple
-# Dedicated system account (home-warden#43), not the operator: it owns
+# Dedicated system account (home-warden#43, home-warden-nginx by default
+# since #132), not the operator: it owns
 # nothing, reads certs via group membership only, and can write only the
 # nginx logs/temp paths setup-service hands to its group.
 User=@@SERVICE_USER@@
