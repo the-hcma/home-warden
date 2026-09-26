@@ -326,7 +326,11 @@ work in `thehcma/home#16` (private repo) it relocates.
   (`app.dns_tinydns_convert.validate_zones_yaml_syntax` — catches a typo,
  not a deeper semantic mistake) before `pdns_control reload` — not
  `systemctl reload pdns.service`, which the distro-packaged unit doesn't
- implement at all. When `pdns-recursor` is installed, it then runs
+ implement at all. Reload is followed by `pdns_control rediscover` (reload
+ alone leaves pdns's zone cache stale, so a new zone apex stays `REFUSED`
+ for up to `zone-cache-refresh-interval`, default 300s —
+ [#145](https://github.com/the-hcma/home-warden/issues/145)) and
+ `pdns_control purge`. When `pdns-recursor` is installed, it then runs
  `rec_control reload-zones`, wipes the recursor cache per zone, and probes
  each zone apex's SOA through the recursor — which must match the
  authoritative server's, or a public split-horizon zone resolved upstream

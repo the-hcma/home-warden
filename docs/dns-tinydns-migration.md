@@ -181,8 +181,14 @@ The reload unit runs as root (for `pdns_control`), but the syntax gate is a
 `uv run` in this repo, so the script drops to `OWNER` (the operator) via
 `runuser` for that step. `uv` is looked up in the operator's
 `~/.local/bin` (the astral.sh installer default) before the system `PATH`.
-After `pdns_control reload`, it runs `pdns_control purge`, since reload
-keeps pdns's packet and negative caches.
+After `pdns_control reload`, it runs `pdns_control rediscover`, then
+`pdns_control purge`. Reload rereads the YAML but not pdns's zone cache,
+the list of zones it is authoritative for, which pdns otherwise refreshes
+every `zone-cache-refresh-interval` seconds (default 300). Without
+`rediscover`, a new zone apex answers `REFUSED` and a removed one keeps
+answering until that refresh; both were confirmed on pdns 5.0.2 with the
+GeoIP backend (#145). The purge then drops the packet and negative caches,
+which reload also keeps, including a `REFUSED` cached before the rediscover.
 
 When `pdns-recursor.service` is installed and active, the same run then:
 
