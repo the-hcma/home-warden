@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# scripts/lib/nginx-sandbox-binds — which paths from the served nginx conf
+# home-warden.service's sandbox must bind back in, and which it refuses.
+#
+# home-warden.service runs with ProtectHome=tmpfs, so any file the served conf
+# references under /home or /root is invisible unless bind-mounted back in
+# (BindReadOnlyPaths=, rendered by scripts/setup-service).
+#
+# A bind mount of a single file pins that file's inode: when its owner
+# replaces it by writing a temp file and renaming it over the original (how a
+# CRL is republished), the sandbox keeps seeing the old file, and an nginx
+# reload rereads the same stale copy. Directives whose file is expected to be
+# republished that way therefore bind the containing directory, which follows
+# renames within it (#148):
+#   ssl_crl, ssl_client_certificate, ssl_trusted_certificate
+# Other file directives still bind just the file, so a key's directory is not
+# exposed for the sake of its certificate.
+
+# nginx directives whose argument is a filesystem path the sandbox may need.
+nginx_path_directives=(
+  alias
+  auth_basic_user_file
+  include
+  root
+  ssl_certificate
+  ssl_certificate_key
+  ssl_client_certificate
+  ssl_crl
+  ssl_dhparam
+  ssl_password_file
+  ssl_trusted_certificate
+)
+readonly -a nginx_path_directives
+
+# Accepts only /home/<user>/<segment>[/<segment>...] (target already
+# normalized) where every segment is plain [A-Za-z0-9._@+-] not starting with
+# a dot. That refuses /root, /home, a bare home dir, hidden paths (~/.ssh,
+# ~/.config, `..`), and any character (backslash, `&`, `|`, whitespace) that
+# could escape the sed substitution expand_unit renders these into.
+is_safe_sandbox_bind() {
+  local -r target="$1"
+  local -r segment='[A-Za-z0-9_@+-][A-Za-z0-9._@+-]*'
+  [[ "${target}" =~ ^/home/${segment}(/${segment})+$ ]]
+}
+
+# resolve_nginx_extra_read_paths <nginx -T dump> [<covered dir>...]
+# Prints one `-<path>` per line (the `-` makes systemd skip a path that has
+# since disappeared instead of refusing to start) for every location under
+# /home or /root the conf references that no covered dir already contains.
+# root/alias, glob includes, and republished files (see the header) bind a
+# directory; other file directives bind just the file. The whole argument up
+# to `;` is captured so a path the allowlist can't take (e.g. a quoted one
+# with a space) is warned about, never silently dropped. The conf is not
+# trusted to widen the sandbox arbitrarily: see is_safe_sandbox_bind for what
+# is refused — including a republished file sitting directly in a home
+# directory, whose directory would be the whole home.
+resolve_nginx_extra_read_paths() {
+  local -r dump="$1"
+  shift
+  local -a covered_dirs=("$@")
+  local covered
+  local directive
+  local directive_re
+  local path
+  local skip
+  local target
+
+  directive_re="$(
+    IFS='|'
+    printf '%s' "${nginx_path_directives[*]}"
+  )"
+  while read -r directive path; do
+    path="${path//\"/}"
+    path="${path//\'/}"
+    if [[ "${path}" != /home/* && "${path}" != /root/* ]] || [[ "${path}" == *'$'* ]]; then
+      continue
+    fi
+    case "${directive}" in
+      alias | root) target="${path%/}" ;;
+      include)
+        if [[ "${path}" == *[*?[]* ]]; then
+          target="$(dirname "${path}")"
+        else
+          target="${path}"
+        fi
+        ;;
+      ssl_client_certificate | ssl_crl | ssl_trusted_certificate) target="$(dirname "${path}")" ;;
+      *) target="${path}" ;;
+    esac
+    while [[ "${target}" == *//* ]]; do
+      target="${target//\/\//\/}"
+    done
+    if [[ "${target}" != / ]]; then
+      target="${target%/}"
+    fi
+    skip=0
+    for covered in "${covered_dirs[@]}"; do
+      if [[ "${target}" == "${covered}" || "${target}" == "${covered}"/* ]]; then
+        skip=1
+      fi
+    done
+    if ((skip)); then
+      continue
+    fi
+    if ! is_safe_sandbox_bind "${target}"; then
+      echo "WARNING: not exposing ${target} (from ${directive}) to the nginx sandbox:" \
+        "only plain paths below /home/<user>/ are allowed — move it under a dedicated dir" >&2
+      continue
+    fi
+    printf -- '-%s\n' "${target}"
+  done < <(
+    sed -nE "s/^[[:space:]]*(${directive_re})[[:space:]]+([^;]+);.*\$/\1 \2/p" \
+      <<<"${dump}"
+  ) | sort -u
+}
