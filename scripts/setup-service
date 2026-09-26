@@ -175,7 +175,7 @@ if [[ -n "${host_resolver_mode}" && "${host_resolver_mode}" != "0" && "${host_re
 fi
 # Written verbatim into host-wide DNS= for PDNS_HOST_RESOLVER=1; same rule as
 # scripts/pdns-test-and-reload, which probes the recursor there.
-if [[ ! "${recursor_address}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ && ! "${recursor_address}" =~ ^[0-9a-fA-F:]+$ ]]; then
+if ! python3 -c 'import ipaddress, sys; ipaddress.ip_address(sys.argv[1])' "${recursor_address}" 2>/dev/null; then
   echo "ERROR: PDNS_RECURSOR_ADDRESS must be a bare IP address, without a port (got '${recursor_address}')" >&2
   exit 2
 fi
