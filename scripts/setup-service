@@ -93,6 +93,9 @@ readonly recursor_address
 recursor_service="${PDNS_RECURSOR_SERVICE:-pdns-recursor.service}"
 readonly recursor_service
 resolved_dropin_changed=0
+# Units this run renders; their old contents do not count as still using
+# the legacy account (see remove_legacy_service_account).
+rendered_units=()
 services_json="${SERVICES_JSON_PATH:-}"
 catalog_heal_enabled=0
 deployed_commit="${DEPLOYED_COMMIT:-}"
@@ -283,10 +286,13 @@ ensure_service_account() {
 remove_legacy_service_account() {
   local -r legacy="${legacy_service_account}"
   local -a fields=()
+  local -a process_units=()
   local -a referencing_units=()
   local -a scan_dirs=()
   local dir
   local passwd_entry
+  local process_unit
+  local unit_file
 
   if [[ "${service_user}" == "${legacy}" || "${service_group}" == "${legacy}" ]]; then
     return 0
@@ -301,21 +307,28 @@ remove_legacy_service_account() {
   elif ! getent group "${legacy}" >/dev/null; then
     return 0
   fi
-  if ((dry_run == 0)); then
-    if pgrep --uid "${legacy}" >/dev/null 2>&1; then
-      echo "WARNING: processes still run as ${legacy} — keeping the account;" \
-        "re-run setup-service once they exit" >&2
+  # home-warden.service is restarted onto SERVICE_USER before this runs (the
+  # --dry-run preview has not restarted it yet), so only other units count.
+  if getent passwd "${legacy}" >/dev/null; then
+    mapfile -t process_units < <(ps -o unit= -u "${legacy}" 2>/dev/null || true)
+  fi
+  for process_unit in "${process_units[@]}"; do
+    if [[ "${process_unit}" != "home-warden.service" ]]; then
+      echo "WARNING: processes outside home-warden.service (${process_unit}) still run as" \
+        "${legacy} — keeping the account; re-run setup-service once they exit" >&2
       return 0
     fi
-    mapfile -t referencing_units < <(
-      grep --files-with-matches --extended-regexp \
-        "^(User|Group)=${legacy}\$|SERVICE_GROUP=${legacy}\$" \
-        "${system_unit_dir}"/*.service "${system_unit_dir}"/*.d/*.conf 2>/dev/null || true
-    )
-    if ((${#referencing_units[@]})); then
-      echo "WARNING: keeping ${legacy}, still referenced by: ${referencing_units[*]}" >&2
-      return 0
+  done
+  for unit_file in "${system_unit_dir}"/*.service "${system_unit_dir}"/*.d/*.conf; do
+    if [[ -f "${unit_file}" && " ${rendered_units[*]} " != *" ${unit_file} "* ]] &&
+      grep --quiet --extended-regexp \
+        "^(User|Group)=${legacy}\$|SERVICE_GROUP=${legacy}\$" "${unit_file}"; then
+      referencing_units+=("${unit_file}")
     fi
+  done
+  if ((${#referencing_units[@]})); then
+    echo "WARNING: keeping ${legacy}, still referenced by: ${referencing_units[*]}" >&2
+    return 0
   fi
 
   echo "Removing the legacy ${legacy} account (replaced by ${service_user})..."
@@ -765,6 +778,7 @@ expand_unit() {
   local home_nginx_conf_dir
   local pdns_zones_yaml_dir
 
+  rendered_units+=("${dest}")
   home_nginx_conf_dir="$(dirname "${home_nginx_conf}")"
   pdns_zones_yaml_dir="$(dirname "${pdns_zones_yaml}")"
   host_name="$(hw_first_line "${hw_pinned_host_file}")"
