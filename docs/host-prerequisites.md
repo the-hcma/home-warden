@@ -132,9 +132,9 @@ The served conf must stay readable by that account; `setup-service` fails
 loudly if nginx can't start.
 
 `setup-service` then renders `User=home-warden-nginx` /
-`Group=home-warden-nginx`, restarts nginx whenever `User=` changed, and fails
-unless nginx stays up and its master really runs as that account (see
-`confirm_running`). `cert-renewer` run by hand (like `on-deploy` /
+`Group=home-warden-nginx`, restarts nginx whenever the running master's uid or
+gid doesn't match that account (so an interrupted earlier run still converges),
+and fails unless nginx stays up as that account (see `confirm_running`). `cert-renewer` run by hand (like `on-deploy` /
 `nginx-test-and-reload`) takes the group from the installed unit's `Group=`
 unless `SERVICE_GROUP` is set.
 

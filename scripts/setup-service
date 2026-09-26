@@ -840,7 +840,7 @@ grant_service_access() {
   # The unit bind-mounts CONF_DIR/SCRATCH_DIR, exposing their own modes; a
   # 027 umask leaves them 750 OWNER:OWNER, so grant search (not listing).
   run sudo chgrp "${service_group}" "${conf_dir}" "${scratch_dir}"
-  run sudo chmod g+x "${conf_dir}" "${scratch_dir}"
+  run sudo chmod g=x "${conf_dir}" "${scratch_dir}"
   run sudo chgrp "${service_group}" "${conf_dir}/certs"
   run sudo chmod g+rx "${conf_dir}/certs"
   if ((${#cert_paths[@]})); then
@@ -1189,13 +1189,12 @@ mask_distro_nginx() {
 # on any restart or non-active state rather than trusting a single probe.
 confirm_running() {
   local -r settle_seconds=10
-  local expected_uid
+  local expected_ids
   local i
   local initial_restarts
-  local main_pid
-  local main_uid
   local nginx_procs
   local restarts
+  local running_ids
   local state
 
   echo "Confirming home-warden is up (watching ${settle_seconds}s for crash/restart)..."
@@ -1216,18 +1215,38 @@ confirm_running() {
   systemctl --no-pager --full status home-warden.socket home-warden.service || true
   nginx_procs="$(ps -o user,pid,cmd -C nginx 2>/dev/null || true)"
   echo "${nginx_procs}"
-  expected_uid="$(id -u "${service_user}")"
-  main_pid="$(systemctl show --property=MainPID --value home-warden.service 2>/dev/null || true)"
-  main_uid="$(ps -o uid= -p "${main_pid:-0}" 2>/dev/null | tr -d ' ' || true)"
-  if [[ "${main_uid}" != "${expected_uid}" ]]; then
-    echo "ERROR: nginx master (pid ${main_pid:-?}) runs as uid ${main_uid:-?}," \
-      "expected ${service_user} (uid ${expected_uid})" >&2
+  expected_ids="$(service_account_ids)"
+  running_ids="$(nginx_master_ids)"
+  if [[ "${running_ids}" != "${expected_ids}" ]]; then
+    echo "ERROR: nginx master runs as uid:gid ${running_ids:-?}," \
+      "expected ${service_user}:${service_group} (${expected_ids})" >&2
     exit 1
   fi
 }
 
+# uid:gid of the running nginx master (ps truncates long user names, so
+# compare ids); empty when home-warden.service has no main process.
+nginx_master_ids() {
+  local main_pid
+
+  main_pid="$(systemctl show --property=MainPID --value home-warden.service 2>/dev/null || true)"
+  if [[ -z "${main_pid}" || "${main_pid}" == 0 ]]; then
+    return 0
+  fi
+  ps -o uid=,gid= -p "${main_pid}" 2>/dev/null | awk '{ print $1 ":" $2 }' || true
+}
+
+# uid:gid home-warden.service should run as (SERVICE_USER / SERVICE_GROUP).
+service_account_ids() {
+  local gid
+  local uid
+
+  uid="$(id -u "${service_user}" 2>/dev/null || true)"
+  gid="$(getent group "${service_group}" 2>/dev/null | cut -d: -f3 || true)"
+  printf '%s:%s\n' "${uid}" "${gid}"
+}
+
 main() {
-  local previous_service_user
   local resolved
 
   if ((status_only)); then
@@ -1283,7 +1302,6 @@ main() {
 
   grant_service_access
 
-  previous_service_user="$(systemctl show --property=User --value home-warden.service 2>/dev/null || true)"
   deployed_commit="$(git -C "${repo_dir}" rev-parse HEAD 2>/dev/null || true)"
   expand_unit "${unit_template_dir}/home-warden.socket" "${system_unit_dir}/home-warden.socket"
   expand_unit "${unit_template_dir}/home-warden.service" "${system_unit_dir}/home-warden.service"
@@ -1337,8 +1355,8 @@ main() {
       # restart (not reload): unit Environment=DEPLOYED_COMMIT=… only refreshes on a new process
       echo "Restarting home-warden.service (on-deploy changed)..."
       run sudo systemctl restart home-warden.service
-    elif [[ "${previous_service_user}" != "${service_user}" ]]; then
-      echo "Restarting home-warden.service (User= ${previous_service_user:-<unset>} -> ${service_user})..."
+    elif [[ "$(nginx_master_ids)" != "$(service_account_ids)" ]]; then
+      echo "Restarting home-warden.service (nginx not yet running as ${service_user}:${service_group})..."
       run sudo systemctl restart home-warden.service
     fi
   else
