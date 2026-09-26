@@ -2,7 +2,9 @@
 # ci/pdns-reload-gate-test -- exercises scripts/pdns-test-and-reload's
 # fail-closed ordering end to end (syntax gate before `pdns_control
 # reload`), since nothing else in this repo invokes that script directly.
-# Stubs `systemctl`/`pdns_control` on PATH rather than installing real
+# Also pins the recursor step after it (#127): reload-zones, per-zone cache
+# wipes, then an SOA probe per zone that fails the run on a missing zone.
+# Stubs `systemctl`/`pdns_control`/`rec_control`/`dig` on PATH rather than installing real
 # PowerDNS -- .github/ci/dns-catalog-validate already covers the real
 # server/YAML-shape acceptance test; this one is purely about the
 # gate script's own control flow. See the-hcma/home-warden#108 review.
@@ -18,15 +20,23 @@ mkdir -p "${stub_bin}"
 
 cat >"${stub_bin}/systemctl" <<'STUB'
 #!/usr/bin/env bash
+# The recursor unit gets its own knobs so each pdns case can pick whether the
+# recursor step runs at all.
+load_state="${STUB_SYSTEMCTL_LOAD_STATE:-loaded}"
+active_exit="${STUB_SYSTEMCTL_ACTIVE_EXIT:-0}"
+if [[ "${!#}" == *recursor* ]]; then
+  load_state="${STUB_RECURSOR_LOAD_STATE:-loaded}"
+  active_exit="${STUB_RECURSOR_ACTIVE_EXIT:-0}"
+fi
 case "$1" in
   show)
     case "$*" in
       *--property=LoadState*--value*)
-        echo "${STUB_SYSTEMCTL_LOAD_STATE:-loaded}"
+        echo "${load_state}"
         exit 0
         ;;
       *--property=LoadState*)
-        echo "LoadState=${STUB_SYSTEMCTL_LOAD_STATE:-loaded}"
+        echo "LoadState=${load_state}"
         exit 0
         ;;
       *)
@@ -38,7 +48,7 @@ case "$1" in
     esac
     ;;
   is-active)
-    exit "${STUB_SYSTEMCTL_ACTIVE_EXIT:-0}"
+    exit "${active_exit}"
     ;;
 esac
 exit 1
@@ -52,18 +62,43 @@ exit "${STUB_PDNS_CONTROL_EXIT:-0}"
 STUB
 chmod +x "${stub_bin}/pdns_control"
 
+cat >"${stub_bin}/rec_control" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >>"${STUB_REC_CONTROL_LOG:?}"
+if [[ "$1" == "reload-zones" ]]; then
+  exit "${STUB_REC_CONTROL_RELOAD_EXIT:-0}"
+fi
+exit 0
+STUB
+chmod +x "${stub_bin}/rec_control"
+
+# Mimics `dig +noall +comments +answer <zone> SOA`: the header comment, plus
+# the SOA record when the stubbed status is NOERROR.
+cat >"${stub_bin}/dig" <<'STUB'
+#!/usr/bin/env bash
+zone="${@: -2:1}"
+status="${STUB_DIG_STATUS:-NOERROR}"
+printf ';; ->>HEADER<<- opcode: QUERY, status: %s, id: 1\n' "${status}"
+if [[ "${status}" == "NOERROR" ]]; then
+  printf '%s.\t3600\tIN\tSOA\tns.%s. hostmaster.%s. 1 7200 1800 604800 900\n' "${zone}" "${zone}" "${zone}"
+fi
+STUB
+chmod +x "${stub_bin}/dig"
+
 export PATH="${stub_bin}:${PATH}"
 export HOME_WARDEN_SKIP_HOST_GUARD=1
 
 sentinel="${work_dir}/pdns_control.called"
 export STUB_PDNS_CONTROL_SENTINEL="${sentinel}"
+rec_control_log="${work_dir}/rec_control.log"
+export STUB_REC_CONTROL_LOG="${rec_control_log}"
 
 fail=0
 
 run_case() {
   local -r desc="$1" expected_exit="$2"
   shift 2
-  rm -f "${sentinel}"
+  rm -f "${sentinel}" "${rec_control_log}"
   local actual_exit=0
   "$@" || actual_exit=$?
   if [[ "${actual_exit}" != "${expected_exit}" ]]; then
@@ -87,6 +122,21 @@ assert_sentinel() {
   fi
 }
 
+# assert_rec_control <desc> <expected calls, one per line, or "">
+assert_rec_control() {
+  local -r desc="$1" expected="$2"
+  local actual=""
+  if [[ -f "${rec_control_log}" ]]; then
+    actual="$(cat "${rec_control_log}")"
+  fi
+  if [[ "${actual}" != "${expected}" ]]; then
+    echo "FAIL (${desc}): rec_control calls were [${actual}], expected [${expected}]" >&2
+    fail=1
+  else
+    echo "OK (${desc}): rec_control calls as expected"
+  fi
+}
+
 # Case 1: malformed zones.yml -- must refuse (exit 2) before ever calling
 # pdns_control, proving the syntax gate runs before the reload step.
 malformed="${work_dir}/malformed.yml"
@@ -102,6 +152,7 @@ printf 'domains:\n  - domain: example.com\n    ttl: 3600\n    records: {}\n' >"$
 PDNS_ZONES_YAML="${well_formed}" STUB_SYSTEMCTL_LOAD_STATE=loaded STUB_SYSTEMCTL_ACTIVE_EXIT=0 \
   run_case "well-formed + active service" 0 "${repo_dir}/scripts/pdns-test-and-reload"
 assert_sentinel "well-formed + active service" 1
+assert_rec_control "well-formed + active service" $'reload-zones\nwipe-cache example.com$'
 
 # Case 3: well-formed zones.yml, service inactive -- must skip reload, exit 0.
 PDNS_ZONES_YAML="${well_formed}" STUB_SYSTEMCTL_LOAD_STATE=loaded STUB_SYSTEMCTL_ACTIVE_EXIT=3 \
@@ -123,5 +174,40 @@ PDNS_ZONES_YAML="${well_formed}" STUB_SYSTEMCTL_LOAD_STATE=loaded STUB_SYSTEMCTL
   STUB_PDNS_CONTROL_EXIT=1 \
   run_case "pdns_control reload fails" 1 "${repo_dir}/scripts/pdns-test-and-reload"
 assert_sentinel "pdns_control reload fails" 1
+assert_rec_control "pdns_control reload fails" ""
+
+two_zones="${work_dir}/two-zones.yml"
+{
+  printf 'domains:\n'
+  printf '  - domain: %s\n    ttl: 3600\n    records: {}\n' example.com example.net
+} >"${two_zones}"
+
+# Case 6: no recursor installed (default unit name) -- pdns reloads, the
+# recursor step is skipped, exit 0.
+PDNS_ZONES_YAML="${two_zones}" STUB_RECURSOR_LOAD_STATE=not-found STUB_RECURSOR_ACTIVE_EXIT=3 \
+  run_case "no recursor installed" 0 "${repo_dir}/scripts/pdns-test-and-reload"
+assert_sentinel "no recursor installed" 1
+assert_rec_control "no recursor installed" ""
+
+# Case 7: an explicitly set recursor unit that doesn't exist -- fail loudly.
+PDNS_ZONES_YAML="${two_zones}" PDNS_RECURSOR_SERVICE=recursor-typo.service STUB_RECURSOR_LOAD_STATE=not-found \
+  STUB_RECURSOR_ACTIVE_EXIT=3 \
+  run_case "unknown PDNS_RECURSOR_SERVICE unit" 2 "${repo_dir}/scripts/pdns-test-and-reload"
+assert_rec_control "unknown PDNS_RECURSOR_SERVICE unit" ""
+
+# Case 8: the recursor doesn't forward the zones (NXDOMAIN) -- reload and
+# cache wipes still run for every zone, then the probes fail the run (#127).
+PDNS_ZONES_YAML="${two_zones}" STUB_DIG_STATUS=NXDOMAIN \
+  run_case "recursor does not forward zones" 3 "${repo_dir}/scripts/pdns-test-and-reload"
+assert_rec_control "recursor does not forward zones" $'reload-zones\nwipe-cache example.com$\nwipe-cache example.net$'
+
+# Case 9: DNSSEC-bogus SERVFAIL is also a failure, not a pass.
+PDNS_ZONES_YAML="${two_zones}" STUB_DIG_STATUS=SERVFAIL \
+  run_case "recursor SERVFAILs zones" 3 "${repo_dir}/scripts/pdns-test-and-reload"
+
+# Case 10: rec_control reload-zones fails -- exit 1, no cache wipes.
+PDNS_ZONES_YAML="${two_zones}" STUB_REC_CONTROL_RELOAD_EXIT=1 \
+  run_case "rec_control reload-zones fails" 1 "${repo_dir}/scripts/pdns-test-and-reload"
+assert_rec_control "rec_control reload-zones fails" "reload-zones"
 
 exit "${fail}"
