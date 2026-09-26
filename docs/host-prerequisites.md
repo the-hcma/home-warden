@@ -418,7 +418,10 @@ are typically republished by atomic rename (a CRL refresh, a rotated CA
 bundle), and a single-file bind pins the old inode, so nginx would keep
 reading the stale file across reloads
 ([#148](https://github.com/the-hcma/home-warden/issues/148)). Keep such a file
-in a dedicated directory, since that whole directory becomes readable to the
+in a dedicated, key-free directory, since that whole directory becomes
+readable to the sandbox; if the directory holds a private key (`*.key`,
+`*.p12`, `*.pfx`, or a PEM `PRIVATE KEY` block), discovery falls back to a
+single-file bind and warns, trading freshness for keeping the key out of the
 sandbox. Discovery never exposes `/root`, a bare home
 directory, a hidden path (`~/.ssh`, `~/.config`, …), or a path with
 characters outside `[A-Za-z0-9._@+-]` — keep served files
