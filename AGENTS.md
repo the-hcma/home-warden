@@ -65,10 +65,12 @@ repository root using [repository-helpers](https://github.com/the-hcma/repositor
   (`alwaysApply`, org rule — template sync
   [repository-helpers#570](https://github.com/the-hcma/repository-helpers/issues/570)).
   Every `curl` **must** set `--max-time` *and* `--connect-timeout`
-  (`scripts/healthcheck` sets `--max-time` only today — add `--connect-timeout`);
-  `certbot` calls **must** run under a bounded wrapper (`scripts/cert-renewer`
-  still needs one); any retry is capped/budgeted, backed off with jitter,
-  transient-only, and never blindly re-issues a certificate.
+  (`scripts/healthcheck`: `HEALTHCHECK_TIMEOUT_SEC` /
+  `HEALTHCHECK_CONNECT_TIMEOUT_SEC`); `certbot` calls **must** run under a
+  bounded wrapper (`scripts/cert-renewer`'s `run_certbot`, capped per run by
+  `CERTBOT_TIMEOUT_SEC`, default 600s, and never retried); any retry is
+  capped/budgeted, backed off with jitter, transient-only, and never blindly
+  re-issues a certificate.
 
 ---
 
