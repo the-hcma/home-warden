@@ -50,11 +50,11 @@ def _parse_ok(rendered: str, tmp_path: Path) -> None:
     assert result["status"] == "ok", result.get("errors")
 
 
-def _listen_args_for_server_name(rendered: str, tmp_path: Path, server_name: str) -> list[str]:
-    """Return the `listen` directive's args for the server block whose
-    `server_name` matches, by walking the parsed config tree rather than
-    a substring search that could match a *different* server block's own
-    `listen`/`server_name` lines depending on rendering order."""
+def _listen_args_for_server_name(rendered: str, tmp_path: Path, server_name: str) -> list[list[str]]:
+    """Return every `listen` directive's args, in order, for the server
+    block whose `server_name` matches, by walking the parsed config tree
+    rather than a substring search that could match a *different* server
+    block's own `listen`/`server_name` lines depending on rendering order."""
     conf_path = tmp_path / "nginx.conf"
     conf_path.write_text(rendered)
     parsed = crossplane.parse(str(conf_path), combine=True)
@@ -64,9 +64,8 @@ def _listen_args_for_server_name(rendered: str, tmp_path: Path, server_name: str
         for server in http["block"]:
             if server["directive"] != "server":
                 continue
-            directives = {d["directive"]: d["args"] for d in server["block"]}
-            if directives.get("server_name") == [server_name]:
-                return directives["listen"]
+            if any(d["directive"] == "server_name" and d["args"] == [server_name] for d in server["block"]):
+                return [d["args"] for d in server["block"] if d["directive"] == "listen"]
     raise AssertionError(f"no server block found with server_name {server_name!r}")
 
 
@@ -412,8 +411,23 @@ def test_default_server_flag_only_on_first_service(tmp_path: Path) -> None:
     # different service (e.g. is_default_server=(i == len(services) - 1))
     # would keep a plain "exactly one default_server" count green while
     # silently changing which vhost nginx falls back to for TLS SNI.
-    assert _listen_args_for_server_name(rendered, tmp_path, "a.example.com") == ["443", "ssl", "default_server"]
-    assert _listen_args_for_server_name(rendered, tmp_path, "b.example.com") == ["443", "ssl"]
+    assert _listen_args_for_server_name(rendered, tmp_path, "a.example.com") == [
+        ["443", "ssl", "default_server"],
+        ["[::]:443", "ssl", "default_server"],
+    ]
+    assert _listen_args_for_server_name(rendered, tmp_path, "b.example.com") == [
+        ["443", "ssl"],
+        ["[::]:443", "ssl"],
+    ]
+    _parse_ok(rendered, tmp_path)
+
+
+def test_listen_ipv6_off_renders_ipv4_listens_only(tmp_path: Path) -> None:
+    catalog = {"services": [_proxy_service(name="a"), _proxy_service(name="b")]}
+    rendered = render_catalog(catalog, RenderContext(certs_live_dir=tmp_path, listen_ipv6=False))
+    assert _listen_args_for_server_name(rendered, tmp_path, "a.example.com") == [["443", "ssl", "default_server"]]
+    assert _listen_args_for_server_name(rendered, tmp_path, "b.example.com") == [["443", "ssl"]]
+    assert "[::]" not in rendered
     _parse_ok(rendered, tmp_path)
 
 

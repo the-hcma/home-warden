@@ -63,6 +63,8 @@ readonly sudoers_template="${repo_dir}/etc/sudoers/home-warden-web-ui-nginx-test
 readonly sudoers_dest="/etc/sudoers.d/home-warden-web-ui-nginx-test"
 readonly pdns_dropin_dest="/etc/systemd/system/pdns.service.d/home-warden.conf"
 readonly reload_watch_dropin_dest="/etc/systemd/system/home-warden-reload.path.d/home-warden-client-pki.conf"
+readonly ipv6_service_dropin_dest="/etc/systemd/system/home-warden.service.d/home-warden-ipv6.conf"
+readonly ipv6_socket_dropin_dest="/etc/systemd/system/home-warden.socket.d/home-warden-ipv6.conf"
 readonly installed_host_guard_dir="/usr/local/libexec/home-warden"
 readonly installed_host_guard="${installed_host_guard_dir}/host-guard"
 readonly resolved_dropin_dest="/etc/systemd/resolved.conf.d/home-warden-local-zones.conf"
@@ -81,6 +83,9 @@ source "${script_dir}/lib/nginx-pid"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/nginx-sandbox-binds
 source "${script_dir}/lib/nginx-sandbox-binds"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/nginx-socket-listens
+source "${script_dir}/lib/nginx-socket-listens"
 
 owner="${OWNER:-$(id -un)}"
 service_user="${SERVICE_USER:-home-warden-nginx}"
@@ -99,6 +104,7 @@ recursor_service="${PDNS_RECURSOR_SERVICE:-pdns-recursor.service}"
 readonly recursor_service
 resolved_dropin_changed=0
 reload_watch_dropin_changed=0
+ipv6_socket_dropins_changed=0
 # Units this run renders; their old contents do not count as still using
 # the legacy account (see remove_legacy_service_account).
 rendered_units=()
@@ -1005,6 +1011,62 @@ install_reload_watch_dropin() {
   rm -f "${tmp}"
 }
 
+# home-warden.socket gets an IPv6 socket for each `listen [::]:80|443` the
+# served conf declares, and NGINX= lists every fd (#156). Both drop-ins are
+# removed once the conf declares none.
+install_ipv6_socket_dropins() {
+  local current
+  local dest
+  local generated
+  local ports
+  local tmp
+  local -a dests=("${ipv6_service_dropin_dest}" "${ipv6_socket_dropin_dest}")
+  local -a generated_dropins=()
+  local -a port_list=()
+  local i
+
+  if ((dry_run)); then
+    # validate_nginx_config skips nginx -T in a dry run, so there is no dump to decide from.
+    echo "DRY-RUN: would regenerate ${ipv6_service_dropin_dest} and ${ipv6_socket_dropin_dest}" \
+      "from nginx -T (not run in a dry run)"
+    return 0
+  fi
+  if ! ports="$(resolve_nginx_ipv6_listen_ports "${nginx_dump}")"; then
+    echo "ERROR: refusing to install home-warden.socket for this nginx conf" >&2
+    exit 1
+  fi
+  if [[ -z "${ports}" ]]; then
+    for dest in "${dests[@]}"; do
+      current="$(cat "${dest}" 2>/dev/null || true)"
+      if [[ "${current}" == "${nginx_socket_dropin_header}"* ]]; then
+        ipv6_socket_dropins_changed=1
+        run sudo rm -f "${dest}"
+      fi
+    done
+    return 0
+  fi
+  mapfile -t port_list <<<"${ports}"
+  echo "IPv6 sockets for home-warden.socket (from listen [::]:… in the conf): ${port_list[*]}"
+  generated_dropins=(
+    "$(render_ipv6_service_dropin "${port_list[@]}")"
+    "$(render_ipv6_socket_dropin "${port_list[@]}")"
+  )
+  for i in "${!dests[@]}"; do
+    dest="${dests[i]}"
+    generated="${generated_dropins[i]}"
+    current="$(cat "${dest}" 2>/dev/null || true)"
+    if [[ "${generated}" == "${current}" ]]; then
+      continue
+    fi
+    ipv6_socket_dropins_changed=1
+    tmp="$(mktemp)"
+    printf '%s\n' "${generated}" >"${tmp}"
+    run sudo install -d -m 755 "$(dirname "${dest}")"
+    run sudo install -o root -g root -m 644 "${tmp}" "${dest}"
+    rm -f "${tmp}"
+  done
+}
+
 install_preview_conf_path() {
   local tmp
 
@@ -1282,6 +1344,7 @@ main() {
   deployed_commit="$(git -C "${repo_dir}" rev-parse HEAD 2>/dev/null || true)"
   expand_unit "${unit_template_dir}/home-warden.socket" "${system_unit_dir}/home-warden.socket"
   expand_unit "${unit_template_dir}/home-warden.service" "${system_unit_dir}/home-warden.service"
+  install_ipv6_socket_dropins
   expand_unit "${unit_template_dir}/home-warden-certbot.service" "${system_unit_dir}/home-warden-certbot.service"
   expand_unit "${unit_template_dir}/home-warden-certbot.timer" "${system_unit_dir}/home-warden-certbot.timer"
   expand_unit "${unit_template_dir}/home-warden-reload.service" "${system_unit_dir}/home-warden-reload.service"
@@ -1311,6 +1374,12 @@ main() {
   # Clears a StartLimitBurst= trip (or a socket failed by it) left over from
   # a previous broken deploy, so the start below is not refused outright.
   run sudo systemctl reset-failed home-warden.service home-warden.socket 2>/dev/null || true
+  if ((ipv6_socket_dropins_changed)); then
+    # A running socket keeps its old listeners until it restarts, and nginx
+    # only sees the new fds (and NGINX=) from a fresh start; both start again below.
+    echo "Stopping home-warden.service and home-warden.socket to apply the new sockets..."
+    run sudo systemctl stop home-warden.service home-warden.socket
+  fi
   run sudo systemctl enable --now home-warden.socket
   run sudo systemctl enable --now home-warden-certbot.timer
   run sudo systemctl enable --now home-warden-reload.path

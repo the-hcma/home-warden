@@ -258,9 +258,17 @@ vhosts. See [#54](https://github.com/the-hcma/home-warden/issues/54).
   describes how every vhost is secured/tuned. `server_tokens_off` defaults
   to `True` (the Gixy-Next `version_disclosure` fix from the Nginx
   Security Lint section above, applied once at the `http` level here).
+- **Dual-stack**: every vhost gets `listen 443 ssl;` and `listen [::]:443
+  ssl;` (`RenderContext.listen_ipv6`, default `True`).
+  `scripts/setup-service` hands nginx an IPv6 socket only for the
+  `listen [::]:80|443` directives the served conf actually declares, via
+  generated `home-warden.socket`/`home-warden.service` drop-ins
+  (`scripts/lib/nginx-socket-listens`) — see
+  [#156](https://github.com/the-hcma/home-warden/issues/156) and
+  docs/architecture-socket-activation.md's "Dual-stack IPv6".
 - **`default_server`**: the first service in the catalog gets
-  `listen 443 ssl default_server;` — with multiple https vhosts and no
-  explicit default, nginx silently falls back to definition order anyway;
+  `listen 443 ssl default_server;` (and the same flag on its IPv6
+  listen) — with multiple https vhosts and no explicit default, nginx silently falls back to definition order anyway;
   this makes that choice an explicit, documented renderer property
   instead of an accident of catalog ordering (also resolves Gixy-Next's
   `default_server_flag`).

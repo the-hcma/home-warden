@@ -3,8 +3,9 @@ Description=home-warden nginx sockets (80/443)
 Documentation=https://github.com/the-hcma/home-warden/blob/main/docs/architecture-socket-activation.md
 
 [Socket]
-# IPv4-only for Milestone 1 so NGINX=3:4; matches two listen fds.
-# Dual-stack (four fds) can be validated as a follow-up.
+# IPv4 sockets are fds 3 and 4 (NGINX=3:4;). setup-service adds an IPv6-only
+# [::]:80 / [::]:443 socket, and extends NGINX=, through generated drop-ins
+# for each `listen [::]:…` the served conf declares (#156).
 ListenStream=0.0.0.0:80
 ListenStream=0.0.0.0:443
 FreeBind=true
