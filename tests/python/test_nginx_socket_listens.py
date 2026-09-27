@@ -68,6 +68,11 @@ def test_listens_on_other_ports_and_addresses_are_ignored() -> None:
     assert (ports, rc) == ([], 0)
 
 
+def test_quoted_hash_before_a_listen_does_not_hide_it() -> None:
+    ports, _, rc = _ports('return 200 "a # b"; listen [::]:443 ssl;\n')
+    assert (ports, rc) == (["443"], 0)
+
+
 def test_service_dropin_fds_start_after_the_socket_units_own_listeners() -> None:
     base = len(re.findall(r"^ListenStream=", SOCKET_UNIT.read_text(), re.MULTILINE))
     service = _render("render_ipv6_service_dropin", "80", "443")

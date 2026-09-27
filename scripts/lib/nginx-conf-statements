@@ -1,19 +1,93 @@
 #!/usr/bin/env bash
 # scripts/lib/nginx-conf-statements — split an `nginx -T` dump into one
-# statement per line, the way nginx's own lexer sees it, for the libs that
-# scan the served conf for directives.
+# statement per line, the way nginx's own lexer (ngx_conf_read_token) sees it,
+# for the libs that scan the served conf for directives.
 #
 # nginx treats a newline as plain whitespace, so a directive may span lines or
 # share a line with others (`server { listen 443 ssl;`); a line-based scan
-# misses both. `#` starts a comment only at the beginning of a token, so
-# `/srv/a#b` stays a literal path.
+# misses both. The tokenizer follows nginx's rules:
+#   - `;`, `{` and `}` end a statement, except inside a quoted string or as
+#     part of a `${var}` reference;
+#   - a `"…"` / `'…'` token and a backslash escape are kept whole, so a quoted
+#     path containing `;`, `{` or `#` is never cut short into a different path;
+#   - `#` starts a comment only at the beginning of a token, so `/srv/a#b` stays
+#     a literal path.
+# Tokens are printed as written (quotes and escapes included) and joined by a
+# single space; a newline inside a quoted token becomes a space.
 
-# nginx_conf_statements <nginx -T dump>: prints each directive (up to, not
-# including, its `;` / `{` / `}`) on its own line, comments removed.
+# nginx_conf_statements <nginx -T dump>: prints each statement (its tokens,
+# without the terminating `;` / `{` / `}`) on its own line.
 nginx_conf_statements() {
   local -r dump="$1"
 
-  sed -E 's/(^|[[:space:];{}])#.*$/\1/' <<<"${dump}" |
-    tr '\n' ' ' |
-    sed -E 's/[{};]/\n/g'
+  awk '
+    function end_token() {
+      if (in_token) {
+        statement = (statement == "" ? token : statement " " token)
+      }
+      token = ""
+      in_token = 0
+      var_brace = 0
+    }
+    function end_statement() {
+      end_token()
+      if (statement != "") {
+        print statement
+      }
+      statement = ""
+    }
+    {
+      n = length($0)
+      i = 1
+      while (i <= n) {
+        c = substr($0, i, 1)
+        if (quote != "") {
+          if (c == "\\" && i < n) {
+            token = token c substr($0, i + 1, 1)
+            i += 2
+            continue
+          }
+          token = token c
+          if (c == quote) {
+            quote = ""
+          }
+          i++
+          continue
+        }
+        if (c == " " || c == "\t" || c == "\r") {
+          end_token()
+        } else if (c == "#" && !in_token) {
+          break
+        } else if (c == "{" && in_token && substr(token, length(token), 1) == "$") {
+          token = token c
+          var_brace = 1
+        } else if (c == "}" && var_brace) {
+          token = token c
+          var_brace = 0
+        } else if (c == ";" || c == "{" || c == "}") {
+          end_statement()
+        } else if ((c == "\"" || c == "\047") && !in_token) {
+          token = c
+          in_token = 1
+          quote = c
+        } else if (c == "\\" && i < n) {
+          token = token c substr($0, i + 1, 1)
+          in_token = 1
+          i++
+        } else {
+          token = token c
+          in_token = 1
+        }
+        i++
+      }
+      if (quote != "") {
+        token = token " "
+      } else {
+        end_token()
+      }
+    }
+    END {
+      end_statement()
+    }
+  ' <<<"${dump}"
 }

@@ -101,6 +101,12 @@ def test_paths_outside_home_and_variables_are_ignored() -> None:
     assert stderr == ""
 
 
+def test_quoted_brace_in_a_path_is_refused_whole_not_truncated() -> None:
+    binds, stderr = _resolve('root "/home/op/a{b";\n')
+    assert binds == []
+    assert "not exposing /home/op/a{b (from root)" in stderr
+
+
 def test_reload_watch_dirs_cover_crl_and_client_ca_only() -> None:
     dirs, stderr = _watch_dirs(
         "ssl_crl /home/op/pki/ca/crl.pem;\n"
