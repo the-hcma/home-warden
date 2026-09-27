@@ -194,6 +194,11 @@ jobs:
           sudo timeout 30 apt-get install -y -qq -o DPkg::Lock::Timeout=30 nginx-full
       - name: Render catalog fixture + nginx -t + Gixy-Next
         run: bash .github/ci/catalog-render-validate
+      # The Pytest job has no nginx, so this test skips there; here it must run.
+      - name: tiny-pki client-cert mTLS end to end (real nginx)
+        env:
+          HOME_WARDEN_REQUIRE_NGINX: "1"
+        run: uv run pytest tests/python/test_client_pki.py -v
 
   dns-catalog-validate:
     name: DNS catalog validate

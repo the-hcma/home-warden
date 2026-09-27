@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Manage home-warden's private client-certificate CA for mTLS: issue, list,
+# revoke, export PKCS#12, refresh the CRL, check expiry.
+# Thin wrapper around the tiny-pki CLI (the-hcma/tiny-pki) that pins the store
+# to home-warden's location; every tiny-pki verb and flag passes through.
+# See the-hcma/home-warden#49.
+#
+# Env:
+#   HOME_WARDEN_PKI_STORE  CA store directory (default: conf/pki in this repo;
+#                          conf/ is gitignored, like conf/cloudflare.ini)
+#
+# Point a catalog vhost's client_cert.ca_bundle / client_cert.crl at the
+# store's key-free public/ca.crt and public/crl.pem, never at ca/ (which
+# holds the CA key).
+#
+# Usage:
+#   ./scripts/client-pki init --cn "Home client CA"
+#   ./scripts/client-pki create client alice
+#   ./scripts/client-pki export p12 alice --password-file PATH
+#   ./scripts/client-pki create client alice --keep-previous   # rotate
+#   ./scripts/client-pki revoke 0x<old serial>                 # once rotated
+#   ./scripts/client-pki revoke alice
+#   ./scripts/client-pki check --quiet
+
+set -euo pipefail
+
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly repo_dir
+store="${HOME_WARDEN_PKI_STORE:-${repo_dir}/conf/pki}"
+readonly store
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "client-pki: install uv (https://docs.astral.sh/uv/) or run 'uv sync' in ${repo_dir}" >&2
+  exit 1
+fi
+
+exec uv run --project "${repo_dir}" tiny-pki --store "${store}" "$@"
