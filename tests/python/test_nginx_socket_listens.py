@@ -44,6 +44,11 @@ def test_ipv6_listens_on_80_and_443_are_reported_once_each_in_port_order() -> No
     assert (ports, rc) == (["80", "443"], 0)
 
 
+def test_ipv6_listens_split_across_lines_or_after_a_brace_are_found() -> None:
+    ports, _, rc = _ports("server { listen [::]:80; }\nserver {\n    listen [::]:443\n        ssl default_server;\n}\n")
+    assert (ports, rc) == (["80", "443"], 0)
+
+
 def test_ipv6only_off_is_refused() -> None:
     ports, stderr, rc = _ports("listen [::]:443 ssl ipv6only=off;\nlisten [::]:80;\n")
     assert rc == 1

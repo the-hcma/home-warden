@@ -60,8 +60,10 @@ resolve_nginx_ipv6_listen_ports() {
   local port
   local status=0
 
-  # `[::]` prefixes the port field so a bare `listen [::] ssl;` can't shift
-  # `ssl` into it.
+  # nginx treats newlines as whitespace, so the dump (comments stripped) is
+  # split into statements at `;`, `{` and `}`, not lines: a listen spread over
+  # lines or following `server {` still counts. `[::]` prefixes the port field
+  # so a bare `listen [::] ssl;` can't shift `ssl` into it.
   while read -r port params; do
     port="${port#\[::\]}"
     port="${port#:}"
@@ -77,7 +79,10 @@ resolve_nginx_ipv6_listen_ports() {
     fi
     found+="${port}"$'\n'
   done < <(
-    sed -nE 's/^[[:space:]]*listen[[:space:]]+(\[::\](:[0-9]+)?)([[:space:]][^;]*)?;.*$/\1 \3/p' <<<"${dump}"
+    sed -E 's/#.*$//' <<<"${dump}" |
+      tr '\n' ' ' |
+      sed -E 's/[{};]/\n/g' |
+      sed -nE 's/^[[:space:]]*listen[[:space:]]+(\[::\](:[0-9]+)?)([[:space:]].*)?$/\1 \3/p'
   )
   if [[ -n "${found}" ]]; then
     printf '%s' "${found}" | sort -n -u
