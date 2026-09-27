@@ -584,6 +584,17 @@ four existing dimensions as the trigger. See
 
 ---
 
+## Private Client CA
+
+home-warden's private CA issues mTLS client certificates only — a second
+factor for sensitive vhosts (the admin web UI first), never server
+certificates, which stay with Let's Encrypt. Purpose, threat model, scale,
+lifecycle, and non-goals:
+[docs/client-pki.md](./docs/client-pki.md). Epic:
+[#49](https://github.com/the-hcma/home-warden/issues/49).
+
+---
+
 ## Development
 
 ```bash
