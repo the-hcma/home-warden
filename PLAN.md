@@ -1,64 +1,29 @@
 # home-warden — Implementation Plan
 
-> This is the **original design doc**, kept for its rationale and open
-> questions. For an accurate, current description of the running system, see
-> [docs/architecture-socket-activation.md](./docs/architecture-socket-activation.md);
-> for install/ops, see [docs/host-prerequisites.md](./docs/host-prerequisites.md).
-> Several sections below (repository layout, unit sketches, certbot challenge
-> type) describe the pre-implementation plan, not the shipped system — see the
-> inline notes.
+> This is the **original design doc**, kept for its rationale and open questions. For an accurate, current description of the running system, see [docs/architecture-socket-activation.md](./docs/architecture-socket-activation.md); for install/ops, see [docs/host-prerequisites.md](./docs/host-prerequisites.md). Several sections below (repository layout, unit sketches, certbot challenge type) describe the pre-implementation plan, not the shipped system — see the inline notes.
 
 ## Overview
 
-Run **nginx as an unprivileged user** on Ubuntu 26 (nginx **1.28.3**), with
-systemd binding privileged ports **80/443** and handing already-open fds to
-nginx via its undocumented `NGINX=` socket-inheritance mechanism. A companion
-certbot oneshot + timer renews certificates and reloads nginx.
+Run **nginx as an unprivileged user** on Ubuntu 26 (nginx **1.28.3**), with systemd binding privileged ports **80/443** and handing already-open fds to nginx via its undocumented `NGINX=` socket-inheritance mechanism. A companion certbot oneshot + timer renews certificates and reloads nginx.
 
-This is the reverse-proxy / TLS front door for sibling home services
-(bunnify, domesti-bot, my-tracks, fpdf, …). Unlike those siblings’ **user linger**
-units, privileged-port socket activation lives in the **system** manager, with
-the service dropping to the unprivileged owner.
+This is the reverse-proxy / TLS front door for sibling home services (bunnify, domesti-bot, my-tracks, fpdf, …). Unlike those siblings’ **user linger** units, privileged-port socket activation lives in the **system** manager, with the service dropping to the unprivileged owner.
 
 **Target host:** Ubuntu 26 · nginx 1.28.3 · systemd socket activation.
 
 ### Vision beyond v1
 
-home-warden's scope is meant to grow into the **one-stop front door for all
-home services** — local and remotely reachable: nginx reverse-proxy/TLS
-termination (live today), public certificate management (live today, DNS-01
-via Cloudflare), and **DNS** itself (live today, local and external), so the
-same project that terminates traffic and issues certs also owns the records
-that route to it.
-The phases and non-goals below describe what's shipped and deliberately
-deferred so far, not a ceiling on the project.
+home-warden's scope is meant to grow into the **one-stop front door for all home services** — local and remotely reachable: nginx reverse-proxy/TLS termination (live today), public certificate management (live today, DNS-01 via Cloudflare), and **DNS** itself (live today, local and external), so the same project that terminates traffic and issues certs also owns the records that route to it. The phases and non-goals below describe what's shipped and deliberately deferred so far, not a ceiling on the project.
 
 Shipped beyond v1 (see AGENTS.md for how each works today):
 
-- **Service catalog** ([#45](https://github.com/the-hcma/home-warden/issues/45))
-  — a structured JSON catalog of fronted services that nginx config is
-  rendered from ([#54](https://github.com/the-hcma/home-warden/issues/54)),
-  with live cert / DNS / local-DNS / upstream health checks and auto-healing
-  ([#57](https://github.com/the-hcma/home-warden/issues/57)), and end-to-end
-  service registration ([#110](https://github.com/the-hcma/home-warden/issues/110)).
-- **DNS** — local authoritative PowerDNS tooling
-  ([#108](https://github.com/the-hcma/home-warden/issues/108)) and external
-  Cloudflare record sync ([#109](https://github.com/the-hcma/home-warden/issues/109)).
-- **Security linting** ([#50](https://github.com/the-hcma/home-warden/issues/50))
-  — Gixy-Next static analysis of rendered/hand-written nginx config in CI.
-- **Web UI** ([#55](https://github.com/the-hcma/home-warden/issues/55)) — a
-  first-party TypeScript admin UI for the catalog, including a DNS records
-  view ([#111](https://github.com/the-hcma/home-warden/issues/111)).
+- **Service catalog** ([#45](https://github.com/the-hcma/home-warden/issues/45)) — a structured JSON catalog of fronted services that nginx config is rendered from ([#54](https://github.com/the-hcma/home-warden/issues/54)), with live cert / DNS / local-DNS / upstream health checks and auto-healing ([#57](https://github.com/the-hcma/home-warden/issues/57)), and end-to-end service registration ([#110](https://github.com/the-hcma/home-warden/issues/110)).
+- **DNS** — local authoritative PowerDNS tooling ([#108](https://github.com/the-hcma/home-warden/issues/108)) and external Cloudflare record sync ([#109](https://github.com/the-hcma/home-warden/issues/109)).
+- **Security linting** ([#50](https://github.com/the-hcma/home-warden/issues/50)) — Gixy-Next static analysis of rendered/hand-written nginx config in CI.
+- **Web UI** ([#55](https://github.com/the-hcma/home-warden/issues/55)) — a first-party TypeScript admin UI for the catalog, including a DNS records view ([#111](https://github.com/the-hcma/home-warden/issues/111)).
 
 In progress:
 
-- **Private CA for client certs** ([#49](https://github.com/the-hcma/home-warden/issues/49))
-  — issuing, tracking, and revoking mTLS client certs for the catalog's
-  `client_cert` field, built on
-  [`the-hcma/tiny-pki`](https://github.com/the-hcma/tiny-pki) rather than
-  CA code of home-warden's own. tiny-pki isn't released yet; a draft PR pins
-  it to a git commit to find gaps, and #49's "Evaluation status" tracks what
-  remains on both sides.
+- **Private CA for client certs** ([#49](https://github.com/the-hcma/home-warden/issues/49)) — issuing, tracking, and revoking mTLS client certs for the catalog's `client_cert` field, built on [`the-hcma/tiny-pki`](https://github.com/the-hcma/tiny-pki) rather than CA code of home-warden's own. tiny-pki isn't released yet; a draft PR pins it to a git commit to find gaps, and #49's "Evaluation status" tracks what remains on both sides.
 
 ---
 
@@ -72,14 +37,9 @@ In progress:
 | Config owned by the user | Served conf lives in `thehcma/home`; pid/temp/logs under `~/scratch/home-warden/` |
 | Install story like siblings | `scripts/setup-service` (system units via sudo) + host guards |
 
-> nginx no longer runs as the home user: `home-warden.service` runs as a
-> dedicated, purpose-named `home-warden-nginx` account
-> ([#146](https://github.com/the-hcma/home-warden/pull/146)) that reads the
-> operator's config and certs through group membership. The diagrams and unit
-> sketches below still show the original `User=<owner>` plan.
+> nginx no longer runs as the home user: `home-warden.service` runs as a dedicated, purpose-named `home-warden-nginx` account ([#146](https://github.com/the-hcma/home-warden/pull/146)) that reads the operator's config and certs through group membership. The diagrams and unit sketches below still show the original `User=<owner>` plan.
 
-Non-goals for v1: shipping a full site catalog, multi-host HA, or replacing
-sibling apps’ own listen ports (they stay on high ports; nginx proxies to them).
+Non-goals for v1: shipping a full site catalog, multi-host HA, or replacing sibling apps’ own listen ports (they stay on high ports; nginx proxies to them).
 
 ---
 
@@ -108,48 +68,25 @@ home-warden-certbot.timer
 
 ### Why not user linger alone?
 
-User systemd cannot bind ports &lt; 1024 without capabilities. A **system**
-`.socket` also cannot activate a **user** `.service`. So the front door is
-system socket + system service as `User=`; sibling apps remain linger user units
-on high ports.
+User systemd cannot bind ports &lt; 1024 without capabilities. A **system** `.socket` also cannot activate a **user** `.service`. So the front door is system socket + system service as `User=`; sibling apps remain linger user units on high ports.
 
 ### nginx socket inheritance
 
-Stock nginx does not honor `LISTEN_FDS`. It reuses the internal reload socket
-map via:
+Stock nginx does not honor `LISTEN_FDS`. It reuses the internal reload socket map via:
 
 ```ini
 Environment=NGINX=3:4;
 ```
 
-`listen 80;` / `listen 443 ssl;` in config must match the bound addresses.
-Documented by [systemd.io Daemon Socket Activation](https://systemd.io/DAEMON_SOCKET_ACTIVATION/).
-Treat `NGINX=` as stable-in-practice but undocumented. Reload is validated in
-production (daily, via config-watch and cert renewal — see
-[docs/architecture-socket-activation.md](./docs/architecture-socket-activation.md#reload-kill--hup-never-nginx--s-reload)
-for the one real gotcha). Dual-stack IPv6 adds up to two more fds, generated
-from the conf's `listen [::]:…` directives
-([#156](https://github.com/the-hcma/home-warden/issues/156)).
+`listen 80;` / `listen 443 ssl;` in config must match the bound addresses. Documented by [systemd.io Daemon Socket Activation](https://systemd.io/DAEMON_SOCKET_ACTIVATION/). Treat `NGINX=` as stable-in-practice but undocumented. Reload is validated in production (daily, via config-watch and cert renewal — see [docs/architecture-socket-activation.md](./docs/architecture-socket-activation.md#reload-kill--hup-never-nginx--s-reload) for the one real gotcha). Dual-stack IPv6 adds up to two more fds, generated from the conf's `listen [::]:…` directives ([#156](https://github.com/the-hcma/home-warden/issues/156)).
 
 ---
 
 ## Repository layout
 
-> The tree below was the pre-implementation plan. It shipped differently:
-> the *served* nginx config lives in the separate, private `thehcma/home`
-> repo, not under `nginx/` here — `nginx/nginx.conf` in this repo is a
-> CI-only syntax smoke-test fixture (`.github/workflows/ci.yml` runs
-> `nginx -t` against it). `conf.d/`, `snippets/`, and `webroot/` were part of
-> this original plan but never used (certs use DNS-01, not HTTP-01/webroot;
-> the real conf tree lives in `thehcma/home`) — removed as part of the
-> [docs cleanup](https://github.com/the-hcma/home-warden/issues/9). `etc/systemd/`
-> holds all seven unit templates plus a `.path` unit for config-watch reload.
-> See the actual [`etc/systemd/`](./etc/systemd/) and [`scripts/`](./scripts/)
-> directories for the current, authoritative layout.
+> The tree below was the pre-implementation plan. It shipped differently: the *served* nginx config lives in the separate, private `thehcma/home` repo, not under `nginx/` here — `nginx/nginx.conf` in this repo is a CI-only syntax smoke-test fixture (`.github/workflows/ci.yml` runs `nginx -t` against it). `conf.d/`, `snippets/`, and `webroot/` were part of this original plan but never used (certs use DNS-01, not HTTP-01/webroot; the real conf tree lives in `thehcma/home`) — removed as part of the [docs cleanup](https://github.com/the-hcma/home-warden/issues/9). `etc/systemd/` holds all seven unit templates plus a `.path` unit for config-watch reload. See the actual [`etc/systemd/`](./etc/systemd/) and [`scripts/`](./scripts/) directories for the current, authoritative layout.
 
-Live certs and private keys stay **outside** git (`~/conf/home-warden/certs/`
-or Let’s Encrypt live paths readable by the service user). Scratch
-(`~/scratch/home-warden/`) is ephemeral runtime only.
+Live certs and private keys stay **outside** git (`~/conf/home-warden/certs/` or Let’s Encrypt live paths readable by the service user). Scratch (`~/scratch/home-warden/`) is ephemeral runtime only.
 
 ---
 
@@ -171,15 +108,11 @@ FreeBind=true
 WantedBy=sockets.target
 ```
 
-As shipped, the unit binds `0.0.0.0:80` / `0.0.0.0:443`, and `setup-service`
-adds the IPv6 sockets from the conf's `listen [::]:…` directives
-([#156](https://github.com/the-hcma/home-warden/issues/156)).
+As shipped, the unit binds `0.0.0.0:80` / `0.0.0.0:443`, and `setup-service` adds the IPv6 sockets from the conf's `listen [::]:…` directives ([#156](https://github.com/the-hcma/home-warden/issues/156)).
 
 ### `home-warden.service`
 
-> This was the original sketch — it shipped with one correction, called out
-> below. See [`etc/systemd/home-warden.service`](./etc/systemd/home-warden.service)
-> for the real, current unit.
+> This was the original sketch — it shipped with one correction, called out below. See [`etc/systemd/home-warden.service`](./etc/systemd/home-warden.service) for the real, current unit.
 
 ```ini
 [Unit]
@@ -208,19 +141,11 @@ WantedBy=multi-user.target
 
 ### Certbot
 
-> Shipped as **DNS-01 via Cloudflare**, not the webroot/HTTP-01 sketch
-> originally considered below — not every domain served here is reachable
-> via an HTTP-01 challenge path. See
-> [`scripts/cert-renewer`](./scripts/cert-renewer) and
-> [docs/host-prerequisites.md](./docs/host-prerequisites.md#certificates).
+> Shipped as **DNS-01 via Cloudflare**, not the webroot/HTTP-01 sketch originally considered below — not every domain served here is reachable via an HTTP-01 challenge path. See [`scripts/cert-renewer`](./scripts/cert-renewer) and [docs/host-prerequisites.md](./docs/host-prerequisites.md#certificates).
 
-- Challenge: **DNS-01 via Cloudflare** (`python3-certbot-dns-cloudflare`,
-  token in gitignored `conf/cloudflare.ini`).
-- `home-warden-certbot.service`: oneshot, `scripts/cert-renewer` (per-domain
-  `certbot renew` / `certonly`).
-- Deploy hook: `ExecStartPost=-+systemctl try-reload-or-restart home-warden.service`
-  on the oneshot unit itself (`+` runs as root regardless of the unit's own
-  `User=`, `-` ignores failure) — no passwordless sudo needed for the timer.
+- Challenge: **DNS-01 via Cloudflare** (`python3-certbot-dns-cloudflare`, token in gitignored `conf/cloudflare.ini`).
+- `home-warden-certbot.service`: oneshot, `scripts/cert-renewer` (per-domain `certbot renew` / `certonly`).
+- Deploy hook: `ExecStartPost=-+systemctl try-reload-or-restart home-warden.service` on the oneshot unit itself (`+` runs as root regardless of the unit's own `User=`, `-` ignores failure) — no passwordless sudo needed for the timer.
 - `home-warden-certbot.timer`: daily at 04:30, `Persistent=true`.
 
 ---
@@ -241,32 +166,13 @@ WantedBy=multi-user.target
 
 ## Risks & open questions
 
-1. **`NGINX=` undocumented** — ✅ confirmed working on nginx 1.28.3 / Ubuntu 26
-   in production. The one real gotcha (`nginx -s reload` fails; must signal
-   the master via `kill -HUP`) is documented in
-   [docs/architecture-socket-activation.md](./docs/architecture-socket-activation.md#reload-kill--hup-never-nginx--s-reload).
-2. **IPv4 vs IPv6 fd count** — ✅ resolved in
-   [#156](https://github.com/the-hcma/home-warden/issues/156). nginx matches
-   inherited fds to `listen` directives by address, not order. `setup-service`
-   adds an IPv6-only socket (and an `NGINX=` fd) for each `listen [::]:80` /
-   `listen [::]:443` in the served conf, so `NGINX=3:4:5:6;` with both; see
-   [docs/architecture-socket-activation.md](./docs/architecture-socket-activation.md#dual-stack-ipv6).
-3. **Conflict with distro `nginx.service`** — ✅ resolved; `setup-service`
-   disables and masks it.
-4. **Cert permissions** — ✅ resolved for the steady-state case; but see the
-   pid-ownership footgun in
-   [docs/architecture-socket-activation.md](./docs/architecture-socket-activation.md#reload-kill--hup-never-nginx--s-reload)
-   for a related root-vs-owner issue that did bite in production
-   ([#39](https://github.com/the-hcma/home-warden/pull/39)).
-5. **Alternate design** — not pursued; socket activation has been stable in
-   production. `AmbientCapabilities=CAP_NET_BIND_SERVICE` on a user linger
-   unit remains a documented fallback if `NGINX=` ever proves fragile across
-   an nginx upgrade — see
-   [docs/architecture-socket-activation.md](./docs/architecture-socket-activation.md#known-gaps--risks) gap 13.
+1. **`NGINX=` undocumented** — ✅ confirmed working on nginx 1.28.3 / Ubuntu 26 in production. The one real gotcha (`nginx -s reload` fails; must signal the master via `kill -HUP`) is documented in [docs/architecture-socket-activation.md](./docs/architecture-socket-activation.md#reload-kill--hup-never-nginx--s-reload).
+2. **IPv4 vs IPv6 fd count** — ✅ resolved in [#156](https://github.com/the-hcma/home-warden/issues/156). nginx matches inherited fds to `listen` directives by address, not order. `setup-service` adds an IPv6-only socket (and an `NGINX=` fd) for each `listen [::]:80` / `listen [::]:443` in the served conf, so `NGINX=3:4:5:6;` with both; see [docs/architecture-socket-activation.md](./docs/architecture-socket-activation.md#dual-stack-ipv6).
+3. **Conflict with distro `nginx.service`** — ✅ resolved; `setup-service` disables and masks it.
+4. **Cert permissions** — ✅ resolved for the steady-state case; but see the pid-ownership footgun in [docs/architecture-socket-activation.md](./docs/architecture-socket-activation.md#reload-kill--hup-never-nginx--s-reload) for a related root-vs-owner issue that did bite in production ([#39](https://github.com/the-hcma/home-warden/pull/39)).
+5. **Alternate design** — not pursued; socket activation has been stable in production. `AmbientCapabilities=CAP_NET_BIND_SERVICE` on a user linger unit remains a documented fallback if `NGINX=` ever proves fragile across an nginx upgrade — see [docs/architecture-socket-activation.md](./docs/architecture-socket-activation.md#known-gaps--risks) gap 13.
 
-For the fuller, currently-tracked list of security trade-offs (not just the
-five above), see
-[docs/architecture-socket-activation.md](./docs/architecture-socket-activation.md#known-gaps--risks).
+For the fuller, currently-tracked list of security trade-offs (not just the five above), see [docs/architecture-socket-activation.md](./docs/architecture-socket-activation.md#known-gaps--risks).
 
 ---
 
