@@ -46,6 +46,7 @@ management (live today), and eventually DNS itself. See
 | Doc | Purpose |
 | --- | --- |
 | [docs/architecture-socket-activation.md](./docs/architecture-socket-activation.md) | How socket activation works; security posture and known gaps |
+| [docs/client-pki.md](./docs/client-pki.md) | Private client-certificate CA: purpose, threat model, lifecycle |
 | [docs/host-prerequisites.md](./docs/host-prerequisites.md) | Ubuntu 26 host install, day-2 ops, unit reference |
 | [PLAN.md](./PLAN.md) | Original design rationale, phases, open questions |
 | [AGENTS.md](./AGENTS.md) | Contributor / agent ground rules |
