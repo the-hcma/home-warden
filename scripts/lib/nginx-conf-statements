@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# scripts/lib/nginx-conf-statements — split an `nginx -T` dump into one
+# statement per line, the way nginx's own lexer sees it, for the libs that
+# scan the served conf for directives.
+#
+# nginx treats a newline as plain whitespace, so a directive may span lines or
+# share a line with others (`server { listen 443 ssl;`); a line-based scan
+# misses both. `#` starts a comment only at the beginning of a token, so
+# `/srv/a#b` stays a literal path.
+
+# nginx_conf_statements <nginx -T dump>: prints each directive (up to, not
+# including, its `;` / `{` / `}`) on its own line, comments removed.
+nginx_conf_statements() {
+  local -r dump="$1"
+
+  sed -E 's/(^|[[:space:];{}])#.*$/\1/' <<<"${dump}" |
+    tr '\n' ' ' |
+    sed -E 's/[{};]/\n/g'
+}

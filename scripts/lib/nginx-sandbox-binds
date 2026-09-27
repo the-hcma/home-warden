@@ -20,6 +20,10 @@
 # falls back to a single-file bind: stale-until-restart, but the key stays
 # outside the sandbox.
 
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=nginx-conf-statements
+source "$(dirname "${BASH_SOURCE[0]}")/nginx-conf-statements"
+
 # dir_holds_private_key <dir>: true when <dir> (recursively, as a bind would
 # expose it) contains a PEM private key or a file named like a key/keystore.
 # A missing or unreadable dir counts as holding none.
@@ -104,7 +108,8 @@ resolve_nginx_reload_watch_dirs() {
       printf '%s\n' "${dir}"
     fi
   done < <(
-    sed -nE 's/^[[:space:]]*(ssl_client_certificate|ssl_crl)[[:space:]]+([^;]+);.*$/\1 \2/p' <<<"${dump}"
+    nginx_conf_statements "${dump}" |
+      sed -nE 's/^[[:space:]]*(ssl_client_certificate|ssl_crl)[[:space:]]+(.*[^[:space:]])[[:space:]]*$/\1 \2/p'
   ) | sort -u
 }
 
@@ -113,8 +118,8 @@ resolve_nginx_reload_watch_dirs() {
 # since disappeared instead of refusing to start) for every location under
 # /home or /root the conf references that no covered dir already contains.
 # root/alias, glob includes, and republished files (see the header) bind a
-# directory; other file directives bind just the file. The whole argument up
-# to `;` is captured so a path the allowlist can't take (e.g. a quoted one
+# directory; other file directives bind just the file. The whole argument (the rest
+# of the statement) is captured so a path the allowlist can't take (e.g. a quoted one
 # with a space) is warned about, never silently dropped. The conf is not
 # trusted to widen the sandbox arbitrarily: see is_safe_sandbox_bind for what
 # is refused — including a republished file sitting directly in a home
@@ -182,7 +187,7 @@ resolve_nginx_extra_read_paths() {
     fi
     printf -- '-%s\n' "${target}"
   done < <(
-    sed -nE "s/^[[:space:]]*(${directive_re})[[:space:]]+([^;]+);.*\$/\1 \2/p" \
-      <<<"${dump}"
+    nginx_conf_statements "${dump}" |
+      sed -nE "s/^[[:space:]]*(${directive_re})[[:space:]]+(.*[^[:space:]])[[:space:]]*\$/\1 \2/p"
   ) | sort -u
 }

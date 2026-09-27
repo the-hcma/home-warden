@@ -24,6 +24,16 @@ def test_ca_bundles_and_crl_bind_their_directory() -> None:
     assert binds == ["-/home/op/chains", "-/home/op/pki/ca"]
 
 
+def test_comments_are_ignored_but_a_hash_inside_a_path_is_literal() -> None:
+    binds, stderr = _resolve(
+        "#root /home/op/commented-out;\n"
+        "ssl_crl /home/op/pki/ca/crl.pem; # ssl_crl /home/op/other/crl.pem;\n"
+        "root /home/op/site#1;\n"
+    )
+    assert binds == ["-/home/op/pki/ca"]
+    assert "not exposing /home/op/site#1 (from root)" in stderr
+
+
 def test_covered_directories_are_not_bound_again() -> None:
     binds, _ = _resolve("ssl_crl /home/op/work/home-warden/conf/pki/ca/crl.pem;\n")
     assert binds == []
@@ -61,6 +71,11 @@ def test_dir_holds_private_key(tmp_path: Path, name: str, pem_label: str, expect
     assert _holds_private_key(tmp_path) is expected
 
 
+def test_directives_spanning_lines_or_after_a_brace_are_found() -> None:
+    binds, _ = _resolve("server { root /home/op/www;\n    ssl_crl\n        /home/op/pki/ca/crl.pem;\n}\n")
+    assert binds == ["-/home/op/pki/ca", "-/home/op/www"]
+
+
 def test_hidden_directory_is_refused() -> None:
     binds, stderr = _resolve("ssl_crl /home/op/.pki/crl.pem;\n")
     assert binds == []
@@ -96,6 +111,13 @@ def test_reload_watch_dirs_cover_crl_and_client_ca_only() -> None:
     )
     assert dirs == ["/etc/nginx/client-ca", "/home/op/pki/ca"]
     assert stderr == ""
+
+
+def test_reload_watch_dirs_find_directives_spanning_lines_or_after_a_brace() -> None:
+    dirs, _ = _watch_dirs(
+        "server { ssl_crl /home/op/pki/ca/crl.pem;\n    ssl_client_certificate\n        /srv/pki/ca.crt;\n}\n"
+    )
+    assert dirs == ["/home/op/pki/ca", "/srv/pki"]
 
 
 def test_reload_watch_dirs_skip_only_exactly_watched_dirs() -> None:
