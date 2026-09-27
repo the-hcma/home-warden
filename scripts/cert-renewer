@@ -14,6 +14,8 @@
 #   HOME_WARDEN_RELOAD     default: 1 (set 0 when systemd ExecStartPost reloads)
 #   CERTBOT_DOMAINS_FILE   default: $repo_dir/conf/certbot-domains
 #   DNS_CLOUDFLARE_PROPAGATION_SECONDS  default: 60 (plugin default 10 is often too short)
+#   CERTBOT_TIMEOUT_SEC    default: 600 — cap per certbot run (one domain); a run that
+#                          overruns is killed and fails the renewer, never retried here
 #   SERVICE_GROUP          default: the installed home-warden.service's Group= (the group it
 #                          reads certs through; skipped when the unit has no Group=)
 #
@@ -49,6 +51,7 @@ home_warden_reload="${HOME_WARDEN_RELOAD:-1}"
 certbot_domains_file="${CERTBOT_DOMAINS_FILE:-${repo_dir}/conf/certbot-domains}"
 certbot_bin="${CERTBOT:-/usr/bin/certbot}"
 dns_propagation_seconds="${DNS_CLOUDFLARE_PROPAGATION_SECONDS:-60}"
+certbot_timeout_sec="${CERTBOT_TIMEOUT_SEC:-600}"
 service_group="$(hw_service_group "")"
 dry_run=0
 
@@ -116,6 +119,19 @@ share_certs_with_service_group() {
   fi
 }
 
+# certbot talks to Let's Encrypt and Cloudflare and waits out DNS propagation;
+# bound each run so a hung ACME/DNS call can't stall the renewer (or the
+# catalog-heal pass invoking it). No retry: a re-run could re-issue, and
+# the daily timer is the retry.
+run_certbot() {
+  local rc=0
+  timeout --kill-after=30s "${certbot_timeout_sec}" "${certbot_bin}" "$@" || rc=$?
+  if ((rc == 124 || rc == 137)); then
+    echo "cert-renewer: ERROR: certbot $1 timed out after ${certbot_timeout_sec}s (CERTBOT_TIMEOUT_SEC)" >&2
+  fi
+  return "${rc}"
+}
+
 trim_ws() {
   local s=$1
   s="${s#"${s%%[![:space:]]*}"}"
@@ -146,6 +162,10 @@ load_domains() {
   return 0
 }
 
+if [[ ! "${certbot_timeout_sec}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "cert-renewer: CERTBOT_TIMEOUT_SEC must be a positive integer, got '${certbot_timeout_sec}'" >&2
+  exit 2
+fi
 if [[ ! -x "${certbot_bin}" ]]; then
   echo "cert-renewer: certbot not found at ${certbot_bin}" >&2
   echo "  sudo apt-get install -y certbot python3-certbot-dns-cloudflare" >&2
@@ -193,7 +213,7 @@ for domain in "${domains[@]}"; do
     # certbot rotates letsencrypt.log itself (default cap: 1000 backups) —
     # this directory isn't covered by etc/logrotate/home-warden, so cap it
     # here instead of layering a second, conflicting rotation scheme on it.
-    "${certbot_bin}" renew \
+    run_certbot renew \
       --server https://acme-v02.api.letsencrypt.org/directory \
       "${cf_args[@]}" \
       --work-dir "${scratch_dir}/certbot-work" \
@@ -223,7 +243,7 @@ for domain in "${domains[@]}"; do
     else
       echo "cert-renewer: obtain new certificate for ${domain}"
     fi
-    "${certbot_bin}" certonly \
+    run_certbot certonly \
       -d "${domain}" \
       --cert-name "${domain}" \
       --server https://acme-v02.api.letsencrypt.org/directory \

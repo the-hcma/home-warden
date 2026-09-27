@@ -6,7 +6,8 @@
 #   HEALTHCHECK_EMAIL_FROM   default: home-warden@$(hostname -f)
 #   HEALTHCHECK_HOST         default: app.example.com (SNI / Host for local probe)
 #   HEALTHCHECK_URL_PATH     default: /
-#   HEALTHCHECK_TIMEOUT_SEC  default: 5
+#   HEALTHCHECK_TIMEOUT_SEC  default: 5 (whole HTTPS probe)
+#   HEALTHCHECK_CONNECT_TIMEOUT_SEC  default: 3 (TCP + TLS handshake to 127.0.0.1)
 #   HEALTHCHECK_OK_STATUSES  default: 200,204,301,302,303,307,308
 #   HEALTHCHECK_RESEND_SEC   default: 1800 (re-alert while still failing)
 #   HEALTHCHECK_SERVICE      default: home-warden.service
@@ -37,6 +38,7 @@ email_from="${HEALTHCHECK_EMAIL_FROM:-}"
 probe_host="${HEALTHCHECK_HOST:-app.example.com}"
 url_path="${HEALTHCHECK_URL_PATH:-/}"
 timeout_sec="${HEALTHCHECK_TIMEOUT_SEC:-5}"
+connect_timeout_sec="${HEALTHCHECK_CONNECT_TIMEOUT_SEC:-3}"
 ok_statuses="${HEALTHCHECK_OK_STATUSES:-200,204,301,302,303,307,308}"
 resend_sec="${HEALTHCHECK_RESEND_SEC:-1800}"
 service_name="${HEALTHCHECK_SERVICE:-home-warden.service}"
@@ -140,7 +142,7 @@ probe() {
   local code err
   err="$(mktemp)"
   code="$(
-    curl -sS --max-time "${timeout_sec}" \
+    curl -sS --connect-timeout "${connect_timeout_sec}" --max-time "${timeout_sec}" \
       --resolve "${probe_host}:443:127.0.0.1" \
       -o /dev/null -w '%{http_code}' \
       "${url}" 2>"${err}" || true
