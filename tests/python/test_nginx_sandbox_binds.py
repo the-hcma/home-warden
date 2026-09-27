@@ -24,6 +24,13 @@ def test_ca_bundles_and_crl_bind_their_directory() -> None:
     assert binds == ["-/home/op/chains", "-/home/op/pki/ca"]
 
 
+def test_closing_brace_mid_path_is_refused_whole_not_truncated() -> None:
+    binds, stderr = _resolve("root /home/op/dir}f/www;\nssl_crl /home/op/pki/ca}x/crl.pem;\n")
+    assert binds == []
+    assert "not exposing /home/op/dir}f/www (from root)" in stderr
+    assert "not exposing /home/op/pki/ca}x (from ssl_crl)" in stderr
+
+
 def test_comments_are_ignored_but_a_hash_inside_a_path_is_literal() -> None:
     binds, stderr = _resolve(
         "#root /home/op/commented-out;\n"

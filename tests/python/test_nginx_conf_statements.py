@@ -15,6 +15,14 @@ def test_backslash_escapes_keep_a_quote_or_terminator_inside_the_token() -> None
     ]
 
 
+def test_closing_brace_ends_a_block_only_at_a_token_start() -> None:
+    assert _statements("root /srv/dir}f/www;\nserver { index a.html;}\n}\n") == [
+        "root /srv/dir}f/www",
+        "server",
+        "index a.html",
+    ]
+
+
 def test_hash_starts_a_comment_only_at_a_token_boundary() -> None:
     assert _statements("# listen [::]:80;\nroot /srv/site#1; # trailing ssl_crl /x;\nindex a.html;\n") == [
         "root /srv/site#1",

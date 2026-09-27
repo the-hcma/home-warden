@@ -6,8 +6,9 @@
 # nginx treats a newline as plain whitespace, so a directive may span lines or
 # share a line with others (`server { listen 443 ssl;`); a line-based scan
 # misses both. The tokenizer follows nginx's rules:
-#   - `;`, `{` and `}` end a statement, except inside a quoted string or as
-#     part of a `${var}` reference;
+#   - `;` and `{` end a statement anywhere outside a quoted string (except the
+#     `{` of a `${var}` reference); `}` ends one only at the start of a token,
+#     so mid-word it is a literal character, as in `/srv/a}b`;
 #   - a `"…"` / `'…'` token and a backslash escape are kept whole, so a quoted
 #     path containing `;`, `{` or `#` is never cut short into a different path;
 #   - `#` starts a comment only at the beginning of a token, so `/srv/a#b` stays
@@ -27,7 +28,6 @@ nginx_conf_statements() {
       }
       token = ""
       in_token = 0
-      var_brace = 0
     }
     function end_statement() {
       end_token()
@@ -60,11 +60,7 @@ nginx_conf_statements() {
           break
         } else if (c == "{" && in_token && substr(token, length(token), 1) == "$") {
           token = token c
-          var_brace = 1
-        } else if (c == "}" && var_brace) {
-          token = token c
-          var_brace = 0
-        } else if (c == ";" || c == "{" || c == "}") {
+        } else if (c == ";" || c == "{" || (c == "}" && !in_token)) {
           end_statement()
         } else if ((c == "\"" || c == "\047") && !in_token) {
           token = c
