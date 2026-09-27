@@ -1106,11 +1106,8 @@ run_on_deploy() {
       "CONF_DIR=${conf_dir} HOME_NGINX_CONF=${home_nginx_conf} ${hook}"
     return 0
   fi
-  set +e
   OWNER="${owner}" SERVICE_GROUP="${service_group}" SCRATCH_DIR="${scratch_dir}" \
-    CONF_DIR="${conf_dir}" HOME_NGINX_CONF="${home_nginx_conf}" "${hook}"
-  rc=$?
-  set -e
+    CONF_DIR="${conf_dir}" HOME_NGINX_CONF="${home_nginx_conf}" "${hook}" || rc=$?
   case "${rc}" in
     0)
       echo "on-deploy: changed (will reload/restart when units are active)"
@@ -1318,11 +1315,10 @@ main() {
     echo "Extra read-only paths exposed to the nginx sandbox: ${nginx_extra_read_paths}"
   fi
 
+  # `|| rc=$?`, not set +e / set -e: a set -e inside the callee would re-arm
+  # errexit and turn its "no change" return 1 into a silent exit here.
   local on_deploy_rc=0
-  set +e
-  run_on_deploy
-  on_deploy_rc=$?
-  set -e
+  run_on_deploy || on_deploy_rc=$?
 
   grant_service_access
 
