@@ -198,7 +198,7 @@ jobs:
       - name: tiny-pki client-cert mTLS end to end (real nginx)
         env:
           HOME_WARDEN_REQUIRE_NGINX: "1"
-        run: uv run pytest tests/python/test_client_pki_mtls.py -v
+        run: uv run pytest tests/python/test_client_pki.py -v
 
   dns-catalog-validate:
     name: DNS catalog validate

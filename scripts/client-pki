@@ -9,10 +9,16 @@
 #   HOME_WARDEN_PKI_STORE  CA store directory (default: conf/pki in this repo;
 #                          conf/ is gitignored, like conf/cloudflare.ini)
 #
+# Point a catalog vhost's client_cert.ca_bundle / client_cert.crl at the
+# store's key-free public/ca.crt and public/crl.pem, never at ca/ (which
+# holds the CA key).
+#
 # Usage:
 #   ./scripts/client-pki init --cn "Home client CA"
 #   ./scripts/client-pki create client alice
 #   ./scripts/client-pki export p12 alice --password-file PATH
+#   ./scripts/client-pki create client alice --keep-previous   # rotate
+#   ./scripts/client-pki revoke 0x<old serial>                 # once rotated
 #   ./scripts/client-pki revoke alice
 #   ./scripts/client-pki check --quiet
 

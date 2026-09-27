@@ -429,7 +429,7 @@ requires-dist = [
     { name = "python-pam", specifier = ">=2.1.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "six", specifier = ">=1.17.0" },
-    { name = "tiny-pki", extras = ["cli"], git = "https://github.com/the-hcma/tiny-pki?rev=47ffebe472220f4da7ef2c6a36d6119ddedc38bb" },
+    { name = "tiny-pki", extras = ["cli"], git = "https://github.com/the-hcma/tiny-pki?rev=08378f20758b263201002ed76b97a9e99c7dcc2d" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.53.0" },
 ]
 
@@ -936,7 +936,7 @@ wheels = [
 [[package]]
 name = "tiny-pki"
 version = "0.1.0"
-source = { git = "https://github.com/the-hcma/tiny-pki?rev=47ffebe472220f4da7ef2c6a36d6119ddedc38bb#47ffebe472220f4da7ef2c6a36d6119ddedc38bb" }
+source = { git = "https://github.com/the-hcma/tiny-pki?rev=08378f20758b263201002ed76b97a9e99c7dcc2d#08378f20758b263201002ed76b97a9e99c7dcc2d" }
 dependencies = [
     { name = "cryptography" },
 ]
