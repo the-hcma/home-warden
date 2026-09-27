@@ -27,41 +27,38 @@ the service dropping to the unprivileged owner.
 home-warden's scope is meant to grow into the **one-stop front door for all
 home services** — local and remotely reachable: nginx reverse-proxy/TLS
 termination (live today), public certificate management (live today, DNS-01
-via Cloudflare), and **eventually DNS** itself, so the same project that
-terminates traffic and issues certs also owns the records that route to it.
+via Cloudflare), and **DNS** itself (live today, local and external), so the
+same project that terminates traffic and issues certs also owns the records
+that route to it.
 The phases and non-goals below describe what's shipped and deliberately
 deferred so far, not a ceiling on the project.
 
-Concretely, in progress or planned beyond v1:
+Shipped beyond v1 (see AGENTS.md for how each works today):
 
 - **Service catalog** ([#45](https://github.com/the-hcma/home-warden/issues/45))
-  — a structured JSON catalog of fronted services (plus non-fronted
-  `background_units`, e.g. repository-helpers timers) that nginx config is
-  rendered from, instead of hand-edited `conf.d` entries. Schema drafted
-  and validated against a real render; hardening the renderer itself
-  (fidelity, PII/config hygiene) is tracked separately
-  ([#54](https://github.com/the-hcma/home-warden/issues/54)), and
-  validating that the catalog's promises hold against live infrastructure
-  (cert existence/validity, DNS existence, internal upstream health) —
-  with auto-healing — is split out further still
-  ([#57](https://github.com/the-hcma/home-warden/issues/57)).
-- **Private CA for client certs** ([#49](https://github.com/the-hcma/home-warden/issues/49))
-  — issuing, tracking, and revoking mTLS client certs for the
-  `client_cert` field the catalog schema already reserves. Plan is to
-  extract/adapt the existing, tested PKI implementation in
-  [`the-hcma/my-tracks`'s `app/pki.py`](https://github.com/the-hcma/my-tracks/blob/main/app/pki.py)
-  (CA + server/client cert generation, CRL generation, PKCS12 bundling,
-  cert introspection, built on the standard `cryptography` package)
-  rather than write CA/cert issuance code from scratch — see #49 for the
-  license caveat (`my-tracks` is PolyForm Noncommercial 1.0.0; home-warden
-  is MIT) that needs a deliberate, documented decision before any code
-  moves.
+  — a structured JSON catalog of fronted services that nginx config is
+  rendered from ([#54](https://github.com/the-hcma/home-warden/issues/54)),
+  with live cert / DNS / local-DNS / upstream health checks and auto-healing
+  ([#57](https://github.com/the-hcma/home-warden/issues/57)), and end-to-end
+  service registration ([#110](https://github.com/the-hcma/home-warden/issues/110)).
+- **DNS** — local authoritative PowerDNS tooling
+  ([#108](https://github.com/the-hcma/home-warden/issues/108)) and external
+  Cloudflare record sync ([#109](https://github.com/the-hcma/home-warden/issues/109)).
 - **Security linting** ([#50](https://github.com/the-hcma/home-warden/issues/50))
   — Gixy-Next static analysis of rendered/hand-written nginx config in CI.
 - **Web UI** ([#55](https://github.com/the-hcma/home-warden/issues/55)) — a
-  TypeScript frontend (the one case Language & Runtime reserves
-  TypeScript for) for managing the service catalog day-to-day, once it's
-  not just hand-edited JSON.
+  first-party TypeScript admin UI for the catalog, including a DNS records
+  view ([#111](https://github.com/the-hcma/home-warden/issues/111)).
+
+In progress:
+
+- **Private CA for client certs** ([#49](https://github.com/the-hcma/home-warden/issues/49))
+  — issuing, tracking, and revoking mTLS client certs for the catalog's
+  `client_cert` field, built on
+  [`the-hcma/tiny-pki`](https://github.com/the-hcma/tiny-pki) rather than
+  CA code of home-warden's own. tiny-pki isn't released yet; a draft PR pins
+  it to a git commit to find gaps, and #49's "Evaluation status" tracks what
+  remains on both sides.
 
 ---
 
@@ -74,6 +71,12 @@ Concretely, in progress or planned beyond v1:
 | Cert renewal without a long-lived root agent | `home-warden-certbot.service` + `.timer` |
 | Config owned by the user | Served conf lives in `thehcma/home`; pid/temp/logs under `~/scratch/home-warden/` |
 | Install story like siblings | `scripts/setup-service` (system units via sudo) + host guards |
+
+> nginx no longer runs as the home user: `home-warden.service` runs as a
+> dedicated, purpose-named `home-warden-nginx` account
+> ([#146](https://github.com/the-hcma/home-warden/pull/146)) that reads the
+> operator's config and certs through group membership. The diagrams and unit
+> sketches below still show the original `User=<owner>` plan.
 
 Non-goals for v1: shipping a full site catalog, multi-host HA, or replacing
 sibling apps’ own listen ports (they stay on high ports; nginx proxies to them).
