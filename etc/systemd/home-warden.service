@@ -17,6 +17,8 @@ Type=simple
 # nginx logs/temp paths setup-service hands to its group.
 User=@@SERVICE_USER@@
 Group=@@SERVICE_GROUP@@
+# The IPv4 sockets only; a generated home-warden-ipv6.conf drop-in overrides
+# this with one more fd per IPv6 socket (see home-warden.socket).
 Environment=NGINX=3:4;
 Environment=DEPLOYED_COMMIT=@@DEPLOYED_COMMIT@@
 # -p sets prefix for relative pid/temp/log paths in the home nginx.conf.

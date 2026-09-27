@@ -60,6 +60,9 @@ class RenderContext:
 
     certs_live_dir: Path
     client_max_body_size: str = DEFAULT_CLIENT_MAX_BODY_SIZE
+    # Each vhost also listens on [::]:443. scripts/setup-service gives nginx
+    # an IPv6 socket only when the served conf has such a listen (#156).
+    listen_ipv6: bool = True
     server_tokens_off: bool = True
     ssl_protocols: str = DEFAULT_SSL_PROTOCOLS
 
@@ -73,7 +76,8 @@ def build_catalog_config(catalog: dict, ctx: RenderContext) -> list[dict]:
     `server` per `streams` entry (inside `stream`, only emitted when the
     catalog actually has any).
 
-    The first service's `server` block is marked `default_server` -- with
+    The first service's `server` block is marked `default_server` (on both
+    its IPv4 and IPv6 `listen`) -- with
     multiple https vhosts and no explicit default, nginx silently falls
     back to whichever `server` was defined first anyway; naming that
     choice explicitly (what Gixy-Next's `default_server_flag` check flags
@@ -230,9 +234,12 @@ def _build_server_block(service: dict, ctx: RenderContext, *, index: int, is_def
 
     domain = service["server_name"]
     cert_dir = ctx.certs_live_dir / domain
-    listen_args = ["443", "ssl", "default_server"] if is_default_server else ["443", "ssl"]
+    listen_flags = ["ssl", "default_server"] if is_default_server else ["ssl"]
+    listens = [_directive("listen", args=["443", *listen_flags])]
+    if ctx.listen_ipv6:
+        listens.append(_directive("listen", args=["[::]:443", *listen_flags]))
     block = [
-        _directive("listen", args=listen_args),
+        *listens,
         _directive("server_name", args=[domain]),
         _directive("ssl_certificate", args=[str(cert_dir / "fullchain.pem")]),
         _directive("ssl_certificate_key", args=[str(cert_dir / "privkey.pem")]),

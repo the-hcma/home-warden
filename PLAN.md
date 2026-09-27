@@ -127,7 +127,9 @@ Documented by [systemd.io Daemon Socket Activation](https://systemd.io/DAEMON_SO
 Treat `NGINX=` as stable-in-practice but undocumented. Reload is validated in
 production (daily, via config-watch and cert renewal — see
 [docs/architecture-socket-activation.md](./docs/architecture-socket-activation.md#reload-kill--hup-never-nginx--s-reload)
-for the one real gotcha); dual-stack (four fds) remains unvalidated.
+for the one real gotcha). Dual-stack IPv6 adds up to two more fds, generated
+from the conf's `listen [::]:…` directives
+([#156](https://github.com/the-hcma/home-warden/issues/156)).
 
 ---
 
@@ -169,8 +171,9 @@ FreeBind=true
 WantedBy=sockets.target
 ```
 
-Exact `ListenStream=` / dual-stack pairing must be validated so `NGINX=3:4;`
-lines up with `listen` directives (IPv4 + IPv6 may need four fds).
+As shipped, the unit binds `0.0.0.0:80` / `0.0.0.0:443`, and `setup-service`
+adds the IPv6 sockets from the conf's `listen [::]:…` directives
+([#156](https://github.com/the-hcma/home-warden/issues/156)).
 
 ### `home-warden.service`
 
@@ -242,8 +245,12 @@ WantedBy=multi-user.target
    in production. The one real gotcha (`nginx -s reload` fails; must signal
    the master via `kill -HUP`) is documented in
    [docs/architecture-socket-activation.md](./docs/architecture-socket-activation.md#reload-kill--hup-never-nginx--s-reload).
-2. **IPv4 vs IPv6 fd count** — still open. IPv4-only today
-   (`NGINX=3:4;`, two fds); dual-stack (`NGINX=3:4:5:6;`) is unvalidated.
+2. **IPv4 vs IPv6 fd count** — ✅ resolved in
+   [#156](https://github.com/the-hcma/home-warden/issues/156). nginx matches
+   inherited fds to `listen` directives by address, not order. `setup-service`
+   adds an IPv6-only socket (and an `NGINX=` fd) for each `listen [::]:80` /
+   `listen [::]:443` in the served conf, so `NGINX=3:4:5:6;` with both; see
+   [docs/architecture-socket-activation.md](./docs/architecture-socket-activation.md#dual-stack-ipv6).
 3. **Conflict with distro `nginx.service`** — ✅ resolved; `setup-service`
    disables and masks it.
 4. **Cert permissions** — ✅ resolved for the steady-state case; but see the

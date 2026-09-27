@@ -19,9 +19,10 @@ Internet
 systemd (root) ── home-warden.socket
    ListenStream=0.0.0.0:80
    ListenStream=0.0.0.0:443
+   [+ ListenStream=[::]:80 / [::]:443, BindIPv6Only=ipv6-only, per the conf]
    (Accept=no, FreeBind=true)
    │
-   │  fds 3, 4 passed on activation; Environment=NGINX=3:4;
+   │  fds 3, 4 (+5, 6) passed on activation; Environment=NGINX=3:4[:5:6];
    ▼
 home-warden.service   User=home-warden-nginx  Group=home-warden-nginx
    nginx -p ~/scratch/home-warden/ -c <thehcma/home nginx.conf> -g 'daemon off;'
@@ -31,7 +32,8 @@ home-warden.service   User=home-warden-nginx  Group=home-warden-nginx
 ```
 
 - **`home-warden.socket`** is a *system* unit — it binds `0.0.0.0:80` and
-  `0.0.0.0:443` (`Accept=no`: nginx accepts connections itself, not systemd
+  `0.0.0.0:443`, plus IPv6 sockets when the conf asks for them (see
+  [Dual-stack IPv6](#dual-stack-ipv6)) (`Accept=no`: nginx accepts connections itself, not systemd
   per-connection; `FreeBind=true`: bind is allowed before the address is
   fully local, useful on boot).
 - **`home-warden.service`** is also a *system* unit, but drops to `User=`/
@@ -40,11 +42,13 @@ home-warden.service   User=home-warden-nginx  Group=home-warden-nginx
   `Requires=`/`After=home-warden.socket` ties its lifecycle to the socket.
 - **Fd handoff**: stock nginx does not speak systemd's `LISTEN_FDS` protocol.
   Instead it reuses its internal *reload* socket-inheritance mechanism via the
-  undocumented `Environment=NGINX=3:4;` — fd 3 maps to the first `listen` in
-  the conf, fd 4 to the second. The conf's listen order (`listen 80;` then
-  `listen 443 ssl;`) must match, or nginx binds the wrong protocol to the
-  wrong fd. IPv4-only today (two fds); dual-stack would need four
-  (`NGINX=3:4:5:6;`) and is still unvalidated (see
+  undocumented `Environment=NGINX=3:4;`. nginx calls `getsockname()` on each
+  listed fd and adopts it for the `listen` whose address matches exactly;
+  the order of fds and of `listen` directives doesn't matter (verified with
+  the two deliberately mismatched). A `listen` with no matching fd makes
+  nginx bind the address itself, which the unprivileged account can't do
+  for 80/443, so startup fails. An fd with no matching `listen` is closed by
+  nginx while systemd keeps its copy open, so connections to it hang (see
   [systemd.io Daemon Socket Activation](https://systemd.io/DAEMON_SOCKET_ACTIVATION/)).
 - **Config source of truth** lives in a *separate* private repo,
   `thehcma/home`'s `nginx/server/nginx.conf`, passed via `-c`
@@ -94,6 +98,38 @@ service start hits "permission denied" and crash-loops. `scripts/lib/nginx-pid`
 repairs ownership after every such call; see the PR that fixed this live
 crash-loop for the full mechanism:
 [#39](https://github.com/the-hcma/home-warden/pull/39).
+
+### Dual-stack IPv6
+
+The IPv6 sockets follow the served conf
+([#156](https://github.com/the-hcma/home-warden/issues/156)). `setup-service`
+reads `nginx -T` and, for each of `listen [::]:80` / `listen [::]:443` it
+finds, writes two generated drop-ins:
+
+- `home-warden.socket.d/home-warden-ipv6.conf`: `BindIPv6Only=ipv6-only`
+  plus one `ListenStream=[::]:<port>` per port.
+- `home-warden.service.d/home-warden-ipv6.conf`: `Environment=NGINX=` with
+  one more fd per IPv6 socket (`3:4:5:6;` for both ports).
+
+When either drop-in changes, `setup-service` stops the service and the
+socket, then starts both again: a running socket keeps its old listeners,
+and nginx only sees new fds from a fresh start. A conf with no IPv6 listens
+removes both drop-ins, returning to the two IPv4 sockets. Coupling the
+sockets to the conf avoids both failure modes of a fixed socket list: a
+`listen [::]:443` with no socket stops nginx from starting, and a socket with
+no listen accepts connections that are never answered.
+
+The IPv6 sockets are IPv6-only, so IPv4 clients keep arriving on the
+`0.0.0.0` sockets and log as `a.b.c.d`, not `::ffff:a.b.c.d`; `allow`/`deny`
+and `geo` rules written against IPv4 addresses keep working. `listen [::]:…
+ipv6only=off` is refused, since that dual-stack socket would collide with
+the IPv4 one. The catalog renderer emits `listen [::]:443 ssl` next to every
+`listen 443 ssl` (`default_server` on both), so a vhost answers on both
+families once the served conf includes the rendered output.
+
+Validated with a transient socket unit on unprivileged ports: IPv4 and IPv6
+requests both succeed, nginx holds exactly the four inherited sockets and
+binds nothing itself, and a `kill -HUP` reload keeps all four.
 
 ## Security posture: what we gain
 
@@ -146,7 +182,7 @@ have to rediscover them.
    version skew or a silent semantic change on a future nginx upgrade is an
    availability risk (and a "is this process actually listening on the
    socket I think it is?" question worth re-verifying after any nginx
-   version bump). Dual-stack (four fds) remains unvalidated.
+   version bump).
 5. **Inherited listening fds survive a compromise.** Dropping root at
    `exec` time does not revoke the already-open 80/443 fds handed to the
    process — a compromised master or worker can still `accept()` on those

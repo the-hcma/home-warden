@@ -443,5 +443,9 @@ under a dedicated directory; `setup-service` warns about any it refused.
 - Units are **system** (not user linger): systemd binds 80/443 and passes fds via `Environment=NGINX=3:4;`.
 - `ConditionHost` pins the units to the designated host (machine-id **or** hostname); see
   [Designated host](#designated-host) for the same guard applied inside the scripts themselves.
-- IPv4-only listens in Milestone 1; dual-stack fd mapping is a follow-up.
+- IPv6: each `listen [::]:80` / `listen [::]:443` in the served conf gets a matching IPv6-only
+  socket, via generated `home-warden-ipv6.conf` drop-ins for `home-warden.socket` and
+  `home-warden.service` (which also extend `NGINX=`). Add the IPv6 listens to every vhost that
+  should answer over IPv6, then rerun `setup-service`; see
+  [Dual-stack IPv6](./architecture-socket-activation.md#dual-stack-ipv6).
 - Certbot runs as the operator (not the `home-warden-nginx` account nginx uses); reload of `home-warden.service` is done via a privileged `ExecStartPost` on the oneshot unit (no passwordless sudo required for the timer).
