@@ -502,6 +502,10 @@ run() {
   "$@"
 }
 
+remove_generated_dropin() {
+  run sudo rm -f "$1" >&2
+}
+
 require_sudo() {
   if ((dry_run)); then
     echo "DRY-RUN: would prompt for sudo credentials"
@@ -1011,19 +1015,25 @@ install_reload_watch_dropin() {
   rm -f "${tmp}"
 }
 
+# File operations sync_ipv6_socket_dropins (scripts/lib/nginx-socket-listens)
+# calls back into; stdout is reserved for its "changed" result.
+install_generated_dropin() {
+  local -r content="$1"
+  local -r dest="$2"
+  local tmp
+
+  tmp="$(mktemp)"
+  printf '%s\n' "${content}" >"${tmp}"
+  run sudo install -d -m 755 "$(dirname "${dest}")" >&2
+  run sudo install -o root -g root -m 644 "${tmp}" "${dest}" >&2
+  rm -f "${tmp}"
+}
+
 # home-warden.socket gets an IPv6 socket for each `listen [::]:80|443` the
 # served conf declares, and NGINX= lists every fd (#156). Both drop-ins are
 # removed once the conf declares none.
 install_ipv6_socket_dropins() {
-  local current
-  local dest
-  local generated
-  local ports
-  local tmp
-  local -a dests=("${ipv6_service_dropin_dest}" "${ipv6_socket_dropin_dest}")
-  local -a generated_dropins=()
-  local -a port_list=()
-  local i
+  local result
 
   if ((dry_run)); then
     # validate_nginx_config skips nginx -T in a dry run, so there is no dump to decide from.
@@ -1031,40 +1041,15 @@ install_ipv6_socket_dropins() {
       "from nginx -T (not run in a dry run)"
     return 0
   fi
-  if ! ports="$(resolve_nginx_ipv6_listen_ports "${nginx_dump}")"; then
-    echo "ERROR: refusing to install home-warden.socket for this nginx conf" >&2
+  if ! result="$(
+    sync_ipv6_socket_dropins "${nginx_dump}" "${ipv6_service_dropin_dest}" "${ipv6_socket_dropin_dest}"
+  )"; then
+    echo "ERROR: could not bring the home-warden.socket IPv6 drop-ins in line with the conf" >&2
     exit 1
   fi
-  if [[ -z "${ports}" ]]; then
-    for dest in "${dests[@]}"; do
-      current="$(cat "${dest}" 2>/dev/null || true)"
-      if [[ "${current}" == "${nginx_socket_dropin_header}"* ]]; then
-        ipv6_socket_dropins_changed=1
-        run sudo rm -f "${dest}"
-      fi
-    done
-    return 0
-  fi
-  mapfile -t port_list <<<"${ports}"
-  echo "IPv6 sockets for home-warden.socket (from listen [::]:… in the conf): ${port_list[*]}"
-  generated_dropins=(
-    "$(render_ipv6_service_dropin "${port_list[@]}")"
-    "$(render_ipv6_socket_dropin "${port_list[@]}")"
-  )
-  for i in "${!dests[@]}"; do
-    dest="${dests[i]}"
-    generated="${generated_dropins[i]}"
-    current="$(cat "${dest}" 2>/dev/null || true)"
-    if [[ "${generated}" == "${current}" ]]; then
-      continue
-    fi
+  if [[ "${result}" == changed ]]; then
     ipv6_socket_dropins_changed=1
-    tmp="$(mktemp)"
-    printf '%s\n' "${generated}" >"${tmp}"
-    run sudo install -d -m 755 "$(dirname "${dest}")"
-    run sudo install -o root -g root -m 644 "${tmp}" "${dest}"
-    rm -f "${tmp}"
-  done
+  fi
 }
 
 install_preview_conf_path() {

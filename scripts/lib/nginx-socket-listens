@@ -84,3 +84,57 @@ resolve_nginx_ipv6_listen_ports() {
   fi
   return "${status}"
 }
+
+# sync_ipv6_socket_dropins <nginx -T dump> <service drop-in> <socket drop-in>
+# Brings both drop-ins in line with the conf's IPv6 listens: writes them when
+# their content differs, and removes them (only if generated, never a
+# hand-written file) when the conf has none. The caller supplies the file
+# operations as install_generated_dropin <content> <dest> and
+# remove_generated_dropin <dest>. Prints "changed" when it wrote or removed
+# anything; fails, touching nothing, when a listen is refused.
+sync_ipv6_socket_dropins() {
+  local -r dump="$1"
+  local -r service_dest="$2"
+  local -r socket_dest="$3"
+  local changed=0
+  local current
+  local dest
+  local generated
+  local i
+  local ports
+  local -a dests=("${service_dest}" "${socket_dest}")
+  local -a generated_dropins=()
+  local -a port_list=()
+
+  if ! ports="$(resolve_nginx_ipv6_listen_ports "${dump}")"; then
+    return 1
+  fi
+  if [[ -z "${ports}" ]]; then
+    for dest in "${dests[@]}"; do
+      current="$(cat "${dest}" 2>/dev/null || true)"
+      if [[ "${current}" == "${nginx_socket_dropin_header}"* ]]; then
+        remove_generated_dropin "${dest}"
+        changed=1
+      fi
+    done
+  else
+    mapfile -t port_list <<<"${ports}"
+    echo "IPv6 sockets for home-warden.socket (from listen [::]:… in the conf): ${port_list[*]}" >&2
+    generated_dropins=(
+      "$(render_ipv6_service_dropin "${port_list[@]}")"
+      "$(render_ipv6_socket_dropin "${port_list[@]}")"
+    )
+    for i in "${!dests[@]}"; do
+      dest="${dests[i]}"
+      generated="${generated_dropins[i]}"
+      current="$(cat "${dest}" 2>/dev/null || true)"
+      if [[ "${generated}" != "${current}" ]]; then
+        install_generated_dropin "${generated}" "${dest}"
+        changed=1
+      fi
+    done
+  fi
+  if ((changed)); then
+    echo changed
+  fi
+}
