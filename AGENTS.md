@@ -594,9 +594,11 @@ four existing dimensions as the trigger. See
 
 ## Private Client CA
 
-home-warden's private CA issues mTLS client certificates only — a second
-factor for sensitive vhosts (the admin web UI first), never server
-certificates, which stay with Let's Encrypt. Purpose, threat model, scale,
+home-warden's private CA issues mTLS client certificates only, never server
+certificates, which stay with Let's Encrypt. The certificate is the **first
+gate**: a gated vhost (`client_cert.mode: required`, the admin web UI first)
+rejects any device without one in nginx, before the request reaches the
+service, whose own login is the second gate. Purpose, threat model, scale,
 lifecycle, and non-goals:
 [docs/client-pki.md](./docs/client-pki.md). Epic:
 [#49](https://github.com/the-hcma/home-warden/issues/49).

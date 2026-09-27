@@ -2,8 +2,8 @@
 
 home-warden runs a small private certificate authority whose only job is to
 issue **mTLS client certificates**: a device presents one to nginx, and nginx
-lets it reach a sensitive vhost only if the certificate is valid, unrevoked,
-and (optionally) carries an allowed common name. This page explains what the CA
+lets it reach a gated vhost only if the certificate is valid, unrevoked, and
+(optionally) carries an allowed common name. This page explains what the CA
 is for, what it does and doesn't protect against, and where each piece of its
 lifecycle is tracked. The epic is
 [#49](https://github.com/the-hcma/home-warden/issues/49).
@@ -15,18 +15,34 @@ intent, not a shipped feature.
 
 ## Purpose
 
-A client certificate is a **second factor for sensitive vhosts**. A request has
-to come from an enrolled device *and* pass whatever login the service itself
-has.
+A client certificate is the **first gate** in front of a sensitive vhost, and
+the service's own authentication is the **second**:
 
-- **First candidate: the admin web UI.** It already requires a PAM login. A
-  client certificate means a stolen or guessed password isn't enough on its
-  own. The generated web-UI vhost doesn't expose a `client_cert` setting yet;
-  wiring one up is part of
-  [#161](https://github.com/the-hcma/home-warden/issues/161).
-- **Then anything that shouldn't be reachable with a password alone**, such as
-  admin panels of self-hosted services, set per catalog entry through the
+1. **Device gate (nginx).** A vhost with `client_cert.mode: required` refuses
+   any request that doesn't come with a valid, unrevoked certificate from this
+   CA (and, with `allow_cn`, an allowed common name). nginx answers it with an
+   error itself (400, or 403 for a CN outside `allow_cn`); the request is never
+   proxied, so an unenrolled device can't reach the service's login page, its
+   API, or anything else behind the vhost.
+2. **Service authentication.** Only requests from enrolled devices get as far
+   as the service, which then applies its own login (PAM for the admin web
+   UI, whatever a self-hosted app uses).
+
+An attacker therefore has to get hold of an enrolled device's certificate
+*before* a password is worth anything, and an unpatched login form isn't
+exposed to the internet at all.
+
+- **First candidate: the admin web UI.** It already requires a PAM login; the
+  certificate goes in front of it. The generated web-UI vhost doesn't expose a
+  `client_cert` setting yet, so until
+  [#161](https://github.com/the-hcma/home-warden/issues/161) wires one up the
+  UI is protected by its login alone.
+- **Then every service that shouldn't be reachable from an arbitrary device**,
+  such as admin panels of self-hosted apps, set per catalog entry through the
   `client_cert` field (see [Catalog wiring](#catalog-wiring)).
+- **`optional` is not a gate.** With `mode: optional` nginx lets requests
+  without a certificate through; it's only useful when the backend itself
+  checks the certificate nginx forwards. Gated vhosts use `required`.
 - **Public TLS stays with Let's Encrypt.** Server certificates keep coming from
   `scripts/cert-renewer`. The private CA never signs a certificate a browser is
   expected to trust for a server.
@@ -35,9 +51,9 @@ has.
 
 | Threat | Does a client certificate help? |
 | --- | --- |
-| A leaked, reused, or guessed password | Yes. Without an enrolled device the TLS handshake fails before the login page loads. |
+| A leaked, reused, or guessed password | Yes. Without an enrolled device nginx rejects the request before the login page loads, so the password alone gets nowhere. |
 | Drive-by scanning and exploit attempts against admin endpoints | Yes. Unenrolled clients never reach the backend, so an unpatched admin app isn't exposed to the internet. |
-| A lost or stolen device | Only after it's revoked. Revoking its serial and publishing the CRL cuts it off. Until then, the certificate still works (the service's own login remains the other factor). |
+| A lost or stolen device | Only after it's revoked. Revoking its serial and publishing the CRL closes the device gate. Until then, the device passes it, and the service's own login is what still stands in the way. |
 | A compromised enrolled device (malware with access to the key) | No. The attacker holds a valid certificate. Revocation is the remedy once it's noticed. |
 | A compromised host that holds the CA key | No. Whoever holds the key can issue any certificate. Where the key lives, and how it's protected and backed up, is [#158](https://github.com/the-hcma/home-warden/issues/158). |
 | Someone reading the traffic | Not the client certificate's job. TLS already encrypts it, with the Let's Encrypt server certificate. |
