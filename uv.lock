@@ -429,7 +429,7 @@ requires-dist = [
     { name = "python-pam", specifier = ">=2.1.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "six", specifier = ">=1.17.0" },
-    { name = "tiny-pki", extras = ["cli"], git = "https://github.com/the-hcma/tiny-pki?rev=08378f20758b263201002ed76b97a9e99c7dcc2d" },
+    { name = "tiny-pki", extras = ["cli"], specifier = "==0.1.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.53.0" },
 ]
 
@@ -936,9 +936,13 @@ wheels = [
 [[package]]
 name = "tiny-pki"
 version = "0.1.0"
-source = { git = "https://github.com/the-hcma/tiny-pki?rev=08378f20758b263201002ed76b97a9e99c7dcc2d#08378f20758b263201002ed76b97a9e99c7dcc2d" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/14/b3/19f810b26fa7a3fbafc2abe7f0b71dc5ec0e8b29452b74c5fe39695613d8/tiny_pki-0.1.0.tar.gz", hash = "sha256:335d1df1686c2b3d9286ad83d7ff775a2474c6666c917b2e683aab21823d998d", size = 224184, upload-time = "2026-09-27T18:45:42.448Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a5/8d/70de2d54b0404201e6728eb05648d379605b9730361cda22aa053fc2a843/tiny_pki-0.1.0-py3-none-any.whl", hash = "sha256:d176f57a211788a66a16d7de36878c9800b0b9794c6e6c36b20dcc82f7ba4aa0", size = 67501, upload-time = "2026-09-27T18:45:40.982Z" },
 ]
 
 [package.optional-dependencies]

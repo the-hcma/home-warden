@@ -205,43 +205,13 @@ home-warden's first-party admin web UI ([#55](https://github.com/the-hcma/home-w
 
 home-warden's private CA issues mTLS client certificates only, never server certificates, which stay with Let's Encrypt. The certificate is the **first gate**: a gated vhost (`client_cert.mode: required`, the admin web UI first) rejects any device without one in nginx, before the request reaches the service, whose own login is the second gate. Purpose, threat model, scale, lifecycle, and non-goals: [docs/client-pki.md](./docs/client-pki.md). Epic: [#49](https://github.com/the-hcma/home-warden/issues/49).
 
----
+Client certificates for mTLS (the catalog's `client_cert` fields) come from a CA built on [the-hcma/tiny-pki](https://github.com/the-hcma/tiny-pki), pinned to its PyPI release in `pyproject.toml` (`tiny-pki[cli]==0.1.0`); bump the pin deliberately and rerun the validation below.
 
-## Private Client CA (tiny-pki)
-
-Client certificates for mTLS (the catalog's `client_cert` fields) come from
-a private CA built on [the-hcma/tiny-pki](https://github.com/the-hcma/tiny-pki)
-— see [#49](https://github.com/the-hcma/home-warden/issues/49) (the epic)
-and its sub-issues. `tiny-pki` has no release yet, so it is pinned to a
-commit on GitHub (`tiny-pki[cli] @ git+https://github.com/the-hcma/tiny-pki@<sha>`
-in `pyproject.toml`) until a released version can be pinned.
-
-- **Wrapper**: `scripts/client-pki` runs the `tiny-pki` CLI against
- home-warden's store (`HOME_WARDEN_PKI_STORE`, default `conf/pki`,
- gitignored like `conf/cloudflare.ini`); every verb passes through.
-- **What nginx reads**: the store's key-free `public/ca.crt` and
- `public/crl.pem` (`public/` is `0755`, its files `0644`; `ca/`, which
- holds the key, stays `0700`). `setup-service` binds `public/` as a
- directory into the nginx sandbox and watches it for reloads, so a
- revoke takes effect without a restart. Never point `client_cert` at `ca/`.
-- **Rotation**: `create client <cn> --keep-previous` issues a new cert
- while the old one stays valid; revoke the old serial once the device has
- the new bundle.
-- **Validation**: `tests/python/test_client_pki.py` drives the CLI (and
- the public `tiny_pki.store.CertificateStore` API) against a throwaway
- store. Store-level tests check the key-free `public/` directory, that
- concurrent `revoke`/`crl` runs never drop a revocation, the persisted CRL
- lifetime, strict flags, and CN validation. End-to-end tests run a
- throwaway unprivileged nginx with `ssl_verify_client on` + `ssl_crl` and
- check accept → revoke → reload → reject, rotation, and a catalog vhost's
- `allow_cn`. The end-to-end tests skip without nginx, but the
- `catalog-render-validate` CI job runs the file with
- `HOME_WARDEN_REQUIRE_NGINX=1` so a skip there fails.
-- **Gaps go upstream**: something `tiny-pki` should provide gets an issue
- in `the-hcma/tiny-pki` rather than a local workaround; gaps in
- home-warden itself get an issue here. #49's "Evaluation status" section
- is the live list of what's been verified, the open gaps, and which ones
- block landing.
+- **Wrapper**: `scripts/client-pki` runs the `tiny-pki` CLI against home-warden's store (`HOME_WARDEN_PKI_STORE`, default `conf/pki`, gitignored like `conf/cloudflare.ini`); every verb passes through.
+- **What nginx reads**: the store's key-free `public/ca.crt` and `public/crl.pem` (`public/` is `0755`, its files `0644`; `ca/`, which holds the key, stays `0700`). `setup-service` binds `public/` as a directory into the nginx sandbox and watches it for reloads, so a revoke takes effect without a restart. Never point `client_cert` at `ca/`.
+- **Rotation**: `create client <cn> --keep-previous` issues a new cert while the old one stays valid; revoke the old serial once the device has the new bundle.
+- **Validation**: `tests/python/test_client_pki.py` drives the CLI (and the public `tiny_pki.store.CertificateStore` API) against a throwaway store. Store-level tests check the key-free `public/` directory, that concurrent `revoke`/`crl` runs never drop a revocation, the persisted CRL lifetime, strict flags, and CN validation. End-to-end tests run a throwaway unprivileged nginx with `ssl_verify_client on` + `ssl_crl` and check accept → revoke → reload → reject, rotation, and a catalog vhost's `allow_cn`. The end-to-end tests skip without nginx, but the `catalog-render-validate` CI job runs the file with `HOME_WARDEN_REQUIRE_NGINX=1` so a skip there fails.
+- **Gaps go upstream**: something `tiny-pki` should provide gets an issue in `the-hcma/tiny-pki` rather than a local workaround; gaps in home-warden itself get an issue here, under #49.
 
 ---
 

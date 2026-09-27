@@ -74,7 +74,7 @@ def test_catalog_allow_cn_admits_only_listed_client(tmp_path: Path) -> None:
             }
         ]
     }
-    http_body = render_catalog(catalog, RenderContext(certs_live_dir=_live_dir(tmp_path, store)))
+    http_body = render_catalog(catalog, RenderContext(certs_live_dir=_live_dir(tmp_path, store), listen_ipv6=False))
 
     with _nginx(tmp_path, http_body) as port:
         assert _get(port, ca_cert, clients["alice"]) == 200
