@@ -25,13 +25,17 @@ for entry in entries if isinstance(entries, list) else [entries]:
 # enroll <cn> --password-file PATH [--legacy]: issue a first certificate for a
 # device and export it as a .p12 under the store's bundles/.
 client_pki_enroll() {
-  local cn legacy password_file
+  local cn legacy password_file previous
   client_pki_parse_device_args "enroll" "$@" || return
   cn="${client_pki_device_cn}"
   password_file="${client_pki_device_password_file}"
   legacy="${client_pki_device_legacy}"
 
-  if [[ -n "$(client_pki_active_serials "${cn}")" ]]; then
+  if ! previous="$(client_pki_active_serials "${cn}")"; then
+    echo "client-pki: could not list ${cn}'s certificates; nothing issued" >&2
+    return 1
+  fi
+  if [[ -n "${previous}" ]]; then
     echo "client-pki: ${cn} already has an active certificate; use 'client-pki rotate ${cn}' to replace it" >&2
     return 1
   fi
@@ -102,7 +106,10 @@ client_pki_rotate() {
   password_file="${client_pki_device_password_file}"
   legacy="${client_pki_device_legacy}"
 
-  previous="$(client_pki_active_serials "${cn}")"
+  if ! previous="$(client_pki_active_serials "${cn}")"; then
+    echo "client-pki: could not list ${cn}'s certificates; nothing issued" >&2
+    return 1
+  fi
   if [[ -z "${previous}" ]]; then
     echo "client-pki: ${cn} has no active certificate; use 'client-pki enroll ${cn}' instead" >&2
     return 1

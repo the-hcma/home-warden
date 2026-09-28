@@ -41,6 +41,22 @@ def test_enroll_refuses_a_device_that_already_has_a_certificate(tmp_path: Path) 
     assert _active_serials(tmp_path, store, "alice-phone") == before, "a second enroll must not revoke the first"
 
 
+def test_enroll_refuses_when_it_cannot_list_the_device(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    password = _password(tmp_path)
+    _ok(_client_pki(tmp_path, store, "enroll", "alice-phone", "--password-file", str(password)))
+    before = _active_serials(tmp_path, store, "alice-phone")
+    broken = tmp_path / "broken-bin"
+    broken.mkdir()
+    (broken / "python3").write_text("#!/bin/sh\nexit 1\n")
+    (broken / "python3").chmod(0o755)
+    path = f"{broken}:{os.environ['PATH']}"
+    result = _client_pki(tmp_path, store, "enroll", "alice-phone", "--password-file", str(password), path=path)
+    assert result.returncode == 1
+    assert "could not list alice-phone's certificates" in result.stderr
+    assert _active_serials(tmp_path, store, "alice-phone") == before, "a failed listing must not revoke the device"
+
+
 def test_enroll_refuses_a_loose_password_file(tmp_path: Path) -> None:
     store = _init_store(tmp_path)
     password = _password(tmp_path)
@@ -123,10 +139,14 @@ def _active_serials(tmp_path: Path, store: Path, cn: str) -> list[str]:
     return sorted(e["serial"] for e in entries if e["cn"] == cn and e["status"] == "active")
 
 
-def _client_pki(tmp_path: Path, store: Path, *args: str, guard: bool = False) -> subprocess.CompletedProcess[str]:
+def _client_pki(
+    tmp_path: Path, store: Path, *args: str, guard: bool = False, path: str | None = None
+) -> subprocess.CompletedProcess[str]:
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     env = {**os.environ, "HOME": str(home), "HOME_WARDEN_PKI_STORE": str(store)}
+    if path is not None:
+        env["PATH"] = path
     env.pop("HOME_WARDEN_SKIP_HOST_GUARD", None)
     if not guard:
         env["HOME_WARDEN_SKIP_HOST_GUARD"] = "1"
