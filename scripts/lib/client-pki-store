@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# scripts/lib/client-pki-store — permission check, encrypted backup, and
+# restore for home-warden's private client-certificate CA store (tiny-pki).
+# Sourced by scripts/client-pki. See docs/client-pki.md and
+# the-hcma/home-warden#158.
+#
+# Layout tiny-pki writes, which the permission check holds it to: the store
+# root and every directory except public/ are 0700, keys, bundles, index.json
+# and the lock are 0600, certificates and CRLs are 0644, and only public/
+# (0755) is meant to be traversed by anyone else — nginx, through a bind of
+# that one directory. Nothing may be writable by group or other.
+#
+# Backups are a tar of the whole store, encrypted with `gpg --symmetric`
+# (AES-256) using a passphrase read from a file, taken under a shared flock
+# on ca/.lock so no tiny-pki writer is mid-update.
+
+client_pki_lock_timeout_sec="${CLIENT_PKI_LOCK_TIMEOUT_SEC:-30}"
+readonly client_pki_lock_timeout_sec
+
+# Back up <store> to <out> (must not exist), encrypted with the passphrase in
+# <passphrase_file>, then decrypt and list the archive to prove it restores.
+client_pki_backup() {
+  local -r store_dir="$1"
+  local -r out="$2"
+  local -r passphrase_file="$3"
+  local members
+
+  client_pki_require_ca "${store_dir}" || return 1
+  client_pki_require_private_file "${passphrase_file}" "passphrase file" || return 1
+  if [[ -e "${out}" ]]; then
+    echo "client-pki: refusing to overwrite ${out}; choose a new --out path" >&2
+    return 1
+  fi
+
+  (
+    umask 077
+    flock --shared --timeout "${client_pki_lock_timeout_sec}" "${store_dir}/ca/.lock" \
+      tar --create --file - --directory "${store_dir}" --exclude ./ca/.lock . \
+      | gpg --batch --quiet --no-symkey-cache --pinentry-mode loopback \
+        --passphrase-file "${passphrase_file}" --symmetric --cipher-algo AES256 --output "${out}"
+  ) || {
+    rm -f -- "${out}"
+    echo "client-pki: backup failed; nothing written to ${out}" >&2
+    return 1
+  }
+
+  if ! members="$(client_pki_decrypt "${out}" "${passphrase_file}" | tar --list --file - | wc -l)"; then
+    echo "client-pki: wrote ${out} but could not decrypt it again; do not rely on it" >&2
+    return 1
+  fi
+  echo "client-pki: backed up ${store_dir} to ${out} (${members} entries, verified)"
+}
+
+# Refuse unless every path in <store> matches the layout above and belongs to
+# the current user. Missing store: nothing to check.
+client_pki_check_store_permissions() {
+  local -r store_dir="$1"
+  local uid problems
+
+  [[ -d "${store_dir}" ]] || return 0
+  uid="$(id -u)"
+  problems="$(
+    find "${store_dir}" \( -type d -o -type f \) -printf '%U %m %y %P\n' \
+      | awk -v uid="${uid}" -v store="${store_dir}" '
+        {
+          owner = $1; mode = $2; type = $3
+          path = substr($0, length($1 $2 $3) + 4)
+          shown = store "/" (path == "" ? "." : path)
+          if (owner != uid) { print "not owned by you: " shown; next }
+          group_other = substr(sprintf("%04d", mode), 3, 2)
+          public = (path == "public" || path ~ /^public\//)
+          secret = (path ~ /\.key$/ || path == "ca/index.json" || path == "ca/.lock" || path ~ /^bundles\//)
+          if (group_other ~ /[2367]/) {
+            print "writable by group/other (mode " mode "): " shown
+          } else if (group_other != "00" && ((type == "d" && !public) || secret)) {
+            print "accessible by group/other (mode " mode "): " shown
+          }
+        }'
+  )"
+  if [[ -n "${problems}" ]]; then
+    echo "client-pki: refusing to use ${store_dir}: its permissions are looser than tiny-pki's layout" >&2
+    sed 's/^/  /' <<<"${problems}" >&2
+    echo "client-pki: fix them (e.g. chmod go-rwx on the paths above) before running client-pki again" >&2
+    return 1
+  fi
+}
+
+client_pki_decrypt() {
+  local -r archive="$1"
+  local -r passphrase_file="$2"
+  gpg --batch --quiet --no-symkey-cache --pinentry-mode loopback \
+    --passphrase-file "${passphrase_file}" --decrypt "${archive}"
+}
+
+client_pki_key_matches_cert() {
+  local -r ca_dir="$1"
+  local cert_pub key_pub
+
+  cert_pub="$(openssl x509 -in "${ca_dir}/ca.crt" -noout -pubkey 2>/dev/null)" || return 1
+  key_pub="$(openssl pkey -in "${ca_dir}/ca.key" -pubout 2>/dev/null)" || return 1
+  if [[ -z "${cert_pub}" || "${cert_pub}" != "${key_pub}" ]]; then
+    echo "client-pki: ca/ca.key does not match ca/ca.crt" >&2
+    return 1
+  fi
+}
+
+client_pki_require_ca() {
+  local -r store_dir="$1"
+  if [[ ! -f "${store_dir}/ca/ca.key" || ! -f "${store_dir}/ca/ca.crt" ]]; then
+    echo "client-pki: no CA in ${store_dir} (expected ca/ca.crt and ca/ca.key)" >&2
+    return 1
+  fi
+}
+
+# A secret input (passphrase file) must exist and be readable by its owner only.
+client_pki_require_private_file() {
+  local -r path="$1"
+  local -r what="$2"
+  local mode
+
+  if [[ ! -f "${path}" || ! -r "${path}" ]]; then
+    echo "client-pki: ${what} ${path} is missing or unreadable" >&2
+    return 1
+  fi
+  mode="$(stat --format '%a' "${path}")"
+  if [[ "${mode: -2}" != "00" ]]; then
+    echo "client-pki: ${what} ${path} is readable by group/other (mode ${mode}); chmod 600 it" >&2
+    return 1
+  fi
+}
+
+# Restore <archive> into <store>, which must not hold a CA already. Extracts
+# into a private sibling directory, checks the CA key matches its
+# certificate, then moves it into place.
+client_pki_restore() {
+  local -r store_dir="$1"
+  local -r archive="$2"
+  local -r passphrase_file="$3"
+  local parent staging
+
+  client_pki_require_private_file "${passphrase_file}" "passphrase file" || return 1
+  if [[ ! -f "${archive}" ]]; then
+    echo "client-pki: backup ${archive} not found" >&2
+    return 1
+  fi
+  if [[ -e "${store_dir}" ]] && [[ -n "$(ls -A -- "${store_dir}")" ]]; then
+    echo "client-pki: refusing to restore over ${store_dir}, which is not empty; move it aside first" >&2
+    return 1
+  fi
+
+  parent="$(dirname -- "${store_dir}")"
+  mkdir -p -- "${parent}"
+  staging="$(mktemp --directory "${parent}/.client-pki-restore.XXXXXX")"
+  chmod 700 "${staging}"
+  if ! client_pki_decrypt "${archive}" "${passphrase_file}" \
+    | tar --extract --file - --directory "${staging}" --preserve-permissions --no-same-owner; then
+    rm -rf -- "${staging}"
+    echo "client-pki: could not decrypt or unpack ${archive} (wrong passphrase?)" >&2
+    return 1
+  fi
+  if ! client_pki_require_ca "${staging}" || ! client_pki_key_matches_cert "${staging}/ca"; then
+    rm -rf -- "${staging}"
+    echo "client-pki: ${archive} does not hold a usable CA; nothing restored" >&2
+    return 1
+  fi
+  if ! client_pki_check_store_permissions "${staging}"; then
+    rm -rf -- "${staging}"
+    return 1
+  fi
+
+  [[ -d "${store_dir}" ]] && rmdir -- "${store_dir}"
+  mv -- "${staging}" "${store_dir}"
+  echo "client-pki: restored ${archive} into ${store_dir}"
+}
