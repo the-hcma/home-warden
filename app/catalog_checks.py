@@ -375,7 +375,8 @@ def check_client_cert(name: str, service: dict, *, ca_alert_days: int, crl_alert
     if error:
         return CheckResult(name, "client_cert", "fail", error)
     for ca in cas:
-        if not any(crl.issuer == ca.subject for crl in crls):
+        # By signature, not just issuer name: a rotated CA may reuse the old one's DN.
+        if not any(crl.issuer == ca.subject and _crl_signed_by(crl, ca) for crl in crls):
             problems.append(f"no CRL for CA {ca.subject.rfc4514_string()} (nginx rejects its clients)")
     for crl in crls:
         issuer = crl.issuer.rfc4514_string()

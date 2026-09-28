@@ -184,6 +184,16 @@ def test_transition_bundle_needs_a_crl_for_every_ca(tmp_path: Path) -> None:
     assert both == CheckResult("svc", "client_cert", "ok", "2 CA(s), 2 CRL(s) valid")
 
 
+def test_transition_bundle_with_a_reused_ca_name_needs_both_crls(tmp_path: Path) -> None:
+    old, new = _Ca("Home client CA"), _Ca("Home client CA")
+    result = _check(_service(tmp_path, old.cert_pem() + new.cert_pem(), old.crl_pem()))
+    assert result.status == "fail"
+    assert "no CRL for CA CN=Home client CA" in result.detail
+
+    both = _check(_service(tmp_path, old.cert_pem() + new.cert_pem(), old.crl_pem() + new.crl_pem()))
+    assert both == CheckResult("svc", "client_cert", "ok", "2 CA(s), 2 CRL(s) valid")
+
+
 def test_unparseable_crl_fails(tmp_path: Path) -> None:
     ca = _Ca("Home client CA")
     result = _check(_service(tmp_path, ca.cert_pem(), b"not a crl\n"))
