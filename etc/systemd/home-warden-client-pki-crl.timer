@@ -1,0 +1,17 @@
+# Daily timer for home-warden-client-pki-crl.service (home-warden#160).
+# Template: etc/systemd/home-warden-client-pki-crl.timer — expanded by scripts/setup-service.
+#
+# tiny-pki's CRLs last 30 days by default, so a daily re-sign leaves weeks of
+# margin; the client_cert health check alerts if it stops happening.
+
+[Unit]
+Description=home-warden client CA CRL refresh — daily schedule
+Documentation=https://github.com/the-hcma/home-warden/blob/main/docs/client-pki.md
+
+[Timer]
+OnCalendar=*-*-* 04:45:00
+Persistent=true
+Unit=home-warden-client-pki-crl.service
+
+[Install]
+WantedBy=timers.target

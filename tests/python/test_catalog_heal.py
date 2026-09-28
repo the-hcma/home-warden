@@ -78,6 +78,12 @@ def test_ok_and_skip_checks_pass_through_unchanged(tmp_path: Path) -> None:
     ]
 
 
+def test_client_cert_failure_is_alert_only_never_heals(tmp_path: Path) -> None:
+    check = CheckResult("svc", "client_cert", "fail", "CRL expired")
+    results = _heal([check], apply_cert=True, apply_dns=True, state_path=tmp_path / "state.json")
+    assert results == [HealStepResult("svc", "client_cert", "alert-only", "CRL expired")]
+
+
 def test_local_dns_failure_is_alert_only_never_heals(tmp_path: Path) -> None:
     results = _heal([LOCAL_DNS_FAIL], apply_cert=True, apply_dns=True, state_path=tmp_path / "state.json")
     assert results == [HealStepResult("svc", "local_dns", "alert-only", "no local record")]

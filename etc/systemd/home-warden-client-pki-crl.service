@@ -1,0 +1,32 @@
+# Oneshot: re-sign the client CA's CRL before it expires (home-warden#160).
+# Template: etc/systemd/home-warden-client-pki-crl.service — expanded by scripts/setup-service.
+#
+# No [Install] — activated only by home-warden-client-pki-crl.timer (or manual
+# `systemctl start home-warden-client-pki-crl.service`).
+#
+# nginx rejects every client certificate once the CRL it loads expires. The
+# republished public/crl.pem triggers home-warden-reload.path's watch on that
+# directory, so this unit reloads nothing itself.
+
+[Unit]
+Description=home-warden client CA CRL refresh (oneshot)
+Documentation=https://github.com/the-hcma/home-warden/blob/main/docs/client-pki.md
+
+[Service]
+Type=oneshot
+User=@@OWNER@@
+Group=@@OWNER@@
+WorkingDirectory=@@REPO_DIR@@
+# @@HOME_DIR@@/.local/bin first: the astral.sh uv installer's default per-user
+# install location; scripts/client-pki runs tiny-pki through uv.
+Environment=PATH=@@HOME_DIR@@/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# %h resolves to the service *manager's* home (root, in system scope) not
+# @@OWNER@@'s — set it explicitly so scripts/lib/host-guard finds the pin
+# under the operator's ~/.config, not /root/.config.
+Environment=HOME=@@HOME_DIR@@
+Environment=HOME_WARDEN_PKI_STORE=@@CLIENT_PKI_STORE@@
+ExecStart=@@REPO_DIR@@/scripts/client-pki crl
+TimeoutStartSec=10min
+TimeoutStopSec=2min
+StandardOutput=append:@@SCRATCH_DIR@@/client-pki-crl.log
+StandardError=append:@@SCRATCH_DIR@@/client-pki-crl.log

@@ -69,6 +69,19 @@ def alert_days() -> int:
     return int(os.environ.get("ALERT_DAYS", "10"))
 
 
+def client_ca_alert_days() -> int:
+    """Days before the client CA expires to start alerting (#160): long
+    enough to run a CA rotation, which means re-enrolling every device."""
+    return int(os.environ.get("CLIENT_CA_ALERT_DAYS", "60"))
+
+
+def client_crl_alert_days() -> int:
+    """Days before the published client CRL expires to start alerting
+    (#160). The refresh timer re-signs it daily, so an alert means the timer
+    has been failing for most of the CRL's lifetime."""
+    return int(os.environ.get("CLIENT_CRL_ALERT_DAYS", "7"))
+
+
 def timeout_seconds() -> float:
     return float(os.environ.get("CATALOG_HEALTH_TIMEOUT_SEC", "5"))
 
