@@ -125,7 +125,7 @@ Every command below runs on the designated host. `scripts/client-pki` refuses an
 
 ### Bundle passwords
 
-A `.p12` bundle is protected by a password of at least 16 characters, read from a file readable only by you (`chmod 600`), never from the command line. Use a fresh random password per bundle, for example `openssl rand -base64 18 >~/.config/home-warden/alice-phone.pass`, and delete the file once the device has imported the bundle.
+A `.p12` bundle is protected by a password of at least 16 characters, read from a file readable only by you (`chmod 600`), never from the command line. Use a fresh random password per bundle, for example `(umask 077; openssl rand -base64 18 >~/.config/home-warden/alice-phone.pass)` (the `umask` makes it `0600` from the start), and delete the file once the device has imported the bundle.
 
 ### Enroll a new device
 
