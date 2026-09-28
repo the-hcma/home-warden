@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# scripts/lib/client-pki-devices — the operator's device workflow on top of
+# the tiny-pki CLI: enroll a device (issue + export a PKCS#12 bundle) and
+# rotate its certificate without cutting it off. Sourced by
+# scripts/client-pki, which defines client_pki_tiny_pki (tiny-pki pinned to
+# the store). See docs/client-pki.md and the-hcma/home-warden#159.
+#
+# tiny-pki's plain `create client <cn>` revokes the CN's current certificate
+# at once, so enroll refuses a CN that already has one and rotate always
+# passes --keep-previous.
+
+# Print the serials of <cn>'s active client certificates, one per line.
+client_pki_active_serials() {
+  local -r cn="$1"
+  client_pki_tiny_pki list clients --json | python3 -c '
+import json, sys
+cn = sys.argv[1]
+entries = json.load(sys.stdin)
+for entry in entries if isinstance(entries, list) else [entries]:
+    if entry.get("cn") == cn and entry.get("status") == "active":
+        print(entry["serial"])
+' "${cn}"
+}
+
+# enroll <cn> --password-file PATH [--legacy]: issue a first certificate for a
+# device and export it as a .p12 under the store's bundles/.
+client_pki_enroll() {
+  local cn legacy password_file
+  client_pki_parse_device_args "enroll" "$@" || return
+  cn="${client_pki_device_cn}"
+  password_file="${client_pki_device_password_file}"
+  legacy="${client_pki_device_legacy}"
+
+  if [[ -n "$(client_pki_active_serials "${cn}")" ]]; then
+    echo "client-pki: ${cn} already has an active certificate; use 'client-pki rotate ${cn}' to replace it" >&2
+    return 1
+  fi
+  client_pki_tiny_pki create client "${cn}" || return
+  client_pki_export_bundle "${cn}" "${password_file}" "${legacy}"
+}
+
+client_pki_export_bundle() {
+  local -r cn="$1"
+  local -r password_file="$2"
+  local -r legacy="$3"
+  local -a extra=()
+
+  if ((legacy)); then
+    extra=(--legacy)
+  fi
+  client_pki_tiny_pki export p12 "${cn}" --password-file "${password_file}" "${extra[@]}" || return
+  echo "client-pki: send the .p12 and its password to the device separately; delete the .p12 once it's installed"
+}
+
+# Parse `<cn> --password-file PATH [--legacy]` into client_pki_device_*.
+client_pki_parse_device_args() {
+  local -r device_verb="$1"
+  shift
+  client_pki_device_cn=""
+  client_pki_device_password_file=""
+  client_pki_device_legacy=0
+
+  while (($# > 0)); do
+    case "$1" in
+      --legacy)
+        client_pki_device_legacy=1
+        shift
+        ;;
+      --password-file)
+        if (($# < 2)); then
+          break
+        fi
+        client_pki_device_password_file="$2"
+        shift 2
+        ;;
+      -*)
+        break
+        ;;
+      *)
+        if [[ -n "${client_pki_device_cn}" ]]; then
+          break
+        fi
+        client_pki_device_cn="$1"
+        shift
+        ;;
+    esac
+  done
+  if (($# > 0)) || [[ -z "${client_pki_device_cn}" || -z "${client_pki_device_password_file}" ]]; then
+    echo "usage: client-pki ${device_verb} <cn> --password-file PATH [--legacy]" >&2
+    return 2
+  fi
+  client_pki_require_private_file "${client_pki_device_password_file}" "password file"
+}
+
+# rotate <cn> --password-file PATH [--legacy]: issue a replacement while the
+# current certificate stays valid, export it, and print the serials to revoke
+# once the device has the new bundle.
+client_pki_rotate() {
+  local cn legacy password_file previous serial
+  client_pki_parse_device_args "rotate" "$@" || return
+  cn="${client_pki_device_cn}"
+  password_file="${client_pki_device_password_file}"
+  legacy="${client_pki_device_legacy}"
+
+  previous="$(client_pki_active_serials "${cn}")"
+  if [[ -z "${previous}" ]]; then
+    echo "client-pki: ${cn} has no active certificate; use 'client-pki enroll ${cn}' instead" >&2
+    return 1
+  fi
+  client_pki_tiny_pki create client "${cn}" --keep-previous >/dev/null || return
+  client_pki_export_bundle "${cn}" "${password_file}" "${legacy}" || return
+  echo "client-pki: once the device has the new bundle, revoke the previous certificate:"
+  for serial in ${previous}; do
+    echo "  ./scripts/client-pki revoke 0x${serial}"
+  done
+}

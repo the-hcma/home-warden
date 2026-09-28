@@ -7,7 +7,9 @@
 #
 # Before any command, refuses a store whose permissions are looser than
 # tiny-pki's layout (everything but public/ private to you), so a CA key made
-# readable by accident is caught instead of used.
+# readable by accident is caught instead of used. Anything but a read-only
+# verb (list, show, check, inspect, help, completion, --version) is
+# host-guarded: it runs only on the designated host (scripts/lib/host-guard).
 #
 # Env:
 #   HOME_WARDEN_PKI_STORE  CA store directory (default: conf/pki in this repo;
@@ -19,11 +21,11 @@
 #
 # Usage:
 #   ./scripts/client-pki init --cn "Home client CA"
-#   ./scripts/client-pki create client alice
-#   ./scripts/client-pki export p12 alice --password-file PATH
-#   ./scripts/client-pki create client alice --keep-previous   # rotate
+#   ./scripts/client-pki enroll alice-phone --password-file PATH [--legacy]
+#   ./scripts/client-pki rotate alice-phone --password-file PATH [--legacy]
 #   ./scripts/client-pki revoke 0x<old serial>                 # once rotated
-#   ./scripts/client-pki revoke alice
+#   ./scripts/client-pki revoke alice-phone
+#   ./scripts/client-pki list clients
 #   ./scripts/client-pki check --quiet
 #   ./scripts/client-pki backup --out PATH --passphrase-file PATH
 #   ./scripts/client-pki restore --in PATH --passphrase-file PATH
@@ -35,8 +37,23 @@ readonly repo_dir
 store="${HOME_WARDEN_PKI_STORE:-${repo_dir}/conf/pki}"
 readonly store
 
+# shellcheck source=scripts/lib/client-pki-devices
+source "${repo_dir}/scripts/lib/client-pki-devices"
 # shellcheck source=scripts/lib/client-pki-store
 source "${repo_dir}/scripts/lib/client-pki-store"
+# shellcheck source=scripts/lib/host-guard
+source "${repo_dir}/scripts/lib/host-guard"
+
+client_pki_tiny_pki() {
+  uv run --project "${repo_dir}" tiny-pki --store "${store}" "$@"
+}
+
+is_read_only_verb() {
+  case "$1" in
+    check | completion | help | inspect | list | show | --help | -h | --version) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 usage_backup_restore() {
   echo "usage: client-pki backup --out PATH --passphrase-file PATH" >&2
@@ -77,7 +94,14 @@ run_backup_or_restore() {
   fi
 }
 
-case "${1:-}" in
+requested_verb="${1:-}"
+readonly requested_verb
+
+if ! is_read_only_verb "${requested_verb}" && ! hw_host_guard_enforce "client-pki"; then
+  exit 1
+fi
+
+case "${requested_verb}" in
   backup | restore)
     run_backup_or_restore "$@"
     exit
@@ -91,4 +115,16 @@ fi
 
 client_pki_check_store_permissions "${store}"
 
-exec uv run --project "${repo_dir}" tiny-pki --store "${store}" "$@"
+case "${requested_verb}" in
+  enroll)
+    shift
+    client_pki_enroll "$@"
+    ;;
+  rotate)
+    shift
+    client_pki_rotate "$@"
+    ;;
+  *)
+    exec uv run --project "${repo_dir}" tiny-pki --store "${store}" "$@"
+    ;;
+esac

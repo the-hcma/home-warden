@@ -229,7 +229,13 @@ def _client_pki(
 ) -> subprocess.CompletedProcess[str]:
     gnupg = tmp_path / "gnupg"
     gnupg.mkdir(mode=0o700, exist_ok=True)
-    env = {**os.environ, "GNUPGHOME": str(gnupg), "HOME_WARDEN_PKI_STORE": str(store), **(extra_env or {})}
+    env = {
+        **os.environ,
+        "GNUPGHOME": str(gnupg),
+        "HOME_WARDEN_PKI_STORE": str(store),
+        "HOME_WARDEN_SKIP_HOST_GUARD": "1",
+        **(extra_env or {}),
+    }
     return subprocess.run([str(CLIENT_PKI), *args], capture_output=True, env=env, text=True, timeout=120)
 
 

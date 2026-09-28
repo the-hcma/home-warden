@@ -42,7 +42,7 @@ This is a **household CA**: a handful of personal devices (phones, tablets, lapt
 | Stage | What happens | Tracked in |
 | --- | --- | --- |
 | CA setup | Create the CA once on the designated host, keep its key private, back it up encrypted, and rotate the CA itself before it expires. See [Running the CA](#running-the-ca). | [#158](https://github.com/the-hcma/home-warden/issues/158) |
-| Enroll | Issue a certificate for a new device and export it as a `.p12`. | [#159](https://github.com/the-hcma/home-warden/issues/159) |
+| Enroll | Issue a certificate for a new device and export it as a `.p12`. See [Managing devices](#managing-devices). | [#159](https://github.com/the-hcma/home-warden/issues/159) |
 | Rotate | Issue a replacement while the old certificate keeps working, install it on the device, then revoke the old serial. | [#159](https://github.com/the-hcma/home-warden/issues/159) |
 | Revoke | Revoke a lost or retired device's serial and publish a new CRL; nginx reloads automatically when the CRL changes. | [#159](https://github.com/the-hcma/home-warden/issues/159) |
 | Keep the CRL fresh | Republish the CRL on a timer before it expires (an expired CRL makes nginx reject every client), and alert on CA or CRL expiry. | [#160](https://github.com/the-hcma/home-warden/issues/160) |
@@ -118,6 +118,65 @@ Rotating to a new CA without locking any device out:
 5. **Drop the old CA** once every device has moved: point the entries back at the new store's `public/ca.crt` and `public/crl.pem`, rerun `./scripts/setup-service`, and retire the old store, keeping its last backup.
 
 `tests/python/test_client_pki.py` runs this procedure against real nginx: both CAs' clients are accepted during the window, a revocation in the old CA takes effect, and dropping the old CA cuts off its clients.
+
+## Managing devices
+
+Every command below runs on the designated host. `scripts/client-pki` refuses any command that changes the store (`init`, `create`, `enroll`, `rotate`, `revoke`, `crl`, `renew-crl`, `delete`, `export`, `backup`, `restore`) on any other machine; read-only commands (`list`, `show`, `inspect`, `check`) run anywhere. One certificate per device, named after the device, for example `alice-phone`: revoking it then cuts off exactly that device.
+
+### Bundle passwords
+
+A `.p12` bundle is protected by a password of at least 16 characters, read from a file readable only by you (`chmod 600`), never from the command line. Use a fresh random password per bundle, for example `openssl rand -base64 18 >~/.config/home-warden/alice-phone.pass`, and delete the file once the device has imported the bundle.
+
+### Enroll a new device
+
+```bash
+./scripts/client-pki enroll alice-phone --password-file ~/.config/home-warden/alice-phone.pass
+```
+
+That issues the certificate and writes `conf/pki/bundles/alice-phone-<serial>.p12` (`0600`). `enroll` refuses a name that already has an active certificate, so it never silently revokes a working device; use `rotate` for that.
+
+**Deliver the bundle and its password separately**: for example the `.p12` over AirDrop or a USB cable, and the password read out or sent over a different channel. Anyone with both can impersonate the device until you revoke it. Delete the `.p12` from the store and from wherever you copied it once the device has imported it; the store keeps the certificate and key, so you can export it again with `./scripts/client-pki export p12 alice-phone --password-file ...`.
+
+### Install on the device
+
+- **iOS / iPadOS**: open the `.p12` (Files, AirDrop, or Mail), then Settings → Profile Downloaded → Install, and enter the bundle password. Safari offers the certificate when a gated site asks for one.
+- **Android**: Settings → Security → Encryption & credentials → Install a certificate → VPN & app user certificate (the menu names vary by vendor), pick the `.p12`, and enter the password. Chrome prompts for the certificate on first visit.
+- **macOS**: double-click the `.p12` to add it to the login keychain. Safari and Chrome use the keychain; Firefox has its own store (Settings → Privacy & Security → Certificates → Your Certificates → Import).
+- **Windows / Linux desktops**: import into the browser's certificate store (Chrome on Windows uses the Windows store; Firefox and Chrome on Linux use their own).
+
+Modern devices take the default AES-256 bundle. Only an old device that rejects it (typically Android before 12, macOS before 10.15, or an old Java/Windows keystore) needs `--legacy`, which uses 3DES/SHA-1: weaker encryption for the bundle file itself, so keep the password strong and delete the file promptly.
+
+```bash
+./scripts/client-pki enroll old-tablet --password-file ~/.config/home-warden/old-tablet.pass --legacy
+```
+
+### Rotate a device's certificate
+
+Before a certificate expires (`./scripts/client-pki check --kind client --quiet` lists expiring ones), or whenever you want to replace it:
+
+```bash
+./scripts/client-pki rotate alice-phone --password-file ~/.config/home-warden/alice-phone.pass
+```
+
+That issues a new certificate while the old one keeps working, exports the new bundle, and prints the `revoke` command for each previous serial. Install the new bundle on the device, check it reaches a gated site, then run the printed command, for example `./scripts/client-pki revoke 0x1a2b...`. Until you do, both certificates work.
+
+### Revoke a lost or retired device
+
+```bash
+./scripts/client-pki revoke alice-phone
+```
+
+That revokes the device's certificate and republishes `public/crl.pem`; nginx reloads when the file changes, so the device is rejected within seconds. If the name has two live certificates (mid-rotation), tiny-pki refuses the name and lists both serials: revoke each with `revoke 0x<serial>`. `--dry-run` previews either form. Take a new backup afterwards, since an old backup restores the old revocation list.
+
+### Inventory
+
+```bash
+./scripts/client-pki list clients
+./scripts/client-pki list revoked
+./scripts/client-pki show alice-phone
+```
+
+`list clients --json` gives the same inventory in a machine-readable form.
 
 ## Catalog wiring
 

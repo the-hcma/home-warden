@@ -31,7 +31,7 @@ def test_missing_uv_fails_with_a_hint(tmp_path: Path) -> None:
     bin_dir.mkdir()
     for tool in ("bash", "dirname"):
         (bin_dir / tool).symlink_to(shutil.which(tool) or f"/usr/bin/{tool}")
-    env = {"HOME_WARDEN_PKI_STORE": str(tmp_path / "pki"), "PATH": str(bin_dir)}
+    env = {"HOME": str(tmp_path), "HOME_WARDEN_PKI_STORE": str(tmp_path / "pki"), "PATH": str(bin_dir)}
     result = subprocess.run([str(CLIENT_PKI), "list"], capture_output=True, env=env, text=True, timeout=30)
     assert result.returncode == 1
     assert "install uv" in result.stderr
@@ -39,7 +39,7 @@ def test_missing_uv_fails_with_a_hint(tmp_path: Path) -> None:
 
 def test_real_wrapper_creates_and_reads_the_selected_store(tmp_path: Path) -> None:
     store = tmp_path / "pki"
-    env = {**os.environ, "HOME_WARDEN_PKI_STORE": str(store)}
+    env = {**os.environ, "HOME_WARDEN_PKI_STORE": str(store), "HOME_WARDEN_SKIP_HOST_GUARD": "1"}
     for args in (["init", "--cn", "wrapper test CA", "--key-size", "2048"], ["create", "client", "alice"]):
         result = subprocess.run([str(CLIENT_PKI), *args], capture_output=True, env=env, text=True, timeout=120)
         assert result.returncode == 0, result.stdout + result.stderr
@@ -66,6 +66,7 @@ def _stub_uv_argv(tmp_path: Path, overrides: dict[str, str], *args: str) -> list
     uv.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$@" >"{record}"\n')
     uv.chmod(0o755)
     env = {k: v for k, v in os.environ.items() if k != "HOME_WARDEN_PKI_STORE"}
+    env["HOME_WARDEN_SKIP_HOST_GUARD"] = "1"
     env.update(overrides)
     env["PATH"] = f"{stubs}{os.pathsep}{os.environ['PATH']}"
     result = subprocess.run([str(CLIENT_PKI), *args], capture_output=True, env=env, text=True, timeout=30)
