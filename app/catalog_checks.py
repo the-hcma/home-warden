@@ -342,7 +342,8 @@ def check_client_cert(name: str, service: dict, *, ca_alert_days: int, crl_alert
     `ca_bundle` and every CRL in `crl`, since a CA rotation's transition
     files hold two of each. nginx rejects every client once a CRL expires,
     and rejects a client whose CA has no CRL in `ssl_crl` at all, so both
-    count as failures, not just an expiring CA.
+    count as failures, not just an expiring CA. An entry with no `crl` at
+    all fails too: nginx then accepts a revoked certificate.
     """
     client_cert = service.get("client_cert") or {}
     if client_cert.get("mode", "off") == "off":
@@ -366,33 +367,34 @@ def check_client_cert(name: str, service: dict, *, ca_alert_days: int, crl_alert
             problems.append(f"CA {subject} expires within {ca_alert_days}d (notAfter={not_after.isoformat()})")
 
     crl_path = client_cert.get("crl")
-    summary = f"{len(cas)} CA(s)"
-    if crl_path:
-        crls, error = _load_client_pki_file(Path(crl_path), _load_pem_crls)
-        if error:
-            return CheckResult(name, "client_cert", "fail", error)
-        summary += f", {len(crls)} CRL(s)"
-        for ca in cas:
-            if not any(crl.issuer == ca.subject for crl in crls):
-                problems.append(f"no CRL for CA {ca.subject.rfc4514_string()} (nginx rejects its clients)")
-        for crl in crls:
-            issuer = crl.issuer.rfc4514_string()
-            signers = [ca for ca in cas if ca.subject == crl.issuer]
-            if not any(_crl_signed_by(crl, ca) for ca in signers):
-                problems.append(f"CRL from {issuer} isn't signed by a CA in {ca_path}")
-            next_update = crl.next_update_utc
-            if next_update is None:
-                problems.append(f"CRL from {issuer} has no nextUpdate")
-            elif next_update <= now:
-                problems.append(f"CRL from {issuer} expired (nextUpdate={next_update.isoformat()})")
-            elif next_update - now < datetime.timedelta(days=crl_alert_days):
-                problems.append(
-                    f"CRL from {issuer} expires within {crl_alert_days}d (nextUpdate={next_update.isoformat()})"
-                )
+    if not crl_path:
+        return CheckResult(
+            name, "client_cert", "fail", "client_cert.crl is not set, so nginx accepts revoked certificates"
+        )
+    crls, error = _load_client_pki_file(Path(crl_path), _load_pem_crls)
+    if error:
+        return CheckResult(name, "client_cert", "fail", error)
+    for ca in cas:
+        if not any(crl.issuer == ca.subject for crl in crls):
+            problems.append(f"no CRL for CA {ca.subject.rfc4514_string()} (nginx rejects its clients)")
+    for crl in crls:
+        issuer = crl.issuer.rfc4514_string()
+        signers = [ca for ca in cas if ca.subject == crl.issuer]
+        if not any(_crl_signed_by(crl, ca) for ca in signers):
+            problems.append(f"CRL from {issuer} isn't signed by a CA in {ca_path}")
+        next_update = crl.next_update_utc
+        if next_update is None:
+            problems.append(f"CRL from {issuer} has no nextUpdate")
+        elif next_update <= now:
+            problems.append(f"CRL from {issuer} expired (nextUpdate={next_update.isoformat()})")
+        elif next_update - now < datetime.timedelta(days=crl_alert_days):
+            problems.append(
+                f"CRL from {issuer} expires within {crl_alert_days}d (nextUpdate={next_update.isoformat()})"
+            )
 
     if problems:
         return CheckResult(name, "client_cert", "fail", "; ".join(problems))
-    return CheckResult(name, "client_cert", "ok", f"{summary} valid")
+    return CheckResult(name, "client_cert", "ok", f"{len(cas)} CA(s), {len(crls)} CRL(s) valid")
 
 
 def check_dns(

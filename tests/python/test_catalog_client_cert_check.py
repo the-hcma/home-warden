@@ -50,6 +50,13 @@ class _Ca:
         return crl.public_bytes(serialization.Encoding.PEM)
 
 
+def test_ca_already_expired_fails(tmp_path: Path) -> None:
+    ca = _Ca("Home client CA", days=-1)
+    result = _check(_service(tmp_path, ca.cert_pem(), ca.crl_pem()))
+    assert result.status == "fail"
+    assert "CA CN=Home client CA expired" in result.detail
+
+
 def test_ca_expiring_within_the_window_fails(tmp_path: Path) -> None:
     ca = _Ca("Home client CA", days=30)
     result = _check(_service(tmp_path, ca.cert_pem(), ca.crl_pem()))
@@ -86,6 +93,16 @@ def test_missing_ca_bundle_fails(tmp_path: Path) -> None:
     }
     result = _check(service)
     assert result == CheckResult("svc", "client_cert", "fail", f"missing: {tmp_path / 'absent.crt'}")
+
+
+def test_missing_crl_setting_fails(tmp_path: Path) -> None:
+    ca_path = tmp_path / "ca.crt"
+    ca_path.write_bytes(_Ca("Home client CA").cert_pem())
+    service = {"name": "svc", "client_cert": {"mode": "required", "ca_bundle": str(ca_path)}}
+    result = _check(service)
+    assert result == CheckResult(
+        "svc", "client_cert", "fail", "client_cert.crl is not set, so nginx accepts revoked certificates"
+    )
 
 
 def test_mode_off_is_skipped() -> None:
