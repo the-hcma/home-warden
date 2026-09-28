@@ -8,7 +8,8 @@
 # root and every directory except public/ are 0700, keys, bundles, index.json
 # and the lock are 0600, certificates and CRLs are 0644, and only public/
 # (0755) is meant to be traversed by anyone else — nginx, through a bind of
-# that one directory. Nothing may be writable by group or other.
+# that one directory. Nothing may be writable by group or other, and nothing
+# may be a symlink: a link's own mode says nothing about what it points at.
 #
 # Backups are a tar of the whole store, encrypted with `gpg --symmetric`
 # (AES-256) using a passphrase read from a file, taken under a shared flock
@@ -26,6 +27,7 @@ client_pki_backup() {
   local members
 
   client_pki_require_ca "${store_dir}" || return 1
+  client_pki_check_store_permissions "${store_dir}" || return 1
   client_pki_require_private_file "${passphrase_file}" "passphrase file" || return 1
   if [[ -e "${out}" ]]; then
     echo "client-pki: refusing to overwrite ${out}; choose a new --out path" >&2
@@ -57,15 +59,21 @@ client_pki_check_store_permissions() {
   local -r store_dir="$1"
   local uid problems
 
+  if [[ -L "${store_dir}" ]]; then
+    echo "client-pki: refusing to use ${store_dir}: it is a symlink;" \
+      "point HOME_WARDEN_PKI_STORE at the real directory" >&2
+    return 1
+  fi
   [[ -d "${store_dir}" ]] || return 0
   uid="$(id -u)"
   problems="$(
-    find "${store_dir}" \( -type d -o -type f \) -printf '%U %m %y %P\n' \
+    find "${store_dir}" -printf '%U %m %y %P\n' \
       | awk -v uid="${uid}" -v store="${store_dir}" '
         {
           owner = $1; mode = $2; type = $3
           path = substr($0, length($1 $2 $3) + 4)
           shown = store "/" (path == "" ? "." : path)
+          if (type != "d" && type != "f") { print "not a regular file or directory: " shown; next }
           if (owner != uid) { print "not owned by you: " shown; next }
           group_other = substr(sprintf("%04d", mode), 3, 2)
           public = (path == "public" || path ~ /^public\//)
@@ -143,6 +151,10 @@ client_pki_restore() {
     echo "client-pki: backup ${archive} not found" >&2
     return 1
   fi
+  if [[ -L "${store_dir}" ]]; then
+    echo "client-pki: refusing to restore into ${store_dir}, which is a symlink; use the real directory" >&2
+    return 1
+  fi
   if [[ -e "${store_dir}" ]] && [[ -n "$(ls -A -- "${store_dir}")" ]]; then
     echo "client-pki: refusing to restore over ${store_dir}, which is not empty; move it aside first" >&2
     return 1
@@ -168,7 +180,11 @@ client_pki_restore() {
     return 1
   fi
 
-  [[ -d "${store_dir}" ]] && rmdir -- "${store_dir}"
+  if [[ -d "${store_dir}" ]] && ! rmdir -- "${store_dir}"; then
+    rm -rf -- "${staging}"
+    echo "client-pki: could not replace the empty ${store_dir}; nothing restored" >&2
+    return 1
+  fi
   mv -- "${staging}" "${store_dir}"
   echo "client-pki: restored ${archive} into ${store_dir}"
 }

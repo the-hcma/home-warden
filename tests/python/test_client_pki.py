@@ -59,8 +59,10 @@ def test_ca_rotation_trusts_both_cas_during_the_transition(tmp_path: Path) -> No
     new_store = tmp_path / "pki-new"
     _tiny_pki(new_store, "init", "--cn", "home-warden next CA", "--key-size", "2048")
     _tiny_pki(old_store, "create", "client", "alice", "--key-size", "2048")
+    _tiny_pki(old_store, "create", "client", "carol", "--key-size", "2048")
     _tiny_pki(new_store, "create", "client", "alice", "--key-size", "2048")
-    old_alice = _entries(old_store, "clients")[0]
+    old_clients = {entry["cn"]: entry for entry in _entries(old_store, "clients")}
+    old_alice, old_carol = old_clients["alice"], old_clients["carol"]
     new_alice = _entries(new_store, "clients")[0]
     server_ca = _public_files(old_store)[0]
     transition = tmp_path / "transition"
@@ -93,10 +95,11 @@ def test_ca_rotation_trusts_both_cas_during_the_transition(tmp_path: Path) -> No
         _nginx_signal(tmp_path, "reload")
         assert _eventually(lambda: _get(port, server_ca, old_alice) == 400), "old-CA revocation ignored"
         assert _get(port, server_ca, new_alice) == 200
+        assert _get(port, server_ca, old_carol) == 200
 
         publish(new_store)
         _nginx_signal(tmp_path, "reload")
-        assert _eventually(lambda: _get(port, server_ca, old_alice) == 400)
+        assert _eventually(lambda: _get(port, server_ca, old_carol) == 400), "old CA still trusted after dropping it"
         assert _get(port, server_ca, new_alice) == 200
 
 

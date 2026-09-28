@@ -120,6 +120,43 @@ def test_permission_check_refuses_a_loosened_store(tmp_path: Path, relative: str
     assert str(store / relative).rstrip("/.") in result.stderr
 
 
+def test_permission_check_refuses_a_symlink_inside_the_store(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    key = store / "ca" / "ca.key"
+    moved = tmp_path / "elsewhere.key"
+    key.rename(moved)
+    key.symlink_to(moved)
+    result = _client_pki(tmp_path, store, "list")
+    assert result.returncode == 1
+    assert f"not a regular file or directory: {key}" in result.stderr
+
+
+def test_permission_check_refuses_a_symlinked_store(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    link = tmp_path / "pki-link"
+    link.symlink_to(store)
+    result = _client_pki(tmp_path, link, "list")
+    assert result.returncode == 1
+    assert "is a symlink" in result.stderr
+
+
+def test_restore_refuses_a_ca_key_that_does_not_match(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    other = tmp_path / "other"
+    other.mkdir()
+    other_store = _init_store(other)
+    (store / "ca" / "ca.key").write_bytes((other_store / "ca" / "ca.key").read_bytes())
+    passphrase = _passphrase(tmp_path)
+    backup = tmp_path / "b.gpg"
+    _ok(_client_pki(tmp_path, store, "backup", "--out", str(backup), "--passphrase-file", str(passphrase)))
+    target = tmp_path / "target"
+    result = _client_pki(tmp_path, target, "restore", "--in", str(backup), "--passphrase-file", str(passphrase))
+    assert result.returncode == 1
+    assert "does not hold a usable CA" in result.stderr
+    assert not target.exists()
+    assert not list(tmp_path.glob(".client-pki-restore.*"))
+
+
 def test_restore_refuses_a_non_empty_store(tmp_path: Path) -> None:
     store = _init_store(tmp_path)
     passphrase = _passphrase(tmp_path)
@@ -130,6 +167,22 @@ def test_restore_refuses_a_non_empty_store(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert "not empty" in result.stderr
     assert _layout(store) == before
+
+
+def test_restore_refuses_a_symlinked_target(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    passphrase = _passphrase(tmp_path)
+    backup = tmp_path / "b.gpg"
+    _ok(_client_pki(tmp_path, store, "backup", "--out", str(backup), "--passphrase-file", str(passphrase)))
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "target"
+    link.symlink_to(real)
+    result = _client_pki(tmp_path, link, "restore", "--in", str(backup), "--passphrase-file", str(passphrase))
+    assert result.returncode == 1
+    assert "is a symlink" in result.stderr
+    assert not any(real.iterdir())
+    assert not list(tmp_path.glob(".client-pki-restore.*"))
 
 
 def test_restore_with_the_wrong_passphrase_leaves_nothing_behind(tmp_path: Path) -> None:
