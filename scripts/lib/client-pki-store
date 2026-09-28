@@ -29,7 +29,7 @@ client_pki_backup() {
   client_pki_require_ca "${store_dir}" || return 1
   client_pki_check_store_permissions "${store_dir}" || return 1
   client_pki_require_private_file "${passphrase_file}" "passphrase file" || return 1
-  if [[ -e "${out}" ]]; then
+  if [[ -e "${out}" || -L "${out}" ]]; then
     echo "client-pki: refusing to overwrite ${out}; choose a new --out path" >&2
     return 1
   fi

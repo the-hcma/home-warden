@@ -22,6 +22,17 @@ CLIENT_PKI = REPO / "scripts" / "client-pki"
 pytestmark = pytest.mark.skipif(shutil.which("gpg") is None, reason="gpg not installed")
 
 
+def test_backup_refuses_a_dangling_symlink_as_output(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    target = tmp_path / "redirected.gpg"
+    link = tmp_path / "b.gpg"
+    link.symlink_to(target)
+    result = _client_pki(tmp_path, store, "backup", "--out", str(link), "--passphrase-file", str(_passphrase(tmp_path)))
+    assert result.returncode == 1
+    assert "refusing to overwrite" in result.stderr
+    assert not target.exists()
+
+
 def test_backup_refuses_a_loose_passphrase_file(tmp_path: Path) -> None:
     store = _init_store(tmp_path)
     passphrase = _passphrase(tmp_path)
@@ -138,6 +149,18 @@ def test_permission_check_refuses_a_symlinked_store(tmp_path: Path) -> None:
     result = _client_pki(tmp_path, link, "list")
     assert result.returncode == 1
     assert "is a symlink" in result.stderr
+
+
+def test_restore_into_an_existing_empty_directory(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    passphrase = _passphrase(tmp_path)
+    backup = tmp_path / "b.gpg"
+    _ok(_client_pki(tmp_path, store, "backup", "--out", str(backup), "--passphrase-file", str(passphrase)))
+    target = tmp_path / "target"
+    target.mkdir(mode=0o700)
+    _ok(_client_pki(tmp_path, target, "restore", "--in", str(backup), "--passphrase-file", str(passphrase)))
+    assert _layout(target) == _layout(store)
+    assert not list(tmp_path.glob(".client-pki-restore.*"))
 
 
 def test_restore_refuses_a_ca_key_that_does_not_match(tmp_path: Path) -> None:
