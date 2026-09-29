@@ -8,7 +8,7 @@
 // available (e.g. a packaged checkout).
 declare const __COMMIT_SHA__: string;
 
-type AppView = "about" | "catalog" | "dns" | "health" | "settings";
+type AppView = "about" | "catalog" | "dns" | "health" | "pki" | "settings";
 type CatalogAction = "create" | "delete" | "update";
 type ServiceKind = "proxy" | "static";
 type SessionResponse = {
@@ -196,6 +196,55 @@ type DnsRecordsResponse = {
 };
 type DnsViewState = {
   data: DnsRecordsResponse | null;
+  error: string | null;
+  loading: boolean;
+  refreshing: boolean;
+};
+type PkiCaStatus = {
+  cn: null | string;
+  days_remaining: null | number;
+  expires: null | string;
+  fingerprint: null | string;
+  reasons: string[];
+  status: string;
+};
+type PkiCertificate = {
+  cn: null | string;
+  days_remaining: null | number;
+  expires: null | string;
+  fingerprint: null | string;
+  health: string;
+  kind: null | string;
+  reasons: string[];
+  revoked_at: null | string;
+  serial: null | string;
+  state: null | string;
+  superseded_by: null | string;
+};
+type PkiCrlStatus = {
+  days_remaining: null | number;
+  next_update: null | string;
+  reasons: string[];
+  status: string;
+  this_update: null | string;
+};
+type PkiVhost = {
+  allow_cn: null | string[];
+  mode: null | string;
+  name: string;
+  server_name: null | string;
+  verify_depth: null | number;
+};
+type PkiStatusResponse = {
+  ca: PkiCaStatus | null;
+  certificates: PkiCertificate[];
+  crl: PkiCrlStatus | null;
+  detail: null | string;
+  status: string;
+  vhosts: PkiVhost[];
+};
+type PkiViewState = {
+  data: PkiStatusResponse | null;
   error: string | null;
   loading: boolean;
   refreshing: boolean;
@@ -2042,6 +2091,252 @@ function mountPage(root: HTMLElement): void {
   mountAppShell(root);
 }
 
+function mountPkiView(root: HTMLElement): () => void {
+  const state: PkiViewState = {
+    data: null,
+    error: null,
+    loading: true,
+    refreshing: false,
+  };
+  let disposed = false;
+  let requestVersion = 0;
+
+  void refresh("initial");
+  render();
+
+  return () => {
+    disposed = true;
+    root.replaceChildren();
+  };
+
+  async function refresh(source: "initial" | "manual"): Promise<void> {
+    const currentRequest = requestVersion + 1;
+    const hasData = state.data !== null;
+
+    requestVersion = currentRequest;
+    state.error = null;
+    state.loading = !hasData;
+    state.refreshing = hasData;
+    safeRender();
+
+    try {
+      const data = await readPkiStatus();
+      if (disposed || currentRequest !== requestVersion) {
+        return;
+      }
+      state.data = data;
+      state.error = null;
+    } catch (error: unknown) {
+      if (disposed || currentRequest !== requestVersion) {
+        return;
+      }
+      const message = error instanceof Error ? error.message : "Failed to load client certificate status";
+      state.error = hasData && source !== "initial" ? `Refresh failed: ${message}` : message;
+    }
+
+    if (disposed || currentRequest !== requestVersion) {
+      return;
+    }
+    state.loading = false;
+    state.refreshing = false;
+    safeRender();
+  }
+
+  function render(): void {
+    const container = document.createElement("div");
+    const controls = document.createElement("div");
+    const heading = document.createElement("h2");
+    const refreshButton = document.createElement("button");
+
+    heading.textContent = "Client certificates";
+    controls.append(heading);
+
+    refreshButton.disabled = state.loading || state.refreshing;
+    refreshButton.textContent = state.refreshing ? "Refreshing…" : "Refresh now";
+    refreshButton.type = "button";
+    refreshButton.addEventListener("click", () => {
+      void refresh("manual");
+    });
+    controls.append(refreshButton);
+
+    const note = document.createElement("p");
+    note.classList.add("message");
+    note.textContent =
+      "The private CA that gates vhosts with client_cert, read-only. Enroll, rotate and revoke devices with scripts/client-pki on the host.";
+    controls.append(note);
+
+    if (state.error) {
+      const errorNode = document.createElement("p");
+      errorNode.classList.add("error-banner");
+      errorNode.textContent = state.data ? `${state.error}. Showing last successful response.` : state.error;
+      controls.append(errorNode);
+    }
+
+    if (state.loading && !state.data) {
+      const loadingNode = document.createElement("p");
+      loadingNode.textContent = "Loading client certificate status…";
+      container.append(controls, loadingNode);
+      root.replaceChildren(container);
+      return;
+    }
+
+    if (!state.data) {
+      const emptyNode = document.createElement("p");
+      emptyNode.textContent = "Client certificate status is not available yet.";
+      container.append(controls, emptyNode);
+      root.replaceChildren(container);
+      return;
+    }
+
+    container.append(controls, ...renderPkiSections(state.data));
+    root.replaceChildren(container);
+  }
+
+  function renderPkiSections(data: PkiStatusResponse): HTMLElement[] {
+    const sections: HTMLElement[] = [];
+    if (data.status === "not_configured") {
+      const notice = document.createElement("p");
+      notice.textContent = "No client CA on this host yet. Create one with ./scripts/client-pki init.";
+      sections.push(notice);
+    } else if (data.status === "error") {
+      const errorNode = document.createElement("p");
+      errorNode.classList.add("error-banner");
+      errorNode.textContent = `Could not read the client CA store: ${data.detail ?? "unknown error"}`;
+      sections.push(errorNode);
+    } else {
+      sections.push(renderAuthoritySection(data), renderCertificatesSection(data.certificates));
+    }
+    sections.push(renderVhostsSection(data.vhosts));
+    return sections;
+  }
+
+  function renderAuthoritySection(data: PkiStatusResponse): HTMLElement {
+    const section = document.createElement("section");
+    const title = document.createElement("h3");
+    const overall = document.createElement("p");
+    const table = document.createElement("table");
+
+    styleSection(section);
+    title.textContent = "Certificate authority";
+    overall.append("Overall: ", pkiStatusBadge(data.status));
+    styleTable(table);
+    table.append(
+      pkiRow(
+        "CA",
+        data.ca?.cn ?? "(unknown)",
+        data.ca?.status ?? "unknown",
+        `expires ${formatPkiDate(data.ca?.expires)}`,
+        data.ca?.days_remaining,
+        data.ca?.reasons,
+      ),
+      pkiRow(
+        "CRL",
+        `last refreshed ${formatPkiDate(data.crl?.this_update)}`,
+        data.crl?.status ?? "missing",
+        `next update ${formatPkiDate(data.crl?.next_update)}`,
+        data.crl?.days_remaining,
+        data.crl?.reasons,
+      ),
+    );
+    section.append(title, overall, table);
+    return section;
+  }
+
+  function renderCertificatesSection(certificates: PkiCertificate[]): HTMLElement {
+    const section = document.createElement("section");
+    const title = document.createElement("h3");
+
+    styleSection(section);
+    title.textContent = `Issued certificates (${certificates.length})`;
+    section.append(title);
+    if (certificates.length === 0) {
+      const empty = document.createElement("p");
+      empty.textContent = "No certificates issued yet. Enroll a device with ./scripts/client-pki enroll.";
+      section.append(empty);
+      return section;
+    }
+
+    const table = document.createElement("table");
+    styleTable(table);
+    table.append(pkiHeaderRow(["Device (CN)", "Kind", "Status", "Expires", "Serial"]));
+    for (const certificate of certificates) {
+      const row = document.createElement("tr");
+      const statusCell = document.createElement("td");
+      const active = certificate.state === "active";
+      const badge = active
+        ? pkiStatusBadge(certificate.health)
+        : pkiBadge(certificate.state ?? "unknown", "badge--skip");
+
+      badge.title = [
+        ...certificate.reasons,
+        certificate.revoked_at ? `revoked ${formatPkiDate(certificate.revoked_at)}` : "",
+        certificate.superseded_by ? `superseded by ${certificate.superseded_by}` : "",
+      ]
+        .filter(Boolean)
+        .join("; ");
+      styleTableCell(statusCell);
+      statusCell.append(badge);
+      row.append(
+        pkiCell(certificate.cn ?? "(unknown)"),
+        pkiCell(certificate.kind ?? ""),
+        statusCell,
+        pkiCell(`${formatPkiDate(certificate.expires)}${formatPkiDays(active ? certificate.days_remaining : null)}`),
+        pkiCell((certificate.serial ?? "").slice(0, 16)),
+      );
+      row.lastElementChild?.setAttribute("title", certificate.serial ?? "");
+      table.append(row);
+    }
+    section.append(table);
+    return section;
+  }
+
+  function renderVhostsSection(vhosts: PkiVhost[]): HTMLElement {
+    const section = document.createElement("section");
+    const title = document.createElement("h3");
+
+    styleSection(section);
+    title.textContent = "Vhosts using client certificates";
+    section.append(title);
+    if (vhosts.length === 0) {
+      const empty = document.createElement("p");
+      empty.textContent = "No catalog service sets client_cert.";
+      section.append(empty);
+      return section;
+    }
+
+    const table = document.createElement("table");
+    styleTable(table);
+    table.append(pkiHeaderRow(["Service", "server_name", "Mode", "Allowed CNs"]));
+    for (const vhost of vhosts) {
+      const row = document.createElement("tr");
+      const allowed =
+        vhost.allow_cn && vhost.allow_cn.length > 0 ? vhost.allow_cn.join(", ") : "any certificate from the CA";
+      row.append(pkiCell(vhost.name), pkiCell(vhost.server_name ?? ""), pkiCell(vhost.mode ?? ""), pkiCell(allowed));
+      table.append(row);
+    }
+    section.append(table);
+    return section;
+  }
+
+  function safeRender(): void {
+    if (!disposed) {
+      render();
+    }
+  }
+}
+
+function formatPkiDate(iso: null | string | undefined): string {
+  if (!iso) {
+    return "(unknown)";
+  }
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? iso : date.toLocaleDateString();
+}
+
+function formatPkiDays(days: null | number | undefined): string {
+  return typeof days === "number" ? ` (${days} days)` : "";
+}
+
 function mountSettingsPanel(root: HTMLElement): () => void {
   // Inputs are built ONCE and never torn down/rebuilt on a keystroke --
   // only their .value is ever set imperatively (on initial load, on save,
@@ -2369,6 +2664,12 @@ async function readDnsRecords(): Promise<DnsRecordsResponse> {
   });
 }
 
+async function readPkiStatus(): Promise<PkiStatusResponse> {
+  return fetchJson<PkiStatusResponse>("/pki/status", {
+    method: "GET",
+  });
+}
+
 async function readCatalogService(name: string): Promise<ServiceEntry> {
   const response = await fetchJson<{ service: ServiceEntry }>(`/catalog/services/${encodeURIComponent(name)}`, {
     method: "GET",
@@ -2467,6 +2768,7 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
   const aboutButton = document.createElement("button");
   const catalogButton = document.createElement("button");
   const dnsButton = document.createElement("button");
+  const pkiButton = document.createElement("button");
   const healthButton = document.createElement("button");
   const settingsButton = document.createElement("button");
   const logoutButton = document.createElement("button");
@@ -2496,6 +2798,13 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
   dnsButton.type = "button";
   dnsButton.addEventListener("click", () => {
     mountView("dns");
+    closeMenu();
+  });
+
+  pkiButton.textContent = "Client certificates";
+  pkiButton.type = "button";
+  pkiButton.addEventListener("click", () => {
+    mountView("pki");
     closeMenu();
   });
 
@@ -2538,7 +2847,7 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
 
   menuPanel.classList.add("menu-panel");
   menuPanel.hidden = true;
-  menuPanel.append(healthButton, catalogButton, dnsButton, settingsButton, aboutButton);
+  menuPanel.append(healthButton, catalogButton, dnsButton, pkiButton, settingsButton, aboutButton);
 
   menu.classList.add("menu");
   menu.append(menuButton, menuPanel);
@@ -2582,6 +2891,7 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
     catalogButton.disabled = activeView === "catalog";
     dnsButton.disabled = activeView === "dns";
     healthButton.disabled = activeView === "health";
+    pkiButton.disabled = activeView === "pki";
     settingsButton.disabled = activeView === "settings";
     unmountCurrentView =
       activeView === "catalog"
@@ -2592,7 +2902,9 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
             ? mountSettingsPanel(shell)
             : activeView === "dns"
               ? mountDnsView(shell)
-              : mountHealthDashboard(shell);
+              : activeView === "pki"
+                ? mountPkiView(shell)
+                : mountHealthDashboard(shell);
   }
 }
 
@@ -2614,6 +2926,60 @@ function serviceToFormState(service: ServiceEntry): FormState {
     upstreamScheme: service.upstream?.scheme === "https" ? "https" : "http",
     websocket: service.websocket === true,
   };
+}
+
+function pkiBadge(text: string, badgeClass: string): HTMLSpanElement {
+  const span = document.createElement("span");
+  span.classList.add(badgeClass);
+  span.textContent = text;
+  return span;
+}
+
+function pkiCell(text: string): HTMLTableCellElement {
+  const cell = document.createElement("td");
+  cell.textContent = text;
+  styleTableCell(cell);
+  return cell;
+}
+
+function pkiHeaderRow(titles: string[]): HTMLTableRowElement {
+  const row = document.createElement("tr");
+  for (const title of titles) {
+    const cell = document.createElement("th");
+    cell.textContent = title;
+    styleTableCell(cell, true);
+    row.append(cell);
+  }
+  return row;
+}
+
+function pkiRow(
+  label: string,
+  subject: string,
+  status: string,
+  when: string,
+  days: null | number | undefined,
+  reasons: string[] | undefined,
+): HTMLTableRowElement {
+  const row = document.createElement("tr");
+  const statusCell = document.createElement("td");
+  const badge = pkiStatusBadge(status);
+
+  badge.title = (reasons ?? []).join("; ");
+  styleTableCell(statusCell);
+  statusCell.append(badge);
+  row.append(pkiCell(label), pkiCell(subject), statusCell, pkiCell(`${when}${formatPkiDays(days)}`));
+  return row;
+}
+
+function pkiStatusBadge(status: string): HTMLSpanElement {
+  if (status === "ok") {
+    return pkiBadge("OK", "badge--ok");
+  }
+  if (status === "unknown" || status === "not_configured") {
+    return pkiBadge(status === "unknown" ? "Unknown" : "Not configured", "badge--skip");
+  }
+  return pkiBadge(status.replaceAll("_", " "), "badge--fail");
 }
 
 function styleSection(section: HTMLElement): void {
