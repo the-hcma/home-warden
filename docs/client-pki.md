@@ -75,7 +75,7 @@ That creates the store with tiny-pki's layout. Point a catalog entry's `client_c
 | `public/` | `0755` | anyone, including `home-warden-nginx` through the sandbox's bind of that one directory |
 | `public/ca.crt`, `public/crl.pem`, other certificates and CRLs | `0644` | readable, but only reachable through `public/` |
 
-tiny-pki writes this layout itself. `scripts/client-pki` checks it before every command and refuses to run when anything is looser, for example a key made group-readable by a careless copy, listing each offending path. nginx never sees `ca/`: the sandbox binds only `public/`, so the key isn't readable by `home-warden-nginx` even if a mode slips.
+tiny-pki writes this layout itself. `scripts/client-pki` checks it before every command and refuses to run when anything is looser, for example a key made group-readable by a careless copy, listing each offending path. It also refuses a `public/` or public file that `home-warden-nginx` couldn't read (a directory tighter than `0755` or a file tighter than `0644`), since the vhost would then fail to load. nginx never sees `ca/`: the sandbox binds only `public/`, so the key isn't readable by `home-warden-nginx` even if a mode slips.
 
 The key is **not encrypted at rest** yet: tiny-pki's store writes it in the clear, protected by these modes. Encryption at rest is [tiny-pki#150](https://github.com/the-hcma/tiny-pki/issues/150); home-warden will adopt it once it lands.
 

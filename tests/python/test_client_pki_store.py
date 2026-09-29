@@ -118,6 +118,8 @@ def test_permission_check_accepts_tiny_pkis_own_layout(tmp_path: Path) -> None:
     [
         ("ca/ca.key", 0o644, "accessible by group/other"),
         ("clients", 0o755, "accessible by group/other"),
+        ("public", 0o700, "not readable by nginx"),
+        ("public/ca.crt", 0o600, "not readable by nginx"),
         ("public/crl.pem", 0o664, "writable by group/other"),
         (".", 0o750, "accessible by group/other"),
     ],

@@ -8,7 +8,8 @@
 # root and every directory except public/ are 0700, keys, bundles, index.json
 # and the lock are 0600, certificates and CRLs are 0644, and only public/
 # (0755) is meant to be traversed by anyone else — nginx, through a bind of
-# that one directory. Nothing may be writable by group or other, and nothing
+# that one directory, so public/ and its files must stay readable by other.
+# Nothing may be writable by group or other, and nothing
 # may be a symlink: a link's own mode says nothing about what it points at.
 #
 # Backups are a tar of the whole store, encrypted with `gpg --symmetric`
@@ -78,10 +79,15 @@ client_pki_check_store_permissions() {
           group_other = substr(sprintf("%04d", mode), 3, 2)
           public = (path == "public" || path ~ /^public\//)
           secret = (path ~ /\.key$/ || path == "ca/index.json" || path == "ca/.lock" || path ~ /^bundles\//)
+          other = substr(group_other, 2, 1)
           if (group_other ~ /[2367]/) {
             print "writable by group/other (mode " mode "): " shown
           } else if (group_other != "00" && ((type == "d" && !public) || secret)) {
             print "accessible by group/other (mode " mode "): " shown
+          } else if (public && type == "d" && other != "5") {
+            print "not readable by nginx (mode " mode ", needs 0755): " shown
+          } else if (public && type == "f" && other !~ /[45]/) {
+            print "not readable by nginx (mode " mode ", needs 0644): " shown
           }
         }'
   )"
