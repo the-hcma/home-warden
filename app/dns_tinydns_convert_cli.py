@@ -79,7 +79,7 @@ def main() -> int:
             print(format_issues("dns-tinydns-convert", issues), file=sys.stderr)
         return 2
 
-    zones_yaml_text = render_zones_yaml(zones)
+    zones_yaml_text = render_zones_yaml(zones, args.data_file.name)
     issues.extend(lint_zones(yaml.safe_load(zones_yaml_text)))
 
     args.outdir.mkdir(parents=True, exist_ok=True)
