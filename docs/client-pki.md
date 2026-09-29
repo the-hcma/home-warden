@@ -130,6 +130,7 @@ To refresh by hand: `sudo systemctl start home-warden-client-pki-crl.service`, o
 `catalog-health-check`, `GET /health/catalog`, and the `catalog-heal` timer check every catalog entry with `client_cert` enabled (the `client_cert` dimension). It fails when:
 
 - `ca_bundle` or `crl` isn't set (without a CRL, nginx accepts revoked certificates), or its file is missing, unreadable, unparseable, or not an absolute path;
+- `home-warden-nginx` couldn't read a file: it needs `o+r` (for example `0644`) and its directory, which the nginx sandbox binds, needs `o+rx` (`0755`);
 - a CA in the bundle is expired or expires within `CLIENT_CA_ALERT_DAYS` (default 60, long enough to rotate the CA);
 - a CRL is expired or expires within `CLIENT_CRL_ALERT_DAYS` (default 7; with the daily refresh, that means the timer has been failing for about three weeks);
 - a CRL isn't signed by a CA in the bundle, or a CA in the bundle has no CRL (nginx rejects that CA's clients).

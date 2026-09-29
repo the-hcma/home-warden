@@ -35,6 +35,7 @@ import random
 import re
 import socket
 import ssl
+import stat
 import subprocess
 import time
 import urllib.error
@@ -225,11 +226,19 @@ def _host_resolves(host: str, timeout: float) -> bool | None:
 def _load_client_pki_file(path: Path, loader):
     """(objects, None) or ([], error detail). A relative path is refused:
     nginx resolves it against its own prefix, which this check can't know.
+
+    This runs as the operator, but nginx runs as its own account and sees
+    the file through a sandbox bind of its directory (scripts/setup-service),
+    so the file must be readable, and that directory traversable, by other.
     """
     if not path.is_absolute():
         return [], f"{path} is not an absolute path"
     if not path.is_file():
         return [], f"missing: {path}"
+    for target, needed, example in ((path, stat.S_IROTH, "0644"), (path.parent, stat.S_IROTH | stat.S_IXOTH, "0755")):
+        mode = target.stat().st_mode
+        if mode & needed != needed:
+            return [], f"{target} isn't readable by nginx (mode {stat.S_IMODE(mode):04o}, needs {example})"
     try:
         objects = loader(path.read_bytes())
     except (ValueError, OSError) as e:

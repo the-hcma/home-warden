@@ -50,6 +50,25 @@ class _Ca:
         return crl.public_bytes(serialization.Encoding.PEM)
 
 
+@pytest.mark.parametrize(
+    ("relative", "mode", "expected"),
+    [
+        ("public", 0o700, "public isn't readable by nginx (mode 0700, needs 0755)"),
+        ("public/crl.pem", 0o600, "crl.pem isn't readable by nginx (mode 0600, needs 0644)"),
+    ],
+)
+def test_a_file_nginx_cannot_read_fails(tmp_path: Path, relative: str, mode: int, expected: str) -> None:
+    ca = _Ca("Home client CA")
+    service = _service(tmp_path, ca.cert_pem(), ca.crl_pem())
+    (tmp_path / relative).chmod(mode)
+    try:
+        result = _check(service)
+    finally:
+        (tmp_path / relative).chmod(0o755)
+    assert result.status == "fail"
+    assert expected in result.detail
+
+
 def test_ca_already_expired_fails(tmp_path: Path) -> None:
     ca = _Ca("Home client CA", days=-1)
     result = _check(_service(tmp_path, ca.cert_pem(), ca.crl_pem()))
@@ -96,8 +115,7 @@ def test_missing_ca_bundle_fails(tmp_path: Path) -> None:
 
 
 def test_missing_crl_setting_fails(tmp_path: Path) -> None:
-    ca_path = tmp_path / "ca.crt"
-    ca_path.write_bytes(_Ca("Home client CA").cert_pem())
+    ca_path = _public_file(tmp_path, "ca.crt", _Ca("Home client CA").cert_pem())
     service = {"name": "svc", "client_cert": {"mode": "required", "ca_bundle": str(ca_path)}}
     result = _check(service)
     assert result == CheckResult(
@@ -211,9 +229,17 @@ def _check(service: dict) -> CheckResult:
     return check_client_cert("svc", service, ca_alert_days=60, crl_alert_days=7)
 
 
+def _public_file(tmp_path: Path, name: str, data: bytes) -> Path:
+    public = tmp_path / "public"
+    public.mkdir(mode=0o755, exist_ok=True)
+    public.chmod(0o755)
+    path = public / name
+    path.write_bytes(data)
+    path.chmod(0o644)
+    return path
+
+
 def _service(tmp_path: Path, ca_pem: bytes, crl_pem: bytes) -> dict:
-    ca_path = tmp_path / "ca.crt"
-    crl_path = tmp_path / "crl.pem"
-    ca_path.write_bytes(ca_pem)
-    crl_path.write_bytes(crl_pem)
+    ca_path = _public_file(tmp_path, "ca.crt", ca_pem)
+    crl_path = _public_file(tmp_path, "crl.pem", crl_pem)
     return {"name": "svc", "client_cert": {"mode": "required", "ca_bundle": str(ca_path), "crl": str(crl_path)}}
