@@ -32,7 +32,7 @@ type UpstreamConfig = JsonObject & {
 };
 type ServiceEntry = JsonObject & {
   allow_cidrs?: null | string[];
-  client_cert?: JsonObject;
+  client_cert?: JsonObject | null;
   forward_client_ip?: boolean | null;
   forward_host_header?: boolean | null;
   gzip?: boolean | null;
@@ -113,8 +113,14 @@ type SmtpSettingsState = {
   testPassed: boolean;
   testing: boolean;
 };
+type ClientCertMode = "" | "off" | "optional" | "required";
 type FormState = {
   allowCidrs: string;
+  clientCertAllowCn: string;
+  clientCertCaBundle: string;
+  clientCertCrl: string;
+  clientCertMode: ClientCertMode;
+  clientCertVerifyDepth: string;
   forwardClientIp: boolean;
   forwardHostHeader: boolean;
   gzipDisabled: boolean;
@@ -329,6 +335,11 @@ async function applyCatalogMutation(request: CatalogMutationRequest): Promise<Ap
 function blankFormState(): FormState {
   return {
     allowCidrs: "",
+    clientCertAllowCn: "",
+    clientCertCaBundle: "",
+    clientCertCrl: "",
+    clientCertMode: "",
+    clientCertVerifyDepth: "",
     forwardClientIp: false,
     forwardHostHeader: false,
     gzipDisabled: false,
@@ -415,11 +426,41 @@ function buildServiceFromForm(form: FormState, base: ServiceEntry | null, forUpd
   }
 
   if (form.allowCidrs.trim()) {
-    service.allow_cidrs = parseAllowCidrs(form.allowCidrs);
+    service.allow_cidrs = parseListField(form.allowCidrs);
   } else if (forUpdate) {
     service.allow_cidrs = null;
   } else {
     delete service.allow_cidrs;
+  }
+
+  if (form.clientCertMode) {
+    const hadClientCert = base?.client_cert !== undefined;
+    const clientCert: JsonObject = { ...(service.client_cert ?? {}), mode: form.clientCertMode };
+    const allowCn = parseListField(form.clientCertAllowCn);
+    const depth = form.clientCertVerifyDepth.trim();
+    // A non-numeric depth goes through as text so the server's own
+    // validation error explains it; Number() would send NaN, i.e. null,
+    // which deletes the field instead.
+    const optional: [string, JsonValue | undefined][] = [
+      ["allow_cn", allowCn.length > 0 ? allowCn : undefined],
+      ["ca_bundle", form.clientCertCaBundle.trim() || undefined],
+      ["crl", form.clientCertCrl.trim() || undefined],
+      ["verify_depth", depth === "" ? undefined : /^\d+$/u.test(depth) ? Number(depth) : depth],
+    ];
+    for (const [key, value] of optional) {
+      if (value !== undefined) {
+        clientCert[key] = value;
+      } else if (forUpdate && hadClientCert) {
+        clientCert[key] = null;
+      } else {
+        delete clientCert[key];
+      }
+    }
+    service.client_cert = clientCert;
+  } else if (forUpdate) {
+    service.client_cert = null;
+  } else {
+    delete service.client_cert;
   }
 
   if (form.forwardClientIp) {
@@ -1242,6 +1283,47 @@ function mountCatalogManager(root: HTMLElement): () => void {
       state.form.allowCidrs = value;
       markPreviewStale();
     });
+    const clientCertLabel = document.createElement("label");
+    const clientCertSelect = document.createElement("select");
+    clientCertLabel.textContent = "Client certificate (client_cert.mode)";
+    clientCertSelect.append(
+      new Option("not set", ""),
+      new Option("off", "off"),
+      new Option("optional", "optional"),
+      new Option("required", "required"),
+    );
+    clientCertSelect.value = state.form.clientCertMode;
+    clientCertSelect.addEventListener("change", () => {
+      const mode = clientCertSelect.value;
+      state.form.clientCertMode = mode === "off" || mode === "optional" || mode === "required" ? mode : "";
+      markPreviewStale();
+      safeRender();
+    });
+    form.append(clientCertLabel, document.createElement("br"), clientCertSelect, document.createElement("br"));
+    if (state.form.clientCertMode) {
+      appendTextInput(form, "Client CA bundle (client_cert.ca_bundle)", state.form.clientCertCaBundle, (value) => {
+        state.form.clientCertCaBundle = value;
+        markPreviewStale();
+      });
+      appendTextInput(form, "Client CRL (client_cert.crl)", state.form.clientCertCrl, (value) => {
+        state.form.clientCertCrl = value;
+        markPreviewStale();
+      });
+      appendTextArea(
+        form,
+        "Allowed CNs (client_cert.allow_cn, comma or newline separated; empty allows any certificate from the CA)",
+        state.form.clientCertAllowCn,
+        (value) => {
+          state.form.clientCertAllowCn = value;
+          markPreviewStale();
+        },
+      );
+      appendTextInput(form, "Verify depth (client_cert.verify_depth)", state.form.clientCertVerifyDepth, (value) => {
+        state.form.clientCertVerifyDepth = value;
+        markPreviewStale();
+      });
+    }
+
     appendCheckbox(form, "Forward Host header", state.form.forwardHostHeader, (checked) => {
       state.form.forwardHostHeader = checked;
       markPreviewStale();
@@ -1259,10 +1341,9 @@ function mountCatalogManager(root: HTMLElement): () => void {
       markPreviewStale();
     });
 
-    if (state.originalService?.client_cert || state.originalService?.managed_by) {
+    if (state.originalService?.managed_by) {
       const preserved = document.createElement("p");
-      preserved.textContent =
-        "Advanced fields not shown here (for example client_cert or managed_by) will be preserved on save.";
+      preserved.textContent = "Advanced fields not shown here (managed_by) will be preserved on save.";
       section.append(preserved);
     }
 
@@ -2626,13 +2707,6 @@ function mountSettingsPanel(root: HTMLElement): () => void {
   }
 }
 
-function parseAllowCidrs(value: string): string[] {
-  return value
-    .split(/[\n,]/u)
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0);
-}
-
 function parseExpiryDate(detail: string): Date | null {
   const match = /notAfter=([^); ]+)/u.exec(detail);
 
@@ -2642,6 +2716,13 @@ function parseExpiryDate(detail: string): Date | null {
 
   const expiry = new Date(match[1]);
   return Number.isNaN(expiry.getTime()) ? null : expiry;
+}
+
+function parseListField(value: string): string[] {
+  return value
+    .split(/[\n,]/u)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 }
 
 async function previewCatalogMutation(request: CatalogMutationRequest): Promise<PreviewResponse> {
@@ -2910,8 +2991,21 @@ async function renderAppShell(root: HTMLElement): Promise<void> {
 
 
 function serviceToFormState(service: ServiceEntry): FormState {
+  const clientCert = service.client_cert ?? {};
+  const mode = clientCert["mode"];
+  const verifyDepth = clientCert["verify_depth"];
   return {
     allowCidrs: (service.allow_cidrs ?? []).join("\n"),
+    clientCertAllowCn: Array.isArray(clientCert["allow_cn"]) ? clientCert["allow_cn"].join("\n") : "",
+    clientCertCaBundle: typeof clientCert["ca_bundle"] === "string" ? clientCert["ca_bundle"] : "",
+    clientCertCrl: typeof clientCert["crl"] === "string" ? clientCert["crl"] : "",
+    clientCertMode:
+      service.client_cert === undefined
+        ? ""
+        : mode === "optional" || mode === "required"
+          ? mode
+          : "off",
+    clientCertVerifyDepth: typeof verifyDepth === "number" ? String(verifyDepth) : "",
     forwardClientIp: service.forward_client_ip === true,
     forwardHostHeader: service.forward_host_header === true,
     gzipDisabled: service.gzip === false,
