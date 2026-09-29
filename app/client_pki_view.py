@@ -16,8 +16,11 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TypeVar
+
+from tiny_pki import Status
 
 
 class PkiViewError(Exception):
@@ -58,8 +61,10 @@ def load_pki_status(store: Path, services: list[dict], *, timeout: float) -> dic
 
     `status` is `not_configured` when the store has no CA yet (no
     `client-pki init` on this host), `error` when tiny-pki couldn't read
-    it, and otherwise tiny-pki's own overall check status (`ok`,
-    `expiring`, `expired`, `revoked`, ...).
+    it, and otherwise the worst check status (`ok`, `expiring`, `expired`,
+    ...) of the CA, the CRL, and the certificates still active -- not
+    tiny-pki's own overall status, which with `--include-revoked` reads
+    `revoked` as soon as any certificate ever was.
     """
     result: dict = {
         "status": "not_configured",
@@ -81,8 +86,13 @@ def load_pki_status(store: Path, services: list[dict], *, timeout: float) -> dic
     checks = {(row.get("kind"), row.get("serial_number")): row for row in check.get("results") or []}
     ca_check = next((row for row in checks.values() if row.get("kind") == "ca"), {})
     crl_check = next((row for row in checks.values() if row.get("kind") == "crl"), {})
+    certificates = sorted(
+        (_certificate_entry(cert, checks) for cert in certs),
+        key=lambda cert: (str(cert["cn"]), str(cert["expires"])),
+    )
+    in_use = [ca_check, crl_check, *(cert for cert in certificates if cert["state"] == "active")]
     result.update(
-        status=check.get("status", "unknown"),
+        status=_worst_status(row.get("status") or row.get("health") for row in in_use),
         ca={
             "cn": ca.get("cn"),
             "fingerprint": ca.get("fingerprint"),
@@ -98,10 +108,7 @@ def load_pki_status(store: Path, services: list[dict], *, timeout: float) -> dic
             "status": crl_check.get("status", "missing"),
             "reasons": crl_check.get("reasons") or [],
         },
-        certificates=sorted(
-            (_certificate_entry(cert, checks) for cert in certs),
-            key=lambda cert: (str(cert["cn"]), str(cert["expires"])),
-        ),
+        certificates=certificates,
     )
     return result
 
@@ -128,6 +135,20 @@ def _serial_hex(serial: object) -> str | None:
     if not isinstance(serial, str):
         return None
     return serial.lstrip("0") or "0"
+
+
+def _worst_status(statuses: Iterable[str | None]) -> str:
+    """The most severe of `statuses` by tiny-pki's own ranking; a missing
+    or unrecognized one (e.g. no CRL row at all) counts as `unknown`.
+    """
+    worst = Status.OK
+    for value in statuses:
+        try:
+            status = Status(value)
+        except ValueError:
+            return "unknown"
+        worst = max(worst, status, key=lambda s: s.severity)
+    return worst.value
 
 
 def _tiny_pki_json(store: Path, args: list[str], timeout: float, shape: type[T], ok_codes: tuple[int, ...] = (0,)) -> T:

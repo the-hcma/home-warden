@@ -98,7 +98,7 @@ def test_no_ca_is_not_configured_but_still_lists_vhosts(tmp_path: Path) -> None:
 
 def test_real_store_reports_ca_crl_and_every_certificate(store: Path) -> None:
     status = load_pki_status(store, _SERVICES, timeout=60)
-    assert status["status"] == "revoked"
+    assert status["status"] == "ok"
     assert status["detail"] is None
     assert status["ca"]["cn"] == "Test client CA"
     assert status["ca"]["status"] == "ok"
@@ -125,6 +125,14 @@ def test_serial_with_a_leading_zero_still_matches_its_check_row() -> None:
     checks = {("client", "abc"): {"status": "expiring", "days_remaining": 5, "reasons": ["soon"]}}
     entry = client_pki_view._certificate_entry({"kind": "client", "serial": "0abc", "cn": "x"}, checks)
     assert (entry["health"], entry["days_remaining"]) == ("expiring", 5)
+
+
+def test_worst_status_ranks_by_tiny_pki_severity() -> None:
+    worst = client_pki_view._worst_status
+    assert worst(["ok", "ok", "expiring"]) == "expiring"
+    assert worst(["ok", "expired", "expiring"]) == "expired"
+    assert worst(["ok", None]) == "unknown"
+    assert worst([]) == "ok"
 
 
 def _fake_tiny_pki(tmp_path: Path, body: str) -> Path:
