@@ -22,6 +22,7 @@ from app.api.auth_routes import router as auth_router
 from app.api.catalog_crud_routes import router as catalog_crud_router
 from app.api.catalog_health_routes import router as catalog_health_router
 from app.api.dns_view_routes import router as dns_view_router
+from app.api.pki_view_routes import router as pki_view_router
 from app.api.smtp_routes import router as smtp_router
 from app.home_warden_auth import (
     SESSION_COOKIE_NAME,
@@ -71,6 +72,7 @@ def create_app(
     app.include_router(catalog_crud_router, dependencies=[Depends(require_session)])
     app.include_router(catalog_health_router, dependencies=[Depends(require_session)])
     app.include_router(dns_view_router, dependencies=[Depends(require_session)])
+    app.include_router(pki_view_router, dependencies=[Depends(require_session)])
     app.include_router(smtp_router, dependencies=[Depends(require_session)])
     # dist/ (esbuild output, web/build.mjs) is gitignored -- StaticFiles is
     # instantiated lazily via a mount so a missing dist/ at import time (e.g.
