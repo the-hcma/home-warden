@@ -118,11 +118,11 @@ client_pki_check_store_permissions "${store}"
 case "${requested_verb}" in
   enroll)
     shift
-    client_pki_enroll "$@"
+    client_pki_locked "${store}/ca" client_pki_enroll "$@"
     ;;
   rotate)
     shift
-    client_pki_rotate "$@"
+    client_pki_locked "${store}/ca" client_pki_rotate "$@"
     ;;
   *)
     exec uv run --project "${repo_dir}" tiny-pki --store "${store}" "$@"

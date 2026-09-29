@@ -9,6 +9,7 @@ refuses to run off the designated host.
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,16 @@ def test_enroll_refuses_a_device_that_already_has_a_certificate(tmp_path: Path) 
     assert _active_serials(tmp_path, store, "alice-phone") == before, "a second enroll must not revoke the first"
 
 
+def test_enroll_refuses_a_loose_password_file(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    password = _password(tmp_path)
+    password.chmod(0o644)
+    result = _client_pki(tmp_path, store, "enroll", "alice-phone", "--password-file", str(password))
+    assert result.returncode == 1
+    assert "readable by group/other" in result.stderr
+    assert _active_serials(tmp_path, store, "alice-phone") == []
+
+
 def test_enroll_refuses_when_it_cannot_list_the_device(tmp_path: Path) -> None:
     store = _init_store(tmp_path)
     password = _password(tmp_path)
@@ -57,13 +68,25 @@ def test_enroll_refuses_when_it_cannot_list_the_device(tmp_path: Path) -> None:
     assert _active_serials(tmp_path, store, "alice-phone") == before, "a failed listing must not revoke the device"
 
 
-def test_enroll_refuses_a_loose_password_file(tmp_path: Path) -> None:
+def test_enroll_waits_for_a_concurrent_enroll_and_gives_up(tmp_path: Path) -> None:
     store = _init_store(tmp_path)
-    password = _password(tmp_path)
-    password.chmod(0o644)
-    result = _client_pki(tmp_path, store, "enroll", "alice-phone", "--password-file", str(password))
+    holder = subprocess.Popen(["flock", "--exclusive", str(store / "ca"), "sleep", "10"])
+    try:
+        time.sleep(0.5)
+        result = _client_pki(
+            tmp_path,
+            store,
+            "enroll",
+            "alice-phone",
+            "--password-file",
+            str(_password(tmp_path)),
+            extra_env={"CLIENT_PKI_LOCK_TIMEOUT_SEC": "1"},
+        )
+    finally:
+        holder.kill()
+        holder.wait()
     assert result.returncode == 1
-    assert "readable by group/other" in result.stderr
+    assert "another enroll or rotate is running" in result.stderr
     assert _active_serials(tmp_path, store, "alice-phone") == []
 
 
@@ -140,13 +163,19 @@ def _active_serials(tmp_path: Path, store: Path, cn: str) -> list[str]:
 
 
 def _client_pki(
-    tmp_path: Path, store: Path, *args: str, guard: bool = False, path: str | None = None
+    tmp_path: Path,
+    store: Path,
+    *args: str,
+    guard: bool = False,
+    path: str | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     env = {**os.environ, "HOME": str(home), "HOME_WARDEN_PKI_STORE": str(store)}
     if path is not None:
         env["PATH"] = path
+    env.update(extra_env or {})
     env.pop("HOME_WARDEN_SKIP_HOST_GUARD", None)
     if not guard:
         env["HOME_WARDEN_SKIP_HOST_GUARD"] = "1"

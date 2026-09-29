@@ -133,7 +133,7 @@ A `.p12` bundle is protected by a password of at least 16 characters, read from 
 ./scripts/client-pki enroll alice-phone --password-file ~/.config/home-warden/alice-phone.pass
 ```
 
-That issues the certificate and writes `conf/pki/bundles/alice-phone-<serial>.p12` (`0600`). `enroll` refuses a name that already has an active certificate, so it never silently revokes a working device; use `rotate` for that.
+That issues the certificate and writes `conf/pki/bundles/alice-phone-<serial>.p12` (`0600`). `enroll` refuses a name that already has an active certificate, so it never silently revokes a working device; use `rotate` for that. `enroll` and `rotate` hold a lock on the store while they check and issue, so two runs for the same device can't revoke each other's certificate (a hand-run `create client` doesn't take that lock).
 
 **Deliver the bundle and its password separately**: for example the `.p12` over AirDrop or a USB cable, and the password read out or sent over a different channel. Anyone with both can impersonate the device until you revoke it. Delete the `.p12` from the store and from wherever you copied it once the device has imported it; the store keeps the certificate and key, so you can export it again with `./scripts/client-pki export p12 alice-phone --password-file ...`.
 
