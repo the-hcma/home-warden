@@ -17,7 +17,26 @@ Converts `thehcma/home`'s tinydns-format `dns/data` into the PowerDNS GeoIP-back
 # writes /path/to/output/zones.yml and /path/to/output/pdns.conf
 ```
 
-Run once against `thehcma/home`'s real `dns/data` to bootstrap the initial `zones.yml`; from then on, edit `zones.yml` directly (it becomes the source of truth, replacing `dns/data`) — don't re-run the converter against a stale tinydns file.
+## Which file is the source of truth
+
+The migration has two phases, and the generated `zones.yml` header doesn't assume either one ([#169](https://github.com/the-hcma/home-warden/issues/169)).
+
+**Phase 1: `data` is the source of truth.** Use this while tinydns still serves the zones anywhere. Edit `data`, run the converter, and let the reload unit pick up the regenerated `zones.yml`. Don't hand-edit `zones.yml`: the next conversion overwrites it, as its header says. The generated file can be gitignored in the served-config repo in this phase. Make the changes the converter's warning block asks for in `data`.
+
+**Phase 2: `zones.yml` is the source of truth.** Edit `zones.yml`, check it against the last committed copy, and commit:
+
+```bash
+dns-zones-yaml-check --previous <(git show HEAD:dns/zones.yml) dns/zones.yml
+```
+
+The reload unit runs the same gate, without `--previous`, before every reload.
+
+**Switching from phase 1 to phase 2:**
+
+1. Convert once more and work through the warning block until only findings you accept are left. Nothing marked "blocks reload" can stay.
+2. Delete the generated header lines from `zones.yml`.
+3. Stop gitignoring `zones.yml`, and commit it.
+4. Once every DNS server serves from `zones.yml` (see [Serving the same zones from several DNS servers](#serving-the-same-zones-from-several-dns-servers)), delete `data` and stop running the converter. From then on it is only an import tool.
 
 ## Validating a conversion (or a later hand-edit) for real
 
@@ -146,6 +165,16 @@ dig @127.0.0.1 -p 853 _ldap._tcp.<your-zone> SRV
 ```
 
 Substitute the real internal zone name(s) from `thehcma/home` (private repo) — deliberately not written out here, per `.cursor/rules/no-private-infra.mdc`.
+
+## Serving the same zones from several DNS servers
+
+Every DNS server that serves these zones runs its own copy of the setup this doc describes: `pdns-server` + `pdns-backend-geoip` on loopback:853 behind its own `pdns-recursor`, from its own copy of the same `zones.yml`, with the same reload gate (`setup-service` with `PDNS_ZONES_YAML`). There is no zone transfer, so each server keeps answering when the others are down.
+
+- **Distribution**: each server pulls the served-config repo, and its reload unit checks and reloads `zones.yml` when the file changes. A file that fails the gate is refused on that server, which keeps serving what it last loaded.
+- **Staleness**: a server that hasn't pulled yet serves the previous version. Compare each zone's SOA serial across servers (`dig @<server> <zone> SOA +short`) to spot one left behind. This only works if every change bumps the serial, which `dns-zones-yaml-check --previous` checks.
+- **Validation**: before switching a server from tinydns, run the checks from [Validating a conversion](#validating-a-conversion-or-a-later-hand-edit-for-real) on that server's own OS and PowerDNS packages, and compare its answers against tinydns.
+
+Rolling this out to the other servers and retiring tinydns is tracked in [#175](https://github.com/the-hcma/home-warden/issues/175).
 
 ## Dropping the tinydns backend after cutover
 
