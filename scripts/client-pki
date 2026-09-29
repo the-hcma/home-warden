@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Manage home-warden's private client-certificate CA for mTLS: issue, list,
-# revoke, export PKCS#12, refresh the CRL, check expiry.
+# revoke, export PKCS#12, refresh the CRL, check expiry, back up and restore.
 # Thin wrapper around the tiny-pki CLI (the-hcma/tiny-pki) that pins the store
 # to home-warden's location; every tiny-pki verb and flag passes through.
-# See the-hcma/home-warden#49.
+# See docs/client-pki.md and the-hcma/home-warden#49.
+#
+# Before any command, refuses a store whose permissions are looser than
+# tiny-pki's layout (everything but public/ private to you), so a CA key made
+# readable by accident is caught instead of used.
 #
 # Env:
 #   HOME_WARDEN_PKI_STORE  CA store directory (default: conf/pki in this repo;
@@ -21,6 +25,8 @@
 #   ./scripts/client-pki revoke 0x<old serial>                 # once rotated
 #   ./scripts/client-pki revoke alice
 #   ./scripts/client-pki check --quiet
+#   ./scripts/client-pki backup --out PATH --passphrase-file PATH
+#   ./scripts/client-pki restore --in PATH --passphrase-file PATH
 
 set -euo pipefail
 
@@ -29,9 +35,60 @@ readonly repo_dir
 store="${HOME_WARDEN_PKI_STORE:-${repo_dir}/conf/pki}"
 readonly store
 
+# shellcheck source=scripts/lib/client-pki-store
+source "${repo_dir}/scripts/lib/client-pki-store"
+
+usage_backup_restore() {
+  echo "usage: client-pki backup --out PATH --passphrase-file PATH" >&2
+  echo "       client-pki restore --in PATH --passphrase-file PATH" >&2
+}
+
+run_backup_or_restore() {
+  local -r verb="$1"
+  shift
+  local archive_flag="--in"
+  local archive="" passphrase_file=""
+
+  if [[ "${verb}" == backup ]]; then
+    archive_flag="--out"
+  fi
+  while (($# >= 2)); do
+    case "$1" in
+      "${archive_flag}") archive="$2" ;;
+      --passphrase-file) passphrase_file="$2" ;;
+      *) break ;;
+    esac
+    shift 2
+  done
+  if (($# > 0)); then
+    usage_backup_restore
+    return 2
+  fi
+  if [[ -z "${archive}" || -z "${passphrase_file}" ]]; then
+    usage_backup_restore
+    return 2
+  fi
+
+  if [[ "${verb}" == backup ]]; then
+    client_pki_check_store_permissions "${store}" || return 1
+    client_pki_backup "${store}" "${archive}" "${passphrase_file}"
+  else
+    client_pki_restore "${store}" "${archive}" "${passphrase_file}"
+  fi
+}
+
+case "${1:-}" in
+  backup | restore)
+    run_backup_or_restore "$@"
+    exit
+    ;;
+esac
+
 if ! command -v uv >/dev/null 2>&1; then
   echo "client-pki: install uv (https://docs.astral.sh/uv/) or run 'uv sync' in ${repo_dir}" >&2
   exit 1
 fi
+
+client_pki_check_store_permissions "${store}"
 
 exec uv run --project "${repo_dir}" tiny-pki --store "${store}" "$@"

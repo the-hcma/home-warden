@@ -8,6 +8,9 @@ lifetime, strict flags, and CN validation.
 End-to-end tests point a throwaway unprivileged nginx at the store's
 `public/ca.crt` and `public/crl.pem` and check the client lifecycle:
 
+- a CA rotation (docs/client-pki.md): with a transition bundle and both CAs'
+  CRLs, clients of both CAs are accepted, an old-CA revocation takes effect,
+  and dropping the old CA cuts its clients off;
 - a client certificate is accepted, then rejected once it is revoked and
   nginx reloads;
 - a rotated client keeps working on both certificates until the old serial is
@@ -48,6 +51,56 @@ requires_nginx = pytest.mark.skipif(
     NGINX is None and not REQUIRE_NGINX,
     reason="nginx not on PATH -- install nginx to run the mTLS end-to-end tests",
 )
+
+
+@requires_nginx
+def test_ca_rotation_trusts_both_cas_during_the_transition(tmp_path: Path) -> None:
+    old_store = _init_store(tmp_path)
+    new_store = tmp_path / "pki-new"
+    _tiny_pki(new_store, "init", "--cn", "home-warden next CA", "--key-size", "2048")
+    _tiny_pki(old_store, "create", "client", "alice", "--key-size", "2048")
+    _tiny_pki(old_store, "create", "client", "carol", "--key-size", "2048")
+    _tiny_pki(new_store, "create", "client", "alice", "--key-size", "2048")
+    old_clients = {entry["cn"]: entry for entry in _entries(old_store, "clients")}
+    old_alice, old_carol = old_clients["alice"], old_clients["carol"]
+    new_alice = _entries(new_store, "clients")[0]
+    server_ca = _public_files(old_store)[0]
+    transition = tmp_path / "transition"
+    transition.mkdir()
+    bundle, crls = transition / "ca-bundle.pem", transition / "crl.pem"
+
+    def publish(*stores: Path, crl_stores: tuple[Path, ...] | None = None) -> None:
+        # Replace, never rewrite in place: nginx >= 1.27.4 reuses a cached CA/CRL
+        # across reloads while the file keeps its inode and whole-second mtime.
+        for path, parts in (
+            (bundle, [_public_files(s)[0] for s in stores]),
+            (crls, [_public_files(s)[1] for s in crl_stores or stores]),
+        ):
+            staged = path.with_suffix(".tmp")
+            staged.write_text("".join(part.read_text() for part in parts))
+            staged.replace(path)
+
+    publish(old_store, new_store, crl_stores=(old_store,))
+    with _nginx(tmp_path, _verify_client_http(old_store, bundle, crls)) as port:
+        assert _get(port, server_ca, old_alice) == 200
+        assert _get(port, server_ca, new_alice) == 400, "a CA without its CRL in ssl_crl must not verify"
+
+        publish(old_store, new_store)
+        _nginx_signal(tmp_path, "reload")
+        assert _eventually(lambda: _get(port, server_ca, new_alice) == 200), "new CA not trusted with both CRLs"
+        assert _get(port, server_ca, old_alice) == 200
+
+        _tiny_pki(old_store, "revoke", "alice")
+        publish(old_store, new_store)
+        _nginx_signal(tmp_path, "reload")
+        assert _eventually(lambda: _get(port, server_ca, old_alice) == 400), "old-CA revocation ignored"
+        assert _get(port, server_ca, new_alice) == 200
+        assert _get(port, server_ca, old_carol) == 200
+
+        publish(new_store)
+        _nginx_signal(tmp_path, "reload")
+        assert _eventually(lambda: _get(port, server_ca, old_carol) == 400), "old CA still trusted after dropping it"
+        assert _get(port, server_ca, new_alice) == 200
 
 
 @requires_nginx
@@ -315,9 +368,12 @@ def _tiny_pki_run(store: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _verify_client_http(store: Path) -> str:
+def _verify_client_http(store: Path, ca_bundle: Path | None = None, crl_file: Path | None = None) -> str:
+    """An `http {}` block serving `store`'s server cert and requiring a client
+    cert verified against `ca_bundle`/`crl_file` (default: the store's own)."""
     server = _entries(store, "servers")[0]
-    ca_cert, crl = _public_files(store)
+    store_ca, store_crl = _public_files(store)
+    ca_cert, crl = ca_bundle or store_ca, crl_file or store_crl
     return f"""
 http {{
     server {{
