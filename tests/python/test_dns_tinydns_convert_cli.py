@@ -9,9 +9,10 @@ from pathlib import Path
 import yaml
 
 from app.dns_tinydns_convert_cli import main
+from app.dns_zones_yaml_check_cli import main as zones_yaml_check_main
 
 
-def test_cli_cname_conflict_is_imported_and_flagged_as_blocking(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_cli_cname_conflict_skips_the_cname_and_passes_the_gate(monkeypatch, tmp_path: Path, capsys) -> None:
     data_file = tmp_path / "data"
     data_file.write_text(
         "Zexample.com:ns1.example.com:hostmaster.example.com:1:16384:2048:1048576:2560:3600\n"
@@ -23,13 +24,12 @@ def test_cli_cname_conflict_is_imported_and_flagged_as_blocking(monkeypatch, tmp
     assert main() == 0
     err = capsys.readouterr().err
     assert err.count("WARNING") == 1
-    assert "dns1.example.com: has a CNAME alongside a records" in err
-    assert "[blocks reload]" in err
+    assert "dns1.example.com: CNAME to other.example.com. conflicts with its a records" in err
+    assert "[blocks reload]" not in err
     parsed = yaml.safe_load((outdir / "zones.yml").read_text())
-    assert parsed["domains"][0]["records"]["dns1.example.com"] == [
-        {"a": "203.0.113.1"},
-        {"cname": "other.example.com."},
-    ]
+    assert parsed["domains"][0]["records"]["dns1.example.com"] == [{"a": "203.0.113.1"}]
+    monkeypatch.setattr(sys, "argv", ["dns-zones-yaml-check", str(outdir / "zones.yml")])
+    assert zones_yaml_check_main() == 0
 
 
 def test_cli_help_exits_cleanly() -> None:

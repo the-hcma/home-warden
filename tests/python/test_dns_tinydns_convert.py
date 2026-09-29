@@ -347,6 +347,38 @@ def test_bucket_into_zones_with_issues_skips_unplaceable_records() -> None:
     assert [issue.subject for issue in issues] == ["example.org", "stray.example.net"]
 
 
+def test_bucket_into_zones_with_issues_skips_a_cname_that_conflicts() -> None:
+    # #16's own documented oddity: a name carrying an A record (from NS
+    # glue) and a CNAME too. The A is kept; the CNAME can't be served
+    # alongside it (RFC 1034 section 3.6.2), so it's skipped and reported.
+    records = [
+        ParsedRecord(owner="example.com", rtype="soa", content="soa-content", ttl=3600),
+        ParsedRecord(owner="dns1.example.com", rtype="a", content="203.0.113.1"),
+        ParsedRecord(owner="dns1.example.com", rtype="cname", content="other.example.com."),
+        ParsedRecord(owner="www.example.com", rtype="cname", content="a.example.com."),
+        ParsedRecord(owner="www.example.com", rtype="cname", content="b.example.com."),
+    ]
+    issues: list[ZoneIssue] = []
+    zones = bucket_into_zones(records, ["example.com"], issues=issues)
+    assert zones["example.com"].records["dns1.example.com"] == {"a": [RecordValue("203.0.113.1")]}
+    assert zones["example.com"].records["www.example.com"] == {"cname": [RecordValue("a.example.com.")]}
+    assert [(i.subject, i.problem.split(" (")[0]) for i in issues] == [
+        ("dns1.example.com", "CNAME to other.example.com. conflicts with its a records"),
+        ("www.example.com", "CNAME to b.example.com. conflicts with its first CNAME"),
+    ]
+    assert not any(issue.blocking for issue in issues)
+
+
+def test_bucket_into_zones_cname_conflict_raises_without_issues() -> None:
+    records = [
+        ParsedRecord(owner="example.com", rtype="soa", content="soa-content", ttl=3600),
+        ParsedRecord(owner="dns1.example.com", rtype="a", content="203.0.113.1"),
+        ParsedRecord(owner="dns1.example.com", rtype="cname", content="other.example.com."),
+    ]
+    with pytest.raises(ValueError, match="CNAME at 'dns1.example.com' conflicts with its a records"):
+        bucket_into_zones(records, ["example.com"])
+
+
 def test_bucket_into_zones_soa_ttl_sets_zone_default_ttl() -> None:
     records = [ParsedRecord(owner="example.com", rtype="soa", content="soa-content", ttl=7200)]
     zones = bucket_into_zones(records, ["example.com"])
@@ -354,17 +386,15 @@ def test_bucket_into_zones_soa_ttl_sets_zone_default_ttl() -> None:
 
 
 def test_bucket_into_zones_preserves_multiple_record_types_for_same_owner() -> None:
-    # #16's own documented oddity: a name can carry an A record (from NS
-    # glue) and later a CNAME too -- both must survive, not overwrite.
     records = [
         ParsedRecord(owner="example.com", rtype="soa", content="soa-content", ttl=3600),
         ParsedRecord(owner="app.example.com", rtype="a", content="203.0.113.1", ttl=86400),
-        ParsedRecord(owner="app.example.com", rtype="cname", content="alias.example.com.", ttl=86400),
+        ParsedRecord(owner="app.example.com", rtype="txt", content='"hello"', ttl=86400),
     ]
     zones = bucket_into_zones(records, ["example.com"])
     owner_records = zones["example.com"].records["app.example.com"]
     assert owner_records["a"] == [RecordValue("203.0.113.1", 86400)]
-    assert owner_records["cname"] == [RecordValue("alias.example.com.", 86400)]
+    assert owner_records["txt"] == [RecordValue('"hello"', 86400)]
 
 
 def test_bucket_into_zones_preserves_per_record_ttl_distinct_from_zone_default() -> None:

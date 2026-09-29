@@ -90,6 +90,11 @@ def bucket_into_zones(
     whose SOA has no ttl is left out along with every record under it,
     and an owner no zone contains is left out on its own -- each noted
     once in `issues`.
+
+    A CNAME sharing its owner with other records can't be served as
+    written (RFC 1034 section 3.6.2, and resolvers disagree on which one
+    wins), so it is an error too -- or, with `issues`, the CNAME is left
+    out and the owner's other records kept (see _drop_cname_conflicts).
     """
     soa_ttls: dict[str, int | None] = dict.fromkeys(zone_apexes)
     for rec in records:
@@ -136,6 +141,7 @@ def bucket_into_zones(
         owner_records = zones[apex].records.setdefault(rec.owner, {})
         owner_records.setdefault(rec.rtype, []).append(RecordValue(rec.content, rec.ttl))
 
+    _drop_cname_conflicts(zones, issues)
     return zones
 
 
@@ -347,6 +353,37 @@ def _decode_wire_name(data: bytes, offset: int) -> tuple[str, int]:
         labels.append(data[i : i + length].decode("ascii"))
         i += length
     return ".".join(labels) + ".", i
+
+
+def _drop_cname_conflicts(zones: dict[str, Zone], issues: list[ZoneIssue] | None) -> None:
+    """Keep an owner's other records over its CNAME, and its first CNAME
+    over any later one: an A/NS/PTR/... is more often depended on (glue, a
+    PTR's target) than an alias, and the result is a zones.yml the reload
+    gate accepts. Raises instead when `issues` is None.
+    """
+    for zone in zones.values():
+        for owner, by_type in zone.records.items():
+            cnames = by_type.get("cname", [])
+            others = sorted(rtype for rtype in by_type if rtype != "cname")
+            if not cnames or (not others and len(cnames) == 1):
+                continue
+            conflict = f"its {', '.join(others)} records" if others else "its first CNAME"
+            if issues is None:
+                raise ValueError(f"CNAME at {owner!r} conflicts with {conflict} (RFC 1034 section 3.6.2)")
+            kept, skipped = ([], cnames) if others else (cnames[:1], cnames[1:])
+            for value in skipped:
+                issues.append(
+                    ZoneIssue(
+                        owner,
+                        f"CNAME to {value.content} conflicts with {conflict} "
+                        "(RFC 1034 section 3.6.2), so the CNAME was skipped",
+                        "remove either the C line or the other lines for this name",
+                    )
+                )
+            if kept:
+                by_type["cname"] = kept
+            else:
+                del by_type["cname"]
 
 
 def _ensure_trailing_dot(name: str) -> str:

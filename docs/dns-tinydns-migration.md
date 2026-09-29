@@ -30,7 +30,7 @@ Before trusting a migration or a hand-edit against the real host's zone data, ru
 
 ## Lint findings
 
-The converter imports everything it can: a line it can't parse, a record no `Z` line's zone contains, and a zone whose `Z` line has no ttl are skipped instead of failing the run. It then lints the `zones.yml` it wrote (`app.dns_zones_lint`, [#169](https://github.com/the-hcma/home-warden/issues/169)) and prints every skip and finding in one warning block at the end, each with what to change. `dns-zones-yaml-check` runs the same lint on a hand-edited `zones.yml`.
+The converter is best effort and imports everything it can. It skips, instead of failing the run: a line it can't parse, a record no `Z` line's zone contains, a zone whose `Z` line has no ttl, and a CNAME that shares its name with other records (it keeps the other records, and the first of two CNAMEs), so the `zones.yml` it writes never has a finding that blocks reload. It then lints the `zones.yml` it wrote (`app.dns_zones_lint`, [#169](https://github.com/the-hcma/home-warden/issues/169)) and prints every skip and finding in one warning block at the end, each with what to change. `dns-zones-yaml-check` runs the same lint on a hand-edited `zones.yml`.
 
 | Finding | Blocks reload |
 | --- | --- |
@@ -42,7 +42,7 @@ The converter imports everything it can: a line it can't parse, a record no `Z` 
 | A zone with no SOA at its apex, more than one, an SOA away from the apex, or an SOA missing a field | no |
 | A zone whose records changed without its SOA serial going up (only with `--previous`) | no |
 
-A finding that blocks reload makes `dns-zones-yaml-check` exit 2, so `scripts/pdns-test-and-reload` refuses the file and the server keeps what it last loaded. Everything else is served as written and only reported. For the serial check, pass the last-served copy, e.g. `dns-zones-yaml-check --previous <(git show HEAD:dns/zones.yml) dns/zones.yml`.
+A CNAME conflict can therefore only reach the gate through a hand-edit of `zones.yml`. A finding that blocks reload makes `dns-zones-yaml-check` exit 2, so `scripts/pdns-test-and-reload` refuses the file and the server keeps what it last loaded. Everything else is served as written and only reported. For the serial check, pass the last-served copy, e.g. `dns-zones-yaml-check --previous <(git show HEAD:dns/zones.yml) dns/zones.yml`.
 
 An address with several names needs only one PTR, so an A is not flagged as long as its reverse name has any PTR.
 
