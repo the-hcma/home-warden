@@ -8,12 +8,14 @@ the host (the write-action decision in docs/client-pki.md).
 
 Paths tiny-pki reports (certificate and key files, the store itself) are
 dropped from the response: the browser has no use for them, and they
-name the operator's home directory.
+name the operator's home directory. For the same reason an error's
+`detail` names no path; the full diagnostic goes to the server log.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
 from collections.abc import Iterable
@@ -75,15 +77,23 @@ def load_pki_status(store: Path, services: list[dict], *, timeout: float) -> dic
         "vhosts": client_cert_vhosts(services),
     }
     if not (store / "ca" / "ca.crt").is_file():
+        # Reading a legacy flat store makes tiny-pki migrate it, a write
+        # this view must not trigger; leave that to scripts/client-pki.
+        if (store / "ca.crt").is_file():
+            detail = "the store uses tiny-pki's legacy flat layout; run ./scripts/client-pki list ca on the host"
+            return {**result, "status": "error", "detail": detail}
+        if store.is_dir() and any(store.iterdir()):
+            return {**result, "status": "error", "detail": "the store exists but has no CA certificate (ca/ca.crt)"}
         return result
     try:
         ca = _tiny_pki_json(store, ["list", "ca", "--json"], timeout, dict)
-        certs = _tiny_pki_json(store, ["list", "certs", "--json"], timeout, list)
+        certs = _objects(_tiny_pki_json(store, ["list", "certs", "--json"], timeout, list), "list certs")
         check = _tiny_pki_json(store, ["check", "--json", "--include-revoked"], timeout, dict, ok_codes=(0, 1, 2))
+        check_rows = _objects(check.get("results"), "check")
     except PkiViewError as e:
         return {**result, "status": "error", "detail": str(e)}
 
-    checks = {(row.get("kind"), row.get("serial_number")): row for row in check.get("results") or []}
+    checks = {(row.get("kind"), row.get("serial_number")): row for row in check_rows}
     ca_check = next((row for row in checks.values() if row.get("kind") == "ca"), {})
     crl_check = next((row for row in checks.values() if row.get("kind") == "crl"), {})
     certificates = sorted(
@@ -113,6 +123,9 @@ def load_pki_status(store: Path, services: list[dict], *, timeout: float) -> dic
     return result
 
 
+_log = logging.getLogger(__name__)
+
+
 def _certificate_entry(cert: dict, checks: dict) -> dict:
     row = checks.get((cert.get("kind"), _serial_hex(cert.get("serial")))) or {}
     return {
@@ -128,6 +141,12 @@ def _certificate_entry(cert: dict, checks: dict) -> dict:
         "revoked_at": cert.get("revoked_at"),
         "superseded_by": cert.get("superseded_by"),
     }
+
+
+def _objects(rows: object, verb: str) -> list[dict]:
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise PkiViewError(f"tiny-pki {verb} printed rows that aren't a list of objects")
+    return rows
 
 
 def _serial_hex(serial: object) -> str | None:
@@ -155,13 +174,14 @@ def _tiny_pki_json(store: Path, args: list[str], timeout: float, shape: type[T],
     command = [str(TINY_PKI), "--store", str(store), "--color", "never", *args]
     try:
         proc = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
-    except FileNotFoundError as e:
-        raise PkiViewError(f"tiny-pki not found at {TINY_PKI}") from e
     except subprocess.TimeoutExpired as e:
         raise PkiViewError(f"tiny-pki {args[0]} timed out after {timeout:g}s") from e
+    except OSError as e:
+        _log.warning("running %s failed: %s", TINY_PKI, e)
+        raise PkiViewError("tiny-pki could not be run; see the server log") from e
     if proc.returncode not in ok_codes:
-        stderr = proc.stderr.strip().splitlines()
-        raise PkiViewError(f"tiny-pki {' '.join(args[:2])} exited {proc.returncode}: {stderr[-1] if stderr else ''}")
+        _log.warning("tiny-pki %s exited %d: %s", " ".join(args[:2]), proc.returncode, proc.stderr.strip())
+        raise PkiViewError(f"tiny-pki {' '.join(args[:2])} exited {proc.returncode}; see the server log")
     try:
         data = json.loads(proc.stdout)
     except json.JSONDecodeError as e:

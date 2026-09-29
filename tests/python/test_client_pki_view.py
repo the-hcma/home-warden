@@ -41,15 +41,65 @@ def test_a_bad_exit_is_an_error(monkeypatch: pytest.MonkeyPatch, store: Path, tm
     monkeypatch.setattr(client_pki_view, "TINY_PKI", _fake_tiny_pki(tmp_path, "echo 'store is locked' >&2; exit 1"))
     status = load_pki_status(store, [], timeout=10)
     assert status["status"] == "error"
-    assert status["detail"] == "tiny-pki list ca exited 1: store is locked"
+    assert status["detail"] == "tiny-pki list ca exited 1; see the server log"
 
 
-def test_a_missing_tiny_pki_is_an_error(monkeypatch: pytest.MonkeyPatch, store: Path, tmp_path: Path) -> None:
+def test_a_legacy_flat_store_is_an_error_and_is_left_unmigrated(tmp_path: Path) -> None:
+    (tmp_path / "ca.crt").write_text("not read\n")
+    status = load_pki_status(tmp_path, [], timeout=10)
+    assert status["status"] == "error"
+    assert "legacy flat layout" in status["detail"]
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["ca.crt"]
+
+
+def test_a_live_superseded_certificate_counts_toward_overall_status(
+    monkeypatch: pytest.MonkeyPatch, store: Path, tmp_path: Path
+) -> None:
+    certs = [
+        {"cn": "bob-laptop", "kind": "client", "serial": "0a", "status": "active", "superseded_by": "b"},
+        {"cn": "bob-laptop", "kind": "client", "serial": "0b", "status": "active", "superseded_by": None},
+    ]
+    check = {
+        "results": [
+            {"kind": "ca", "status": "ok"},
+            {"kind": "crl", "status": "ok"},
+            {"kind": "client", "serial_number": "a", "status": "expired"},
+            {"kind": "client", "serial_number": "b", "status": "ok"},
+        ]
+    }
+    monkeypatch.setattr(client_pki_view, "TINY_PKI", _canned_tiny_pki(tmp_path, certs=certs, check=check))
+    status = load_pki_status(store, [], timeout=10)
+    assert status["status"] == "expired"
+    assert [(c["serial"], c["state"], c["health"]) for c in status["certificates"]] == [
+        ("0a", "active", "expired"),
+        ("0b", "active", "ok"),
+    ]
+
+
+def test_a_missing_tiny_pki_is_an_error_without_its_path(
+    monkeypatch: pytest.MonkeyPatch, store: Path, tmp_path: Path
+) -> None:
     monkeypatch.setattr(client_pki_view, "TINY_PKI", tmp_path / "missing")
     status = load_pki_status(store, _SERVICES, timeout=10)
     assert status["status"] == "error"
-    assert "tiny-pki not found" in status["detail"]
+    assert status["detail"] == "tiny-pki could not be run; see the server log"
     assert [vhost["name"] for vhost in status["vhosts"]] == ["admin", "wiki"]
+
+
+def test_a_non_executable_tiny_pki_is_an_error(monkeypatch: pytest.MonkeyPatch, store: Path, tmp_path: Path) -> None:
+    script = _fake_tiny_pki(tmp_path, "echo '{}'")
+    script.chmod(0o644)
+    monkeypatch.setattr(client_pki_view, "TINY_PKI", script)
+    status = load_pki_status(store, [], timeout=10)
+    assert status["status"] == "error"
+    assert status["detail"] == "tiny-pki could not be run; see the server log"
+
+
+def test_a_store_without_a_ca_certificate_is_an_error(tmp_path: Path) -> None:
+    (tmp_path / "public").mkdir()
+    status = load_pki_status(tmp_path, [], timeout=10)
+    assert status["status"] == "error"
+    assert status["detail"] == "the store exists but has no CA certificate (ca/ca.crt)"
 
 
 def test_a_timeout_is_an_error(monkeypatch: pytest.MonkeyPatch, store: Path) -> None:
@@ -86,6 +136,23 @@ def test_json_of_the_wrong_shape_is_an_error(monkeypatch: pytest.MonkeyPatch, st
     status = load_pki_status(store, [], timeout=10)
     assert status["status"] == "error"
     assert status["detail"] == "tiny-pki list ca printed a list, expected a dict"
+
+
+@pytest.mark.parametrize(
+    ("certs", "check", "verb"),
+    [
+        ([None], {"results": []}, "list certs"),
+        ([], {"results": [None]}, "check"),
+        ([], {}, "check"),
+    ],
+)
+def test_malformed_rows_are_an_error(
+    monkeypatch: pytest.MonkeyPatch, store: Path, tmp_path: Path, certs: list, check: dict, verb: str
+) -> None:
+    monkeypatch.setattr(client_pki_view, "TINY_PKI", _canned_tiny_pki(tmp_path, certs=certs, check=check))
+    status = load_pki_status(store, [], timeout=10)
+    assert status["status"] == "error"
+    assert status["detail"] == f"tiny-pki {verb} printed rows that aren't a list of objects"
 
 
 def test_no_ca_is_not_configured_but_still_lists_vhosts(tmp_path: Path) -> None:
@@ -133,6 +200,17 @@ def test_worst_status_ranks_by_tiny_pki_severity() -> None:
     assert worst(["ok", "expired", "expiring"]) == "expired"
     assert worst(["ok", None]) == "unknown"
     assert worst([]) == "ok"
+
+
+def _canned_tiny_pki(tmp_path: Path, *, certs: list, check: dict) -> Path:
+    """A tiny-pki that answers `list ca`, `list certs`, and `check` with
+    canned JSON; arguments are `--store S --color never <verb> ...`."""
+    for name, payload in (("ca", {"cn": "Test client CA"}), ("certs", certs), ("check", check)):
+        (tmp_path / f"{name}.json").write_text(json.dumps(payload))
+    return _fake_tiny_pki(
+        tmp_path,
+        f'if [[ "$5" == check ]]; then cat {tmp_path}/check.json; else cat "{tmp_path}/$6.json"; fi',
+    )
 
 
 def _fake_tiny_pki(tmp_path: Path, body: str) -> Path:
