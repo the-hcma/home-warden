@@ -167,13 +167,13 @@ fi
 
 log "dns-zones-yaml-check ${pdns_zones_yaml}"
 if zone_list="$(run_zones_check "${pdns_zones_yaml}")"; then
-  log "syntax OK"
+  log "check OK"
 else
   wrapper_status=$?
   if [[ ${wrapper_status} -eq 1 ]]; then
     log "FAIL: dns-zones-yaml-check wrapper error (e.g. uv not found on PATH) — refusing reload"
   else
-    log "FAIL: zones.yml syntax check failed — refusing reload"
+    log "FAIL: zones.yml check failed (malformed, or an issue marked 'blocks reload') — refusing reload"
   fi
   exit 2
 fi

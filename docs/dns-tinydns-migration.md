@@ -6,7 +6,7 @@ Converts `thehcma/home`'s tinydns-format `dns/data` into the PowerDNS GeoIP-back
 
 ## What it does
 
-- Parses exactly the tinydns line types `thehcma/home#16` identified as actually used: SOA (`Z`), NS with optional glue A (`&`), A+PTR (`=`), A-only (`+`), TXT (`'`), CNAME (`C`), and SRV via the generic record line (`:` type `33`, octal-escaped wire rdata). Any other line type is a loud error, not a silently-dropped record.
+- Parses exactly the tinydns line types `thehcma/home#16` identified as actually used: SOA (`Z`), NS with optional glue A (`&`), A+PTR (`=`), A-only (`+`), TXT (`'`), CNAME (`C`), and SRV via the generic record line (`:` type `33`, octal-escaped wire rdata). Any other line type is skipped and reported, never silently dropped.
 - Buckets every record under the longest-matching zone apex, from the file's own `Z` (SOA) lines — the same apex-first, longest-match logic `app.catalog_checks.candidate_zone_names` uses for Cloudflare zone lookups, but against a closed set already known from the file.
 - Renders `zones.yml` (PowerDNS GeoIP-backend zone YAML — `launch=geoip`, no MaxMind/geo expansions, plain `records:` only) and `pdns.conf` (pointing the authoritative server at **loopback:853 only** — the recursor, unchanged, is what answers the real `:53` and forwards queries for these zones to loopback:853).
 
@@ -27,6 +27,24 @@ Per this repo's "validate by actually running it" standard — a generator that 
 - **CI / real acceptance test**: `.github/ci/dns-catalog-validate` installs the actual Ubuntu `pdns-server` + `pdns-backend-geoip` packages, converts a fixture tinydns file, and runs the genuinely generated `zones.yml`/`pdns.conf` through a real `pdns_server`, `dig`-verifying every record type. This is the authoritative check for the GeoIP YAML shape itself.
 
 Before trusting a migration or a hand-edit against the real host's zone data, run the equivalent of the CI check locally if PowerDNS with the `geoip` backend module is available (e.g. on an Ubuntu box), or at least the sqlite-backend check above to catch record-level mistakes.
+
+## Lint findings
+
+The converter imports everything it can: a line it can't parse, a record no `Z` line's zone contains, and a zone whose `Z` line has no ttl are skipped instead of failing the run. It then lints the `zones.yml` it wrote (`app.dns_zones_lint`, [#169](https://github.com/the-hcma/home-warden/issues/169)) and prints every skip and finding in one warning block at the end, each with what to change. `dns-zones-yaml-check` runs the same lint on a hand-edited `zones.yml`.
+
+| Finding | Blocks reload |
+| --- | --- |
+| A CNAME sharing its name with other records, or two CNAMEs at one name (RFC 1034 section 3.6.2) | yes |
+| The same record listed twice at one name | no |
+| An A with no PTR, when its reverse zone is served here | no |
+| A PTR whose target has no matching A, when the target's zone is served here | no |
+| A name listed under a zone it isn't inside | no |
+| A zone with no SOA at its apex, more than one, an SOA away from the apex, or an SOA missing a field | no |
+| A zone whose records changed without its SOA serial going up (only with `--previous`) | no |
+
+A finding that blocks reload makes `dns-zones-yaml-check` exit 2, so `scripts/pdns-test-and-reload` refuses the file and the server keeps what it last loaded. Everything else is served as written and only reported. For the serial check, pass the last-served copy, e.g. `dns-zones-yaml-check --previous <(git show HEAD:dns/zones.yml) dns/zones.yml`.
+
+An address with several names needs only one PTR, so an A is not flagged as long as its reverse name has any PTR.
 
 ## Record mapping reference
 
@@ -78,7 +96,7 @@ When `zones.yml` lives under `/home`, `setup-service` also installs a `pdns.serv
 
 Skipped (with a message, not an error) when `PDNS_ZONES_YAML` is unset and the default `~/home/dns/zones.yml` doesn't exist either — installing `pdns-server` itself and populating `zones.yml` both stay manual steps (see Packages above); this wiring only covers the reload-on-edit path once those are in place. `./scripts/setup-service --status` reports the resolved `zones.yml` path and the `pdns_reload_path` unit's enabled/active state alongside everything else it already tracks.
 
-From then on, editing `zones.yml` triggers `scripts/pdns-test-and-reload`: a lightweight, offline `dns-zones-yaml-check` syntax/shape gate (see that script and `app.dns_tinydns_convert.validate_zones_yaml_syntax` — it catches a typo or a renamed key, not a deeper semantic mistake like the list-vs-dict records shape bug this repo's own CI once caught), then [`pdns_control reload`](https://doc.powerdns.com/authoritative/backends/geoip.html) — the documented way to make the GeoIP backend pick up a rewritten YAML file without a full restart. Note this calls `pdns_control reload` directly, **not** `systemctl reload pdns.service` — the distro-packaged unit doesn't implement systemd's reload verb at all ("Job type reload is not applicable for unit pdns.service").
+From then on, editing `zones.yml` triggers `scripts/pdns-test-and-reload`: an offline `dns-zones-yaml-check` gate (see that script, `app.dns_tinydns_convert.validate_zones_yaml_syntax` for the shape check, and `app.dns_zones_lint` for the record lint described under [Lint findings](#lint-findings)), then [`pdns_control reload`](https://doc.powerdns.com/authoritative/backends/geoip.html) — the documented way to make the GeoIP backend pick up a rewritten YAML file without a full restart. Note this calls `pdns_control reload` directly, **not** `systemctl reload pdns.service` — the distro-packaged unit doesn't implement systemd's reload verb at all ("Job type reload is not applicable for unit pdns.service").
 
 The reload unit runs as root (for `pdns_control`), but the syntax gate is a `uv run` in this repo, so the script drops to `OWNER` (the operator) via `runuser` for that step. `uv` is looked up in the operator's `~/.local/bin` (the astral.sh installer default) before the system `PATH`. After `pdns_control reload`, it runs `pdns_control rediscover`, then `pdns_control purge`. Reload rereads the YAML but not pdns's zone cache, the list of zones it is authoritative for, which pdns otherwise refreshes every `zone-cache-refresh-interval` seconds (default 300). Without `rediscover`, a new zone apex answers `REFUSED` and a removed one keeps answering until that refresh; both were confirmed on pdns 5.0.2 with the GeoIP backend (#145). The purge then drops the packet and negative caches, which reload also keeps, including a `REFUSED` cached before the rediscover.
 

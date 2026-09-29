@@ -309,4 +309,14 @@ PDNS_ZONES_YAML="${empty_domain}" \
 assert_sentinel "empty domain in zones.yml" 0
 assert_rec_control "empty domain in zones.yml" ""
 
+# Case 15: a CNAME sharing its name with other records (RFC 1034 section
+# 3.6.2) is a lint finding that blocks reload (#169), not just a warning.
+cname_conflict="${work_dir}/cname-conflict.yml"
+printf 'domains:\n  - domain: example.com\n    ttl: 3600\n    records:\n      %s\n        - %s\n        - %s\n' \
+  'dns1.example.com:' 'a: 192.0.2.1' 'cname: other.example.com.' >"${cname_conflict}"
+PDNS_ZONES_YAML="${cname_conflict}" \
+  run_case "CNAME conflict in zones.yml" 2 "${repo_dir}/scripts/pdns-test-and-reload"
+assert_sentinel "CNAME conflict in zones.yml" 0
+assert_rec_control "CNAME conflict in zones.yml" ""
+
 exit "${fail}"

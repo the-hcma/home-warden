@@ -23,6 +23,7 @@ from app.dns_tinydns_convert import (
     validate_zones_yaml_syntax,
     zone_apexes_from_records,
 )
+from app.dns_zones_lint import ZoneIssue
 
 # --- parse_tinydns_data: individual line types ----------------------------
 
@@ -211,6 +212,15 @@ def test_parse_error_includes_line_number() -> None:
         assert "line 2" in str(e)
 
 
+def test_parse_with_issues_skips_a_bad_line_and_keeps_the_rest() -> None:
+    issues: list[ZoneIssue] = []
+    records = parse_tinydns_data("^bad.example.com:x\n+app.example.com:203.0.113.10\n", issues)
+    assert [(r.owner, r.rtype) for r in records] == [("app.example.com", "a")]
+    (issue,) = issues
+    assert issue.subject == "line 1"
+    assert "unrecognized tinydns line type" in issue.problem
+
+
 def test_parse_skips_comments_and_blank_lines() -> None:
     text = "# a comment\n\n+ok.example.com:203.0.113.5:86400\n"
     records = parse_tinydns_data(text)
@@ -320,6 +330,21 @@ def test_bucket_into_zones_missing_soa_entirely_raises() -> None:
         raise AssertionError("expected ValueError")
     except ValueError as e:
         assert "no explicit ttl" in str(e)
+
+
+def test_bucket_into_zones_with_issues_skips_unplaceable_records() -> None:
+    records = [
+        ParsedRecord(owner="example.com", rtype="soa", content="x", ttl=3600),
+        ParsedRecord(owner="example.org", rtype="soa", content="x"),
+        ParsedRecord(owner="app.example.com", rtype="a", content="203.0.113.1"),
+        ParsedRecord(owner="app.example.org", rtype="a", content="203.0.113.2"),
+        ParsedRecord(owner="stray.example.net", rtype="a", content="203.0.113.3"),
+    ]
+    issues: list[ZoneIssue] = []
+    zones = bucket_into_zones(records, ["example.com", "example.org"], issues=issues)
+    assert list(zones) == ["example.com"]
+    assert set(zones["example.com"].records) == {"example.com", "app.example.com"}
+    assert [issue.subject for issue in issues] == ["example.org", "stray.example.net"]
 
 
 def test_bucket_into_zones_soa_ttl_sets_zone_default_ttl() -> None:

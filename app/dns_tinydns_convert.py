@@ -5,8 +5,12 @@ already worked out against the real file. See the-hcma/home-warden#108.
 Implements exactly the tinydns line types #16 identified as actually used
 -- SOA (`Z`), NS with optional glue A (`&`), A+PTR (`=`), A-only (`+`),
 TXT (`'`), CNAME (`C`), and SRV via the generic record line (`:` type
-`33`, octal-escaped wire rdata) -- and fails loudly on any other line
-type rather than silently dropping data.
+`33`, octal-escaped wire rdata) -- and never silently drops anything
+else: called without an `issues` list, parsing and bucketing raise on the
+first line or record they can't place; called with one (as
+dns-tinydns-convert does, per #169), they skip it and record a
+`ZoneIssue` naming it, so an import carries over everything it can and
+reports the rest once at the end.
 
 Each RR is placed under the longest-matching zone apex from the SOA (`Z`)
 lines found in the file (mirrors app.catalog_checks.candidate_zone_names'
@@ -18,6 +22,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from app.dns_zones_lint import ZoneIssue
 
 GENERIC_SRV_TYPE = "33"
 
@@ -54,6 +60,7 @@ def bucket_into_zones(
     records: list[ParsedRecord],
     zone_apexes: list[str],
     dropped: list[ParsedRecord] | None = None,
+    issues: list[ZoneIssue] | None = None,
 ) -> dict[str, Zone]:
     """Group parsed records under the longest-matching zone apex.
 
@@ -78,6 +85,11 @@ def bucket_into_zones(
     whose SOA carries no explicit ttl is a loud error here -- the same
     "don't silently invent or drop data" contract this module applies
     everywhere else.
+
+    With `issues`, the two errors above skip instead of raising: a zone
+    whose SOA has no ttl is left out along with every record under it,
+    and an owner no zone contains is left out on its own -- each noted
+    once in `issues`.
     """
     soa_ttls: dict[str, int | None] = dict.fromkeys(zone_apexes)
     for rec in records:
@@ -86,9 +98,20 @@ def bucket_into_zones(
     zone_default_ttls: dict[str, int] = {apex: ttl for apex, ttl in soa_ttls.items() if ttl is not None}
     missing_ttl = sorted(set(zone_apexes) - zone_default_ttls.keys())
     if missing_ttl:
-        raise ValueError(f"zone(s) {missing_ttl} have an SOA line with no explicit ttl -- cannot derive a zone default")
+        if issues is None:
+            raise ValueError(
+                f"zone(s) {missing_ttl} have an SOA line with no explicit ttl -- cannot derive a zone default"
+            )
+        issues.extend(
+            ZoneIssue(
+                apex,
+                "its Z line has no ttl, so the zone and every record in it were skipped",
+                "add a ttl as the Z line's last field, then convert again",
+            )
+            for apex in missing_ttl
+        )
 
-    zones = {apex: Zone(apex=apex, ttl=zone_default_ttls[apex]) for apex in zone_apexes}
+    zones = {apex: Zone(apex=apex, ttl=zone_default_ttls[apex]) for apex in zone_apexes if apex not in missing_ttl}
     sorted_apexes = sorted(zone_apexes, key=len, reverse=True)
 
     for rec in records:
@@ -96,6 +119,17 @@ def bucket_into_zones(
         if apex is None and rec.implicit:
             if dropped is not None:
                 dropped.append(rec)
+            continue
+        if apex in missing_ttl:
+            continue
+        if apex is None and issues is not None:
+            issues.append(
+                ZoneIssue(
+                    rec.owner,
+                    f"no Z line defines a zone containing it, so its {rec.rtype} record was skipped",
+                    "add a Z line for its zone, or remove the record",
+                )
+            )
             continue
         if apex is None:
             raise ValueError(f"no zone apex matches owner {rec.owner!r} (known zones: {zone_apexes})")
@@ -105,11 +139,12 @@ def bucket_into_zones(
     return zones
 
 
-def parse_tinydns_data(text: str) -> list[ParsedRecord]:
+def parse_tinydns_data(text: str, issues: list[ZoneIssue] | None = None) -> list[ParsedRecord]:
     """Parse tinydns data-file text into a flat list of records, in file
-    order. Raises ValueError on any unrecognized line type/shape -- see
-    module docstring for why this stays narrow rather than implementing
-    the full tinydns-data(5) grammar.
+    order. Raises ValueError on any unrecognized line type/shape -- or,
+    with `issues`, skips that line and notes it there -- see module
+    docstring for why this stays narrow rather than implementing the full
+    tinydns-data(5) grammar.
     """
     records: list[ParsedRecord] = []
     for lineno, raw_line in enumerate(text.splitlines(), start=1):
@@ -118,7 +153,15 @@ def parse_tinydns_data(text: str) -> list[ParsedRecord]:
         try:
             records.extend(_parse_line(raw_line))
         except ValueError as e:
-            raise ValueError(f"line {lineno}: {e}") from e
+            if issues is None:
+                raise ValueError(f"line {lineno}: {e}") from e
+            issues.append(
+                ZoneIssue(
+                    f"line {lineno}",
+                    f"{e}, so the line was skipped",
+                    "rewrite it as a supported line (Z & = + ' C, or :33 SRV), or add the record to zones.yml by hand",
+                )
+            )
     return records
 
 
