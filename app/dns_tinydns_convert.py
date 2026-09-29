@@ -272,8 +272,11 @@ def validate_zones_yaml_syntax(path: Path) -> dict:
     """
     import yaml
 
-    if not path.is_file():
+    # Not is_file(): `--previous <(git show ...)` passes a /dev/fd pipe.
+    if not path.exists():
         raise ValueError(f"missing file: {path}")
+    if path.is_dir():
+        raise ValueError(f"{path} is a directory, not a zones file")
     try:
         data = yaml.safe_load(path.read_text())
     except OSError as e:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -86,6 +87,19 @@ def test_cli_missing_file_exits_2(monkeypatch, tmp_path: Path, capsys) -> None:
     monkeypatch.setattr(sys, "argv", ["dns-zones-yaml-check", str(tmp_path / "missing.yml")])
     assert main() == 2
     assert "missing file" in capsys.readouterr().err
+
+
+def test_cli_previous_accepts_a_pipe_like_process_substitution(monkeypatch, tmp_path: Path, capsys) -> None:
+    current = _zones(tmp_path, "zones.yml", 7, "    app.example.com:\n      - a: 192.0.2.2\n")
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, _zones(tmp_path, "old.yml", 7, "    app.example.com:\n      - a: 192.0.2.1\n").read_bytes())
+    os.close(write_fd)
+    try:
+        monkeypatch.setattr(sys, "argv", ["dns-zones-yaml-check", "--previous", f"/dev/fd/{read_fd}", str(current)])
+        assert main() == 0
+    finally:
+        os.close(read_fd)
+    assert "serial didn't go up (was 7, now 7)" in capsys.readouterr().err
 
 
 def test_cli_previous_flags_a_changed_zone_without_a_serial_bump(monkeypatch, tmp_path: Path, capsys) -> None:
