@@ -82,6 +82,11 @@ def client_crl_alert_days() -> int:
     return int(os.environ.get("CLIENT_CRL_ALERT_DAYS", "7"))
 
 
+def client_pki_store() -> Path:
+    """Mirrors scripts/client-pki's own HOME_WARDEN_PKI_STORE default."""
+    return Path(os.environ.get("HOME_WARDEN_PKI_STORE", str(REPO_ROOT / "conf" / "pki")))
+
+
 def timeout_seconds() -> float:
     return float(os.environ.get("CATALOG_HEALTH_TIMEOUT_SEC", "5"))
 
