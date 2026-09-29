@@ -151,7 +151,7 @@ def _lint_owner(apex: str, owner: str, entries: list[tuple[str, str]]) -> list[Z
             )
         )
     types = Counter(rtype for rtype, _ in entries if rtype)
-    if types["cname"] and len(entries) > 1:
+    if types["cname"] and types.total() > 1:
         others = sorted(set(types) - {"cname"})
         problem = f"has {types['cname']} CNAMEs" if not others else f"has a CNAME alongside {', '.join(others)} records"
         issues.append(

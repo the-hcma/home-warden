@@ -80,6 +80,12 @@ def test_malformed_record_entry_is_flagged() -> None:
     assert "isn't a single `type: content` mapping" in issue.problem
 
 
+def test_malformed_entry_next_to_a_cname_is_not_a_cname_conflict() -> None:
+    issues = lint_zones(_doc({"www.example.com": [{"cname": "x.example.com."}, {"a": "192.0.2.1", "txt": '"x"'}]}))
+    assert [issue.problem for issue in issues] == ["has a record entry that isn't a single `type: content` mapping"]
+    assert not any(issue.blocking for issue in issues)
+
+
 def test_missing_soa_is_flagged() -> None:
     (issue,) = lint_zones(_doc({"app.example.com": [{"a": "198.51.100.7"}]}, apex_soa=False))
     assert issue.subject == "example.com"
