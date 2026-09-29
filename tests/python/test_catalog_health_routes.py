@@ -86,12 +86,17 @@ def test_health_catalog_wires_skip_local_dns_and_port_into_run_all(tmp_path: Pat
         patch("app.api.catalog_health_routes.services_json_path", return_value=catalog_path),
         patch("app.api.catalog_health_routes.run_all", mock_run_all),
         patch("app.api.catalog_health_routes.local_pdns_port", return_value=853),
+        patch("app.api.catalog_health_routes.client_ca_alert_days", return_value=45),
+        patch("app.api.catalog_health_routes.client_crl_alert_days", return_value=5),
     ):
-        resp = client.get("/health/catalog?skip_local_dns=true")
+        resp = client.get("/health/catalog?skip_local_dns=true&skip_client_cert=true")
 
     assert resp.status_code == 200
     assert mock_run_all.call_args.kwargs["skip_local_dns"] is True
     assert mock_run_all.call_args.kwargs["local_dns_port"] == 853
+    assert mock_run_all.call_args.kwargs["skip_client_cert"] is True
+    assert mock_run_all.call_args.kwargs["client_ca_alert_days"] == 45
+    assert mock_run_all.call_args.kwargs["client_crl_alert_days"] == 5
 
 
 def test_health_catalog_invalid_json_returns_500(tmp_path: Path) -> None:

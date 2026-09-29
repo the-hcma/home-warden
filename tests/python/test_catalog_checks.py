@@ -922,6 +922,7 @@ def test_run_all_respects_skip_flags(tmp_path: Path) -> None:
         timeout=1,
         max_retries=1,
         skip_cert=True,
+        skip_client_cert=True,
         skip_dns=True,
         skip_local_dns=True,
         skip_upstream=False,
@@ -951,6 +952,7 @@ def test_run_all_includes_local_dns_dimension_by_default() -> None:
             timeout=1,
             max_retries=1,
             skip_cert=True,
+            skip_client_cert=True,
             skip_dns=True,
             skip_upstream=True,
         )

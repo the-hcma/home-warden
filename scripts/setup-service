@@ -4,7 +4,7 @@
 #
 # Placeholders: @@OWNER@@ @@SCRATCH_DIR@@ @@CONF_DIR@@ @@HOME_NGINX_CONF@@ @@HOME_DIR@@
 #               @@PDNS_ZONES_YAML@@ @@PDNS_ZONES_YAML_DIR@@ @@SERVICES_JSON_PATH@@
-#               @@NGINX_EXTRA_READ_PATHS@@ @@SERVICE_USER@@ @@SERVICE_GROUP@@
+#               @@NGINX_EXTRA_READ_PATHS@@ @@SERVICE_USER@@ @@SERVICE_GROUP@@ @@CLIENT_PKI_STORE@@
 # Injects ConditionHost=|<machine-id> and ConditionHost=|<hostname> (OR).
 #
 # Flow (non-dry-run):
@@ -33,6 +33,9 @@
 #                       enables the catalog-heal timer (see AGENTS.md's
 #                       Catalog Auto-Healing section, #57) when set or when
 #                       the default path below exists; skipped otherwise
+#   HOME_WARDEN_PKI_STORE  Client CA store (default: <repo>/conf/pki) — enables
+#                       the daily CRL refresh timer (docs/client-pki.md, #160)
+#                       once the store has a CA; skipped otherwise
 #   OWNER               Operator account that owns the repo, conf, certs and
 #                       scratch, and runs the certbot/healthcheck units
 #                       (default: current user)
@@ -110,6 +113,9 @@ ipv6_socket_dropins_changed=0
 rendered_units=()
 services_json="${SERVICES_JSON_PATH:-}"
 catalog_heal_enabled=0
+client_pki_store="$(realpath --canonicalize-missing "${HOME_WARDEN_PKI_STORE:-${repo_dir}/conf/pki}")"
+readonly client_pki_store
+client_pki_crl_enabled=0
 deployed_commit="${DEPLOYED_COMMIT:-}"
 nginx_dump=""
 nginx_extra_read_paths=""
@@ -139,7 +145,9 @@ plus certbot timer, conf-watch path unit, and healthcheck timer. Also installs
 the pdns zones.yml reload-on-edit path unit when PDNS_ZONES_YAML is set (or
 its default path exists) — skipped otherwise; see #108. Also installs the
 catalog-heal timer when SERVICES_JSON_PATH is set (or its default path
-exists) — skipped otherwise; see #57. With pdns wiring on, PDNS_HOST_RESOLVER=1
+exists) — skipped otherwise; see #57. Also installs the client CA CRL
+refresh timer once HOME_WARDEN_PKI_STORE (default conf/pki) has a CA; see
+#160. With pdns wiring on, PDNS_HOST_RESOLVER=1
 routes every zones.yml zone to the local recursor via a systemd-resolved
 drop-in, PDNS_HOST_RESOLVER=0 removes it, and unset leaves it as is; see #139.
 Prompts for sudo, validates nginx -t, then starts the service when validation passes.
@@ -401,6 +409,12 @@ resolve_services_json() {
   return 1
 }
 
+# The CRL timer is opt-in the same way as the pdns and catalog-heal wiring:
+# only once `scripts/client-pki init` has created the CA.
+client_pki_store_has_ca() {
+  [[ -f "${client_pki_store}/ca/ca.crt" ]]
+}
+
 is_valid_fqdn() {
   local -r fqdn="${1:-}"
   [[ "${fqdn}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
@@ -595,6 +609,17 @@ check_prerequisites() {
       missing=1
     fi
   fi
+  if ((client_pki_crl_enabled)); then
+    if [[ ! -f "${unit_template_dir}/home-warden-client-pki-crl.service" ||
+      ! -f "${unit_template_dir}/home-warden-client-pki-crl.timer" ]]; then
+      echo "ERROR: missing client-pki-crl unit templates under ${unit_template_dir}" >&2
+      missing=1
+    fi
+    if [[ ! -x "${repo_dir}/scripts/client-pki" ]]; then
+      echo "ERROR: scripts/client-pki missing or not executable" >&2
+      missing=1
+    fi
+  fi
   if ! command -v logrotate >/dev/null 2>&1; then
     echo "ERROR: logrotate not on PATH — sudo apt-get install -y logrotate" >&2
     missing=1
@@ -653,7 +678,7 @@ prepare_scratch() {
     run ln -sfn /usr/lib/nginx/modules "${scratch_dir}/modules"
   fi
   if ((dry_run)); then
-    echo "DRY-RUN: would touch ${scratch_dir}/{home-warden,cert-renewer,nginx-test-and-reload,healthcheck,catalog-heal}.log and logs/{error,access}.log"
+    echo "DRY-RUN: would touch ${scratch_dir}/{home-warden,cert-renewer,nginx-test-and-reload,healthcheck,catalog-heal,client-pki-crl}.log and logs/{error,access}.log"
   else
     local log
     for log in \
@@ -662,6 +687,7 @@ prepare_scratch() {
       "${scratch_dir}/nginx-test-and-reload.log" \
       "${scratch_dir}/healthcheck.log" \
       "${scratch_dir}/catalog-heal.log" \
+      "${scratch_dir}/client-pki-crl.log" \
       "${scratch_dir}/logs/error.log" \
       "${scratch_dir}/logs/access.log"; do
       if ! touch "${log}"; then
@@ -720,6 +746,7 @@ expand_unit() {
       -e "s|@@PDNS_ZONES_YAML@@|${pdns_zones_yaml}|g" \
       -e "s|@@PDNS_ZONES_YAML_DIR@@|${pdns_zones_yaml_dir}|g" \
       -e "s|@@SERVICES_JSON_PATH@@|${services_json}|g" \
+      -e "s|@@CLIENT_PKI_STORE@@|${client_pki_store}|g" \
       -e "s|@@REPO_DIR@@|${repo_dir}|g" \
       -e "s|@@HOME_DIR@@|${HOME}|g" \
       -e "s|@@DEPLOYED_COMMIT@@|${deployed_commit}|g" \
@@ -1149,6 +1176,11 @@ print_status() {
     echo "  host resolver:   <no drop-in, local zones not routed to the recursor>"
   fi
   echo "  services.json:   ${services_json:-<unset, catalog-heal wiring skipped>}"
+  if client_pki_store_has_ca; then
+    echo "  client CA store: ${client_pki_store}"
+  else
+    echo "  client CA store: ${client_pki_store} <no CA, CRL refresh timer skipped>"
+  fi
   echo "  deployed commit: ${deployed_commit:-$(git -C "${repo_dir}" rev-parse --short HEAD 2>/dev/null || echo '<unset>')}"
   echo "  service log:     ${scratch_dir}/home-warden.log"
   echo "  config.toml:     ${home_warden_config_path}"
@@ -1180,7 +1212,8 @@ print_status() {
       "reload_path:home-warden-reload.path" \
       "pdns_reload_path:home-warden-pdns-reload.path" \
       "healthcheck_timer:home-warden-healthcheck.timer" \
-      "catalog_heal_timer:home-warden-catalog-heal.timer"; do
+      "catalog_heal_timer:home-warden-catalog-heal.timer" \
+      "client_pki_crl_timer:home-warden-client-pki-crl.timer"; do
       label="${pair%%:*}"
       unit="${pair##*:}"
       en="$(systemctl is-enabled "${unit}" 2>/dev/null || true)"
@@ -1300,6 +1333,12 @@ main() {
     echo "services.json not found — skipping catalog-heal wiring (set SERVICES_JSON_PATH to enable, see #57)"
   fi
 
+  if client_pki_store_has_ca; then
+    client_pki_crl_enabled=1
+  else
+    echo "no client CA in ${client_pki_store} — skipping the CRL refresh timer (see docs/client-pki.md, #160)"
+  fi
+
   maybe_create_web_ui_config
 
   require_sudo
@@ -1343,6 +1382,12 @@ main() {
     expand_unit "${unit_template_dir}/home-warden-catalog-heal.service" "${system_unit_dir}/home-warden-catalog-heal.service"
     expand_unit "${unit_template_dir}/home-warden-catalog-heal.timer" "${system_unit_dir}/home-warden-catalog-heal.timer"
   fi
+  if ((client_pki_crl_enabled)); then
+    expand_unit "${unit_template_dir}/home-warden-client-pki-crl.service" \
+      "${system_unit_dir}/home-warden-client-pki-crl.service"
+    expand_unit "${unit_template_dir}/home-warden-client-pki-crl.timer" \
+      "${system_unit_dir}/home-warden-client-pki-crl.timer"
+  fi
   expand_unit "${logrotate_template}" "${logrotate_dest}"
   install_host_guard_library
   install_preview_conf_path
@@ -1381,6 +1426,9 @@ main() {
   if ((catalog_heal_enabled)); then
     run sudo systemctl enable --now home-warden-catalog-heal.timer
   fi
+  if ((client_pki_crl_enabled)); then
+    run sudo systemctl enable --now home-warden-client-pki-crl.timer
+  fi
 
   if systemctl is-active --quiet home-warden.service 2>/dev/null; then
     if ((on_deploy_rc == 0)); then
@@ -1412,6 +1460,9 @@ main() {
   if ((catalog_heal_enabled)); then
     echo "  tail --follow=name --retry ${scratch_dir}/catalog-heal.log"
   fi
+  if ((client_pki_crl_enabled)); then
+    echo "  tail --follow=name --retry ${scratch_dir}/client-pki-crl.log"
+  fi
   echo "Certbot timer:     systemctl list-timers home-warden-certbot.timer"
   echo "Manual renew:      sudo systemctl start home-warden-certbot.service"
   echo "Conf watch:        systemctl status home-warden-reload.path"
@@ -1423,6 +1474,9 @@ main() {
   if ((catalog_heal_enabled)); then
     echo "Catalog heal timer: systemctl list-timers home-warden-catalog-heal.timer"
     echo "Catalog heal mail:  ~/.config/home-warden-catalog-heal.env (see etc/home-warden-catalog-heal.env.example)"
+  fi
+  if ((client_pki_crl_enabled)); then
+    echo "CRL refresh timer: systemctl list-timers home-warden-client-pki-crl.timer"
   fi
   print_status
 }

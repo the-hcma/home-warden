@@ -7,12 +7,13 @@ trigger, then repairs what home-warden can actually fix on its own --
           scripts/cert-renewer unchanged).
   dns  -- sync_dns_record (#109's Cloudflare write path, reused as-is).
 
-local_dns and upstream are alert-only, not healed here: #108 never grew a
-live "add a record to zones.yml" primitive (only converter + verify +
-reload-on-edit), and upstream health is a sibling service's own lifecycle
-home-warden doesn't own (see AGENTS.md's Service Registration
-Orchestration section and #57's own non-goals) -- surfacing loudly is the
-honest "fix" for both.
+local_dns, upstream and client_cert are alert-only, not healed here: #108
+never grew a live "add a record to zones.yml" primitive (only converter +
+verify + reload-on-edit), upstream health is a sibling service's own
+lifecycle home-warden doesn't own (see AGENTS.md's Service Registration
+Orchestration section and #57's own non-goals), and the client CRL has its
+own refresh timer (#160), so a client_cert failure means that timer or the
+CA needs a human -- surfacing loudly is the honest "fix" for all three.
 
 Confirm-first, but *per dimension*: `apply_cert`/`apply_dns` gate cert and
 DNS independently rather than sharing one flag. Neither set (the CLI
@@ -48,7 +49,8 @@ from app.smtp_config import SmtpConfig, smtp_send_ready
 from app.smtp_service import SmtpConnectionParams, build_message, send_email, smtp_friendly_error
 
 # CheckResult.dimension values app.catalog_heal can actually repair --
-# "local_dns" and "upstream" are deliberately excluded, see module docstring.
+# "client_cert", "local_dns" and "upstream" are deliberately excluded, see
+# module docstring.
 _ACTIONABLE_DIMENSIONS = frozenset({"cert", "dns"})
 
 # HealStepResult.action values that mean "this needs a human's attention" --
@@ -59,7 +61,7 @@ _ALERT_WORTHY_ACTIONS = frozenset({"alert-only", "failed", "cooldown"})
 @dataclass
 class HealStepResult:
     service: str
-    dimension: str  # "cert" | "dns" | "local_dns" | "upstream"
+    dimension: str  # "cert" | "client_cert" | "dns" | "local_dns" | "upstream"
     # "ok" | "skip" | "would-heal" | "healed" | "alert-only" | "cooldown" | "failed"
     action: str
     detail: str
@@ -70,6 +72,8 @@ def heal_catalog(
     *,
     certs_live_dir: Path,
     alert_days: int,
+    client_ca_alert_days: int = 60,
+    client_crl_alert_days: int = 7,
     cf_headers: dict[str, str] | None,
     dns_target: str | None,
     local_dns_port: int,
@@ -94,6 +98,8 @@ def heal_catalog(
         catalog,
         certs_live_dir=certs_live_dir,
         alert_days=alert_days,
+        client_ca_alert_days=client_ca_alert_days,
+        client_crl_alert_days=client_crl_alert_days,
         cf_headers=cf_headers,
         local_dns_port=local_dns_port,
         timeout=timeout,

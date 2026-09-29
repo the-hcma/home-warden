@@ -24,6 +24,8 @@ from app.catalog_checks import load_catalog, parse_cloudflare_credentials, run_a
 from app.catalog_health_settings import (
     alert_days,
     certs_live_dir,
+    client_ca_alert_days,
+    client_crl_alert_days,
     cloudflare_credentials_path,
     enforce_host_guard,
     local_pdns_port,
@@ -35,17 +37,22 @@ from app.catalog_health_settings import (
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Validate a home-warden service catalog's cert/DNS/local-DNS/internal-upstream health."
+        description=(
+            "Validate a home-warden service catalog's cert/DNS/local-DNS/internal-upstream/client-cert health."
+        )
     )
     parser.add_argument("--services-json", type=Path, default=services_json_path())
     parser.add_argument("--certs-live-dir", type=Path, default=certs_live_dir())
     parser.add_argument("--alert-days", type=int, default=alert_days())
+    parser.add_argument("--client-ca-alert-days", type=int, default=client_ca_alert_days())
+    parser.add_argument("--client-crl-alert-days", type=int, default=client_crl_alert_days())
     parser.add_argument("--cloudflare-credentials", type=Path, default=cloudflare_credentials_path())
     parser.add_argument("--local-dns-port", type=int, default=local_pdns_port())
     parser.add_argument("--timeout", type=float, default=timeout_seconds())
     parser.add_argument("--max-retries", type=int, default=max_retries())
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--skip-cert", action="store_true")
+    parser.add_argument("--skip-client-cert", action="store_true")
     parser.add_argument("--skip-dns", action="store_true")
     parser.add_argument("--skip-local-dns", action="store_true")
     parser.add_argument("--skip-upstream", action="store_true")
@@ -82,7 +89,10 @@ def main() -> int:
             local_dns_port=args.local_dns_port,
             timeout=args.timeout,
             max_retries=args.max_retries,
+            client_ca_alert_days=args.client_ca_alert_days,
+            client_crl_alert_days=args.client_crl_alert_days,
             skip_cert=args.skip_cert,
+            skip_client_cert=args.skip_client_cert,
             skip_dns=args.skip_dns,
             skip_local_dns=args.skip_local_dns,
             skip_upstream=args.skip_upstream,
@@ -94,7 +104,7 @@ def main() -> int:
     if args.verbose:
         for r in results:
             marker = {"ok": "OK", "fail": "FAIL", "skip": "SKIP"}[r.status]
-            print(f"{marker:4} {r.service:24} {r.dimension:9} {r.detail}", file=sys.stderr)
+            print(f"{marker:4} {r.service:24} {r.dimension:11} {r.detail}", file=sys.stderr)
 
     print(json.dumps([asdict(r) for r in results], indent=2))
     return 1 if any(r.status == "fail" for r in results) else 0

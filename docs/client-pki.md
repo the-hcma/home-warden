@@ -45,7 +45,7 @@ This is a **household CA**: a handful of personal devices (phones, tablets, lapt
 | Enroll | Issue a certificate for a new device and export it as a `.p12`. See [Managing devices](#managing-devices). | [#159](https://github.com/the-hcma/home-warden/issues/159) |
 | Rotate | Issue a replacement while the old certificate keeps working, install it on the device, then revoke the old serial. | [#159](https://github.com/the-hcma/home-warden/issues/159) |
 | Revoke | Revoke a lost or retired device's serial and publish a new CRL; nginx reloads automatically when the CRL changes. | [#159](https://github.com/the-hcma/home-warden/issues/159) |
-| Keep the CRL fresh | Republish the CRL on a timer before it expires (an expired CRL makes nginx reject every client), and alert on CA or CRL expiry. | [#160](https://github.com/the-hcma/home-warden/issues/160) |
+| Keep the CRL fresh | Republish the CRL on a timer before it expires (an expired CRL makes nginx reject every client), and alert on CA or CRL expiry. See [Keeping the CRL fresh](#keeping-the-crl-fresh). | [#160](https://github.com/the-hcma/home-warden/issues/160) |
 | See and edit it | Web UI: CA status, certificate inventory, and `client_cert` editing per catalog entry. | [#161](https://github.com/the-hcma/home-warden/issues/161) |
 
 Already in place on `main`: the nginx sandbox sees a republished CRL ([#148](https://github.com/the-hcma/home-warden/issues/148)), and nginx reloads when the CRL or CA file changes ([#151](https://github.com/the-hcma/home-warden/issues/151)).
@@ -64,7 +64,7 @@ The alternative, keeping the CA key on an operator machine and copying only `ca.
 ./scripts/client-pki init --cn "Home client CA"
 ```
 
-That creates the store with tiny-pki's layout. Point a catalog entry's `client_cert.ca_bundle` and `client_cert.crl` at `conf/pki/public/ca.crt` and `conf/pki/public/crl.pem`, then rerun `./scripts/setup-service` so the nginx sandbox binds `public/` and watches it for reloads.
+That creates the store with tiny-pki's layout. Point a catalog entry's `client_cert.ca_bundle` and `client_cert.crl` at the absolute paths of `conf/pki/public/ca.crt` and `conf/pki/public/crl.pem` in the checkout, then rerun `./scripts/setup-service` so the nginx sandbox binds `public/`, watches it for reloads, and installs the CRL refresh timer.
 
 ### Key protection
 
@@ -118,6 +118,24 @@ Rotating to a new CA without locking any device out:
 5. **Drop the old CA** once every device has moved: point the entries back at the new store's `public/ca.crt` and `public/crl.pem`, rerun `./scripts/setup-service`, and retire the old store, keeping its last backup.
 
 `tests/python/test_client_pki.py` runs this procedure against real nginx: both CAs' clients are accepted during the window, a revocation in the old CA takes effect, and dropping the old CA cuts off its clients.
+
+### Keeping the CRL fresh
+
+tiny-pki signs each CRL for 30 days (`crl --days N` changes that), and nginx rejects **every** client certificate once the CRL it loads has expired. Once the store has a CA, `./scripts/setup-service` installs `home-warden-client-pki-crl.timer`, which runs `scripts/client-pki crl` daily at 04:45 as the operator account and logs to `client-pki-crl.log` in the scratch directory. tiny-pki replaces `public/crl.pem` atomically, and the reload watch on `public/` picks up the new file, so no step of its own reloads nginx. A refresh takes the store lock like any other write, so it can't race a revoke and drop it.
+
+To refresh by hand: `sudo systemctl start home-warden-client-pki-crl.service`, or `./scripts/client-pki crl`.
+
+### Health check and alerts
+
+`catalog-health-check`, `GET /health/catalog`, and the `catalog-heal` timer check every catalog entry with `client_cert` enabled (the `client_cert` dimension). It fails when:
+
+- `ca_bundle` or `crl` isn't set (without a CRL, nginx accepts revoked certificates), or its file is missing, unreadable, unparseable, or not an absolute path;
+- `home-warden-nginx` couldn't read a file: it needs `o+r` (for example `0644`) and its directory, which the nginx sandbox binds, needs `o+rx` (`0755`);
+- a CA in the bundle is expired or expires within `CLIENT_CA_ALERT_DAYS` (default 60, long enough to rotate the CA);
+- a CRL is expired or expires within `CLIENT_CRL_ALERT_DAYS` (default 7; with the daily refresh, that means the timer has been failing for about three weeks);
+- a CRL isn't signed by a CA in the bundle, or a CA in the bundle has no CRL (nginx rejects that CA's clients).
+
+`catalog-heal` reports it as alert-only and mails it through the same path as its other alerts (`CATALOG_HEAL_ALERT_TO`, see `etc/home-warden-catalog-heal.env.example`); it never re-signs anything itself. Both settings go in `~/.config/home-warden-catalog-heal.env`.
 
 ## Managing devices
 

@@ -424,6 +424,8 @@ check_unit_templates() {
     home-warden.service \
     home-warden-certbot.service \
     home-warden-certbot.timer \
+    home-warden-client-pki-crl.service \
+    home-warden-client-pki-crl.timer \
     home-warden-reload.service \
     home-warden-reload.path \
     home-warden-healthcheck.service \

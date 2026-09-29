@@ -1,7 +1,7 @@
 """Validate a home-warden service catalog's promises against live infrastructure.
 
-Four independent, read-only dimensions per catalog service (see
-the-hcma/home-warden#57, #110):
+Five independent, read-only dimensions per catalog service (see
+the-hcma/home-warden#57, #110, #160):
 
   1. cert       -- does a Let's Encrypt cert exist for server_name, cover it
                    in its SANs, and have enough runway left?
@@ -12,6 +12,9 @@ the-hcma/home-warden#57, #110):
                    local name nginx's own proxy_pass depends on)?
   4. upstream   -- for proxy services, is upstream.host:port accepting
                    connections and responding to an HTTP request?
+  5. client_cert -- for mTLS-gated vhosts, are the client CA bundle and
+                   CRL nginx loads present, signed by each other, and not
+                   about to expire?
 
 Pure, read-only check functions -- this module never mutates certs, DNS, or
 any live state. Auto-healing on failure is deliberately out of scope; see
@@ -29,8 +32,10 @@ import datetime
 import ipaddress
 import json
 import random
+import re
 import socket
 import ssl
+import stat
 import subprocess
 import time
 import urllib.error
@@ -40,14 +45,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from cryptography import x509
+from cryptography.hazmat.primitives.asymmetric import dsa, ec, ed448, ed25519, rsa
 
 CF_API_BASE = "https://api.cloudflare.com/client/v4"
+
+_PEM_CRL_RE = re.compile(rb"-----BEGIN X509 CRL-----.+?-----END X509 CRL-----", re.DOTALL)
 
 
 @dataclass
 class CheckResult:
     service: str
-    dimension: str  # "cert" | "dns" | "upstream"
+    dimension: str  # "cert" | "client_cert" | "dns" | "local_dns" | "upstream"
     status: str  # "ok" | "fail" | "skip"
     detail: str
 
@@ -173,6 +181,19 @@ def _cf_request(
     raise last_err
 
 
+def _crl_signed_by(crl: x509.CertificateRevocationList, ca: x509.Certificate) -> bool:
+    key = ca.public_key()
+    if not isinstance(
+        key,
+        (dsa.DSAPublicKey, ec.EllipticCurvePublicKey, ed448.Ed448PublicKey, ed25519.Ed25519PublicKey, rsa.RSAPublicKey),
+    ):
+        return False
+    try:
+        return crl.is_signature_valid(key)
+    except (TypeError, ValueError):
+        return False
+
+
 def _host_resolves(host: str, timeout: float) -> bool | None:
     """Can this host's own resolver (NSS, i.e. what nginx's proxy_pass and
     check_upstream use) resolve `host`? Asked via `getent ahosts` rather
@@ -200,6 +221,35 @@ def _host_resolves(host: str, timeout: float) -> bool | None:
     if proc.returncode == 2:
         return False
     return None
+
+
+def _load_client_pki_file(path: Path, loader):
+    """(objects, None) or ([], error detail). A relative path is refused:
+    nginx resolves it against its own prefix, which this check can't know.
+
+    This runs as the operator, but nginx runs as its own account and sees
+    the file through a sandbox bind of its directory (scripts/setup-service),
+    so the file must be readable, and that directory traversable, by other.
+    """
+    if not path.is_absolute():
+        return [], f"{path} is not an absolute path"
+    if not path.is_file():
+        return [], f"missing: {path}"
+    for target, needed, example in ((path, stat.S_IROTH, "0644"), (path.parent, stat.S_IROTH | stat.S_IXOTH, "0755")):
+        mode = target.stat().st_mode
+        if mode & needed != needed:
+            return [], f"{target} isn't readable by nginx (mode {stat.S_IMODE(mode):04o}, needs {example})"
+    try:
+        objects = loader(path.read_bytes())
+    except (ValueError, OSError) as e:
+        return [], f"failed to parse {path}: {e}"
+    if not objects:
+        return [], f"no PEM objects in {path}"
+    return objects, None
+
+
+def _load_pem_crls(data: bytes) -> list[x509.CertificateRevocationList]:
+    return [x509.load_pem_x509_crl(block) for block in _PEM_CRL_RE.findall(data)]
 
 
 def _resolve_via_authoritative_ns(
@@ -294,6 +344,67 @@ def check_cert(name: str, service: dict, certs_live_dir: Path, alert_days: int) 
     if seconds_left < alert_days * 86400:
         return CheckResult(name, "cert", "fail", f"expires within {alert_days}d (notAfter={not_after.isoformat()})")
     return CheckResult(name, "cert", "ok", f"notAfter={not_after.isoformat()}; SANs cover {domain}")
+
+
+def check_client_cert(name: str, service: dict, *, ca_alert_days: int, crl_alert_days: int) -> CheckResult:
+    """The mTLS material a gated vhost's nginx loads (#160): every CA in
+    `ca_bundle` and every CRL in `crl`, since a CA rotation's transition
+    files hold two of each. nginx rejects every client once a CRL expires,
+    and rejects a client whose CA has no CRL in `ssl_crl` at all, so both
+    count as failures, not just an expiring CA. An entry with no `crl` at
+    all fails too: nginx then accepts a revoked certificate.
+    """
+    client_cert = service.get("client_cert") or {}
+    if client_cert.get("mode", "off") == "off":
+        return CheckResult(name, "client_cert", "skip", "no client_cert on this catalog entry")
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    problems: list[str] = []
+
+    ca_path = client_cert.get("ca_bundle")
+    if not ca_path:
+        return CheckResult(name, "client_cert", "fail", "client_cert.ca_bundle is not set")
+    cas, error = _load_client_pki_file(Path(ca_path), x509.load_pem_x509_certificates)
+    if error:
+        return CheckResult(name, "client_cert", "fail", error)
+    for ca in cas:
+        subject = ca.subject.rfc4514_string()
+        not_after = ca.not_valid_after_utc
+        if not_after <= now:
+            problems.append(f"CA {subject} expired (notAfter={not_after.isoformat()})")
+        elif not_after - now < datetime.timedelta(days=ca_alert_days):
+            problems.append(f"CA {subject} expires within {ca_alert_days}d (notAfter={not_after.isoformat()})")
+
+    crl_path = client_cert.get("crl")
+    if not crl_path:
+        return CheckResult(
+            name, "client_cert", "fail", "client_cert.crl is not set, so nginx accepts revoked certificates"
+        )
+    crls, error = _load_client_pki_file(Path(crl_path), _load_pem_crls)
+    if error:
+        return CheckResult(name, "client_cert", "fail", error)
+    for ca in cas:
+        # By signature, not just issuer name: a rotated CA may reuse the old one's DN.
+        if not any(crl.issuer == ca.subject and _crl_signed_by(crl, ca) for crl in crls):
+            problems.append(f"no CRL for CA {ca.subject.rfc4514_string()} (nginx rejects its clients)")
+    for crl in crls:
+        issuer = crl.issuer.rfc4514_string()
+        signers = [ca for ca in cas if ca.subject == crl.issuer]
+        if not any(_crl_signed_by(crl, ca) for ca in signers):
+            problems.append(f"CRL from {issuer} isn't signed by a CA in {ca_path}")
+        next_update = crl.next_update_utc
+        if next_update is None:
+            problems.append(f"CRL from {issuer} has no nextUpdate")
+        elif next_update <= now:
+            problems.append(f"CRL from {issuer} expired (nextUpdate={next_update.isoformat()})")
+        elif next_update - now < datetime.timedelta(days=crl_alert_days):
+            problems.append(
+                f"CRL from {issuer} expires within {crl_alert_days}d (nextUpdate={next_update.isoformat()})"
+            )
+
+    if problems:
+        return CheckResult(name, "client_cert", "fail", "; ".join(problems))
+    return CheckResult(name, "client_cert", "ok", f"{len(cas)} CA(s), {len(crls)} CRL(s) valid")
 
 
 def check_dns(
@@ -528,7 +639,10 @@ def run_all(
     local_dns_port: int,
     timeout: float,
     max_retries: int,
+    client_ca_alert_days: int = 60,
+    client_crl_alert_days: int = 7,
     skip_cert: bool = False,
+    skip_client_cert: bool = False,
     skip_dns: bool = False,
     skip_local_dns: bool = False,
     skip_upstream: bool = False,
@@ -552,6 +666,11 @@ def run_all(
         raise ValueError(f"timeout must be positive, got {timeout}")
     if alert_days < 0:
         raise ValueError(f"alert_days must be non-negative, got {alert_days}")
+    if client_ca_alert_days < 0 or client_crl_alert_days < 0:
+        raise ValueError(
+            "client_ca_alert_days and client_crl_alert_days must be non-negative, "
+            f"got {client_ca_alert_days} and {client_crl_alert_days}"
+        )
     if not (1 <= local_dns_port <= 65535):
         raise ValueError(f"local_dns_port must be between 1 and 65535, got {local_dns_port}")
 
@@ -566,6 +685,12 @@ def run_all(
             results.append(check_local_dns(name, service, local_dns_port=local_dns_port, timeout=timeout))
         if not skip_upstream:
             results.append(check_upstream(name, service, timeout))
+        if not skip_client_cert:
+            results.append(
+                check_client_cert(
+                    name, service, ca_alert_days=client_ca_alert_days, crl_alert_days=client_crl_alert_days
+                )
+            )
     return results
 
 
