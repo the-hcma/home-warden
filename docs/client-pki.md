@@ -208,6 +208,19 @@ A catalog entry opts in with a `client_cert` object (schema reference: [`service
 
 `ca_bundle` and `crl` point at the store's key-free `public/` directory (`public/ca.crt` and `public/crl.pem`), never at `ca/`, which holds the CA key. nginx runs as `home-warden-nginx` and can only read `public/`.
 
+The web UI's catalog editor sets these fields too. Leaving the mode at "not set" removes `client_cert` from the entry. Each edit goes through the same validation and `nginx -t` preview as every other catalog change.
+
+## Web UI
+
+The "Client certificates" tab (`GET /pki/status`) is **read-only**. It shows the CA and its expiry, the CRL and when it was last refreshed, every issued certificate with its state and health, and which vhosts set `client_cert`. It reads the store through `tiny-pki list … --json` and `check --json`, none of which touches the CA key, and it never returns a file path.
+
+Issuing, rotating, and revoking stay with `scripts/client-pki` on the host. These are deliberately not web actions yet. The web UI runs as the operator's unprivileged service with a long-lived session, and giving that process the CA key would turn a session hijack or a request-forgery bug into the power to mint a trusted device certificate. A later write feature needs, at minimum:
+
+- **A separate privileged helper** that owns the store and the CA key. The web process asks it to do one of a few narrow operations (issue a named device, revoke a serial, refresh the CRL) and never reads `ca/` itself.
+- **Re-authentication per action**: a fresh PAM password check for each issue or revoke, not just a valid session cookie.
+- **An audit log** outside the web process's control, recording who did what, when, and to which certificate.
+- **A path that doesn't depend on the UI for first enrollment.** Once the UI itself is a gated vhost (`client_cert.mode: required`), a device without a certificate can't reach it. The first certificate, and recovery after losing every enrolled device, must stay possible from the host's shell.
+
 ## Non-goals
 
 - **Server certificates from the private CA**, including TLS to internal backends. Public vhosts use Let's Encrypt, and backend connections are out of scope for this CA.
