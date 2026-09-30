@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Compare two DNS servers' answers for every record in zones.yml. Thin wrapper around the
+# app.dns_parity_cli console script -- see that module's docstring for usage/exit codes.
+# See the-hcma/home-warden#189.
+#
+# Usage:
+#   ./scripts/dns-parity --old 192.0.2.53 --new 198.51.100.53 [--zones zones.yml] [--probe NAME[/TYPE]]
+
+set -euo pipefail
+
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_dir}"
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "dns-parity: install uv (https://docs.astral.sh/uv/) or run 'uv sync' in ${repo_dir}" >&2
+  exit 1
+fi
+
+exec uv run dns-parity "$@"
