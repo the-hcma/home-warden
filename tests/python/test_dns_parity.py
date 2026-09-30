@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from app.dns_parity import compare, expected_queries, parse_dig, parse_server, run_parity
+from app.dns_parity import ServerUnreachable, compare, dig, expected_queries, parse_dig, parse_server, run_parity
 from app.dns_parity_cli import main
 
 DIG_A = """;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1
@@ -80,7 +80,7 @@ def test_compare_ttl_only_when_both_authoritative() -> None:
 def test_run_parity_counts_an_unreachable_server_as_a_difference(monkeypatch) -> None:
     def fake_dig(server, name, rtype, timeout=3):
         if server[0] == "new":
-            raise RuntimeError("dig @new failed: timed out")
+            raise ServerUnreachable("dig @new failed: timed out")
         return parse_dig(DIG_A)
 
     monkeypatch.setattr("app.dns_parity.dig", fake_dig)
@@ -147,3 +147,78 @@ def test_cli_help_exits_cleanly() -> None:
         [sys.executable, "-m", "app.dns_parity_cli", "--help"], capture_output=True, text=True, timeout=10
     )
     assert proc.returncode == 0 and "--probe" in proc.stdout
+
+
+@pytest.mark.parametrize("spec", ["", "[::1", "[::1]x", "127.0.0.1:99999", "127.0.0.1:0", "-x", "+short", "host:abc"])
+def test_parse_server_rejects_malformed(spec: str) -> None:
+    with pytest.raises(ValueError):
+        parse_server(spec)
+
+
+def test_rdata_is_compared_the_way_dns_does() -> None:
+    a = parse_dig("status: NOERROR\nflags: qr aa; x;\n\nexample.com. 60 IN NS NS1.Example.com.\n")
+    b = parse_dig("status: NOERROR\nflags: qr aa; x;\n\nexample.com. 60 IN NS ns1.example.com\n")
+    assert compare(a, b) == []  # case and the root dot don't matter in a name
+    t1 = parse_dig('status: NOERROR\nflags: qr aa; x;\n\nt.example.com. 60 IN TXT "v=spf1  include:a"\n')
+    t2 = parse_dig('status: NOERROR\nflags: qr aa; x;\n\nt.example.com. 60 IN TXT "v=spf1 include:a"\n')
+    assert compare(t1, t2) != []  # but a TXT string is compared exactly
+
+
+def test_run_parity_stops_when_a_server_is_unreachable(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def dead(server, name, rtype, timeout=3):
+        calls.append(name)
+        raise ServerUnreachable("dig failed: no servers could be reached")
+
+    monkeypatch.setattr("app.dns_parity.dig", dead)
+    queries = [(f"h{i}.example.com", "A") for i in range(10)]
+    findings = run_parity(queries, ("o", 53), ("n", 53))
+    assert len(calls) == 3
+    assert "not asked" in findings[-1].differences[0]
+
+
+def test_dig_refuses_option_lookalikes() -> None:
+    with pytest.raises(ValueError):
+        dig(("127.0.0.1", 53), "-x", "A")
+    with pytest.raises(ValueError):
+        dig(("127.0.0.1", 53), "a.example.com", "+short")
+
+
+def test_dig_wrapper_builds_the_command_and_parses_real_output(monkeypatch, tmp_path: Path) -> None:
+    fake = tmp_path / "dig"
+    fake.write_text(
+        '#!/usr/bin/env bash\necho "$@" > "' + str(tmp_path / "args") + "\"\ncat <<'EOF'\n" + DIG_A + "EOF\n"
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    answer = dig(("192.0.2.1", 853), "www.example.com", "A", timeout=2)
+    assert ("www.example.com", "A", "192.0.2.1") in answer.records
+    args = (tmp_path / "args").read_text().split()
+    assert "-p" in args and args[args.index("-p") + 1] == "853"
+    assert "@192.0.2.1" in args and "+tries=1" in args and "+time=2" in args
+
+
+def test_dig_nonzero_exit_is_unreachable(monkeypatch, tmp_path: Path) -> None:
+    fake = tmp_path / "dig"
+    fake.write_text("#!/usr/bin/env bash\necho ';; no servers could be reached'\nexit 9\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    with pytest.raises(ServerUnreachable):
+        dig(("192.0.2.1", 53), "www.example.com", "A")
+
+
+def test_cli_rejects_broken_zones_bad_probe_and_timeout(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("app.dns_parity_cli.shutil.which", lambda name: "/usr/bin/dig")
+    monkeypatch.setattr("app.dns_parity.dig", lambda *a, **kw: parse_dig(DIG_A))
+    broken = tmp_path / "zones.yml"
+    broken.write_text("not: [valid, {")
+    base = ["dns-parity", "--old", "192.0.2.1", "--new", "192.0.2.2"]
+    monkeypatch.setattr(sys, "argv", [*base, "--zones", str(broken), "--probe", "x.example.org"])
+    assert main() == 2  # would otherwise compare only the probe and exit 0
+    monkeypatch.setattr(sys, "argv", [*base, "--zones", str(_zones(tmp_path)), "--probe=-x"])
+    assert main() == 2
+    monkeypatch.setattr(sys, "argv", [*base, "--zones", str(_zones(tmp_path)), "--timeout", "0"])
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 2
