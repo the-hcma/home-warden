@@ -39,7 +39,7 @@ Subsequent runs on the same host need no flag:
 `scripts/lib/host-guard` refuses every mutating action (setup-service, on-deploy, cert-renewer, healthcheck alerts, the conf-watch reload) unless the current host matches the one pinned in `~/.config/home-warden-host` / `~/.config/home-warden-machine-id`. These are host-local files, **never committed to the repo** (see `.cursor/rules/no-private-infra.mdc`) — nothing pins home-warden to a real hostname in tracked files.
 
 - First run on the intended host: `./scripts/setup-service --confirm-host` (or answer `y` at the interactive prompt) records that host as the pin.
-- Moving to different hardware: `./scripts/setup-service --repin-host` on the new host.
+- Moving to different hardware: `./scripts/setup-service --repin-host` on the new host (the full procedure, with parity checks and rollback, is [host-migration.md](./host-migration.md)).
 - Everywhere else (a dev laptop, a CI runner, a session-init hook that happens to run `scripts/on-deploy`), these scripts print a refusal and exit non-zero instead of touching live state.
 - `./scripts/setup-service --status` reports the current pin and whether this host matches it, without mutating anything.
 - `HOME_WARDEN_SKIP_HOST_GUARD=1` bypasses the check — manual testing only, never set it in a unit or timer.
