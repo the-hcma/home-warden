@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Compare what two hosts serve for every catalog vhost (nginx parity, no DNS change). Thin wrapper around the
+# app.cutover_verify_cli console script -- see that module's docstring for usage/exit codes.
+# See the-hcma/home-warden#188.
+#
+# Usage:
+#   ./scripts/cutover-verify --old 192.0.2.10 --new 198.51.100.10 [--old6 A --new6 B] [--host NAME]
+
+set -euo pipefail
+
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_dir}"
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "cutover-verify: install uv (https://docs.astral.sh/uv/) or run 'uv sync' in ${repo_dir}" >&2
+  exit 1
+fi
+
+exec uv run cutover-verify "$@"
