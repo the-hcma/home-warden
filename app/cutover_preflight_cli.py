@@ -1,11 +1,12 @@
 """`cutover-preflight` (see pyproject.toml [project.scripts]): can this host take over the front door? (#187)
 
 Usage:
-  cutover-preflight [--skip-certbot-dry-run] [--no-sudo] [--quiet]
+  cutover-preflight [--certbot-dry-run] [--no-sudo] [--quiet]
 
-Read-only. Reads the served conf from $HOME_NGINX_CONF (default ~/home/nginx/server/nginx.conf), the catalog
-from $SERVICES_JSON_PATH, and the same conf/ paths the other tools use. Prints ok/WARN/FAIL per check, each
-failure with what to fix.
+Read-only by default (`--certbot-dry-run` adds `cert-renewer --dry-run`, which is host-guarded and can move a
+copied-in lineage aside; see app.cutover_preflight). Reads the served conf from $HOME_NGINX_CONF
+(default ~/home/nginx/server/nginx.conf), the catalog from $SERVICES_JSON_PATH, and the same conf/ paths the
+other tools use. Prints ok/WARN/FAIL per check, each failure with what to fix.
 
 Exit: 0 no failures (warnings allowed), 1 any failure, 2 usage error.
 """
@@ -23,6 +24,7 @@ from app.catalog_health_settings import (
     certbot_domains_path,
     client_pki_store,
     cloudflare_credentials_path,
+    scratch_dir,
     services_json_path,
 )
 from app.cutover_preflight import Context, run_preflight
@@ -32,7 +34,9 @@ from app.home_warden_auth import session_secret_path
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Read-only readiness check for a host taking over the front door.")
     parser.add_argument(
-        "--skip-certbot-dry-run", action="store_true", help="skip cert-renewer --dry-run (hits LE staging)"
+        "--certbot-dry-run",
+        action="store_true",
+        help="also run cert-renewer --dry-run (host-guarded; hits LE staging; can move a copied-in lineage aside)",
     )
     parser.add_argument("--no-sudo", action="store_true", help="run nginx -T without sudo")
     parser.add_argument("--quiet", "-q", action="store_true", help="only print warnings and failures")
@@ -56,7 +60,8 @@ def main() -> int:
         session_secret=session_secret_path(),
         pki_store=client_pki_store(),
         use_sudo=not args.no_sudo,
-        skip_certbot=args.skip_certbot_dry_run,
+        certbot_dry_run=args.certbot_dry_run,
+        scratch_dir=scratch_dir(),
         catalog=catalog,
     )
     results = run_preflight(ctx)

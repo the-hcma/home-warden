@@ -1,9 +1,13 @@
 """Read-only readiness check for a host that is about to take over the front door (#187).
 
 Nothing here changes the host: it reads the served nginx config, certificates, secrets' file modes,
-`certbot-domains` and the catalog, tries TCP connects to every `proxy_pass` upstream, and (unless skipped)
-runs `cert-renewer --dry-run`. Each check yields ok / warn / fail with what to fix; only `fail` makes
-`cutover-preflight` exit non-zero. `scripts/cutover-assess preflight` (the temporary shell version from #192)
+`certbot-domains` and the catalog, and tries TCP connects to every `proxy_pass` upstream. Each check yields
+ok / warn / fail with what to fix; only `fail` makes `cutover-preflight` exit non-zero.
+
+`cert-renewer --dry-run` is opt-in (`--certbot-dry-run`), not part of the default run: for a lineage with no
+renewal config (a host whose certs were copied in) it moves `live/`, `archive/` and `renewal/` aside before
+its dry-run `certonly`, and it is host-guarded, so it can't run before the host is pinned. Run it only once the
+host is pinned and you accept that. `scripts/cutover-assess preflight` (the temporary shell version from #192)
 covers the same ground for a host without `uv`.
 """
 
@@ -40,7 +44,14 @@ Connector = Callable[[str, int, float], bool]
 
 
 def default_runner(cmd: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+    """Run `cmd`; a missing binary or a timeout becomes a non-zero result, so one broken check can't
+    replace the whole report with a traceback."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(cmd, 127, "", f"{cmd[0]}: not found")
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(cmd, 124, "", f"{cmd[0]}: timed out after {timeout:.0f}s")
 
 
 def default_connector(host: str, port: int, timeout: float) -> bool:
@@ -55,6 +66,7 @@ def default_connector(host: str, port: int, timeout: float) -> bool:
 class Context:
     nginx_conf: Path
     repo_dir: Path
+    scratch_dir: Path
     certbot_domains: Path
     cloudflare_credentials: Path
     session_secret: Path
@@ -64,13 +76,15 @@ class Context:
     which: Callable[[str], str | None] = shutil.which
     now: Callable[[], datetime.datetime] = lambda: datetime.datetime.now(datetime.timezone.utc)
     use_sudo: bool = True
-    skip_certbot: bool = False
+    certbot_dry_run: bool = False
     timeout: float = 5.0
     catalog: dict = field(default_factory=dict)
 
 
 def _strip_comments(text: str) -> str:
-    return "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+    """nginx starts a comment at a `#` that begins a token, so `…$request_uri#x;` and a `#` inside a quoted
+    string or regex keep their directive intact."""
+    return re.sub(r"(?m)(^|\s)#.*$", r"\1", text)
 
 
 def parse_conf(dump: str) -> dict[str, set[str]]:
@@ -83,9 +97,17 @@ def parse_conf(dump: str) -> dict[str, set[str]]:
     server_names: set[str] = set()
     for raw in grab(r"\bserver_name\s+([^;]+);"):
         server_names.update(n for n in raw.split() if re.fullmatch(r"[A-Za-z0-9.-]+\.[A-Za-z]+", n))
+    upstreams: set[str] = set()
+    groups: set[str] = set()
+    for m in re.finditer(r"\bupstream\s+(\S+)\s*\{([^}]*)\}", text):
+        groups.add(m.group(1))
+        upstreams.update(f"tcp://{srv}" for srv in re.findall(r"\bserver\s+([^\s;]+)", m.group(2)))
+    proxy_pass = grab(r"\bproxy_pass\s+([^;\s]+)\s*;")
+    # `proxy_pass http://backend;` naming an upstream group is checked through that group's servers
+    proxy_pass = {u for u in proxy_pass if u.partition("://")[2].split("/", 1)[0] not in groups}
     return {
         "server_names": server_names,
-        "proxy_pass": grab(r"\bproxy_pass\s+([^;\s]+)\s*;"),
+        "proxy_pass": proxy_pass | upstreams,
         "certs": grab(r"\bssl_certificate\s+([^;\s]+)\s*;"),
         "keys": grab(r"\bssl_certificate_key\s+([^;\s]+)\s*;"),
         "listens": grab(r"\blisten\s+([^;]+);"),
@@ -93,25 +115,27 @@ def parse_conf(dump: str) -> dict[str, set[str]]:
 
 
 def _upstream_hostport(url: str) -> tuple[str, int] | None:
+    """(host, port) of a `proxy_pass` target, or None for one we can't check (variables, unix sockets).
+    A scheme-less `host:port` is a `stream {}` proxy_pass."""
     if "$" in url or url.startswith("unix:"):
         return None
     scheme, sep, rest = url.partition("://")
     if not sep:
-        return None
+        scheme, rest = "", url
     if rest.startswith("unix:"):  # proxy_pass http://unix:/run/x.sock:/uri
         return None
     hostport = rest.split("/", 1)[0]
-    if hostport.startswith("["):  # [v6]:port
-        host, _, tail = hostport[1:].partition("]")
-        port = int(tail[1:]) if tail.startswith(":") else (443 if scheme == "https" else 80)
-        return host, port
-    host, _, port_s = hostport.partition(":")
-    if not host or "$" in host:
-        return None
+    default_port = {"https": 443, "http": 80}.get(scheme)
     try:
-        return host, int(port_s) if port_s else (443 if scheme == "https" else 80)
+        if hostport.startswith("["):  # [v6]:port
+            host, _, tail = hostport[1:].partition("]")
+            port_s = tail[1:] if tail.startswith(":") else ""
+        else:
+            host, _, port_s = hostport.partition(":")
+        port = int(port_s) if port_s else default_port
     except ValueError:
         return None
+    return (host, port) if host and port else None
 
 
 def _sudo(ctx: Context, cmd: list[str]) -> list[str]:
@@ -170,7 +194,8 @@ def check_conf(ctx: Context) -> tuple[list[Result], dict[str, set[str]]]:
     if not ctx.nginx_conf.is_file():
         return [Result("nginx-conf", "fail", f"served conf not readable: {ctx.nginx_conf}")], {}
     out = []
-    proc = ctx.run(_sudo(ctx, ["nginx", "-T", "-c", str(ctx.nginx_conf)]), 30)
+    # -p as scripts/nginx-test-and-reload does, so relative paths resolve the way the service's do
+    proc = ctx.run(_sudo(ctx, ["nginx", "-p", f"{ctx.scratch_dir}/", "-T", "-c", str(ctx.nginx_conf)]), 30)
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout).strip().splitlines()[-1:] or ["nginx -T failed"]
         return [Result("nginx -t", "fail", detail[0])], {}
@@ -255,9 +280,13 @@ def check_domains(ctx: Context, conf: dict[str, set[str]]) -> list[Result]:
 
 def check_secrets(ctx: Context) -> list[Result]:
     out = []
-    for label, path in (("cloudflare.ini", ctx.cloudflare_credentials), ("session-secret", ctx.session_secret)):
+    # cloudflare.ini drives cert issuance; the session secret belongs to the opt-in web UI and is created on demand.
+    for label, path, missing in (
+        ("cloudflare.ini", ctx.cloudflare_credentials, "fail"),
+        ("session-secret", ctx.session_secret, "warn"),
+    ):
         if not path.exists():
-            out.append(Result(label, "fail", f"{path} missing"))
+            out.append(Result(label, missing, f"{path} missing"))
             continue
         issue = _mode_issue(path, 0o077)
         out.append(Result(label, "fail", issue) if issue else Result(label, "ok", "present, owner-only"))
@@ -277,8 +306,10 @@ def check_secrets(ctx: Context) -> list[Result]:
 
 
 def check_certbot_dry_run(ctx: Context) -> list[Result]:
-    if ctx.skip_certbot:
-        return [Result("certbot-dry-run", "warn", "skipped")]
+    if not ctx.certbot_dry_run:
+        return [
+            Result("certbot-dry-run", "warn", "not run (opt in with --certbot-dry-run; it can move staging lineages)")
+        ]
     proc = ctx.run([str(ctx.repo_dir / "scripts" / "cert-renewer"), "--dry-run"], 900)
     return [
         Result(

@@ -86,6 +86,7 @@ def ctx(tmp_path: Path) -> Context:
     return Context(
         nginx_conf=conf,
         repo_dir=tmp_path,
+        scratch_dir=tmp_path / "scratch",
         certbot_domains=domains,
         cloudflare_credentials=cf,
         session_secret=secret,
@@ -118,6 +119,9 @@ def test_parse_conf_ignores_comments_and_wildcards() -> None:
         ("http://$upstream", None),
         ("http://unix:/run/x.sock", None),
         ("backend", None),
+        ("db.example.internal:5432", ("db.example.internal", 5432)),  # stream {} proxy_pass
+        ("http://[::1]:$port", None),
+        ("http://[::1]:abc", None),
     ],
 )
 def test_upstream_hostport(url: str, expected) -> None:
@@ -176,7 +180,7 @@ def test_secret_modes_and_missing_files(ctx: Context) -> None:
     (ctx.pki_store / "ca").chmod(0o755)
     by = {r.name: r for r in run_preflight(ctx)}
     assert by["cloudflare.ini"].status == "fail"
-    assert by["session-secret"].status == "fail"
+    assert by["session-secret"].status == "warn"  # the web UI is opt-in; the secret is created on demand
     assert by["pki-store"].status == "fail"
 
 
@@ -194,15 +198,66 @@ def test_nginx_t_failure_stops_conf_dependent_checks(ctx: Context) -> None:
 
 def test_certbot_dry_run_failure_and_skip(ctx: Context) -> None:
     base_run = ctx.run
-    ctx.run = lambda cmd, t: _proc(rc=1) if cmd[-1] == "--dry-run" else base_run(cmd, t)
+    ran: list[list[str]] = []
+
+    def run(cmd, t):
+        ran.append(cmd)
+        return _proc(rc=1) if cmd[-1] == "--dry-run" else base_run(cmd, t)
+
+    ctx.run = run
+    assert _by_name(run_preflight(ctx), "certbot-dry-run")[0].status == "warn"  # opt-in: not run by default
+    assert not any(c[-1] == "--dry-run" for c in ran)
+    ctx.certbot_dry_run = True
     assert _by_name(run_preflight(ctx), "certbot-dry-run")[0].status == "fail"
-    ctx.skip_certbot = True
-    assert _by_name(run_preflight(ctx), "certbot-dry-run")[0].status == "warn"
 
 
 def test_cli_exit_code(monkeypatch, tmp_path: Path, capsys) -> None:
     monkeypatch.setenv("HOME_NGINX_CONF", str(tmp_path / "missing.conf"))
     monkeypatch.setenv("SERVICES_JSON_PATH", str(tmp_path / "none.json"))
-    monkeypatch.setattr(sys, "argv", ["cutover-preflight", "--skip-certbot-dry-run", "--no-sudo"])
+    monkeypatch.setattr(sys, "argv", ["cutover-preflight", "--no-sudo"])
     assert main() == 1
     assert "FAIL nginx-conf" in capsys.readouterr().out
+
+
+def test_default_runner_turns_missing_binary_and_timeout_into_results() -> None:
+    from app.cutover_preflight import default_runner
+
+    missing = default_runner(["definitely-not-a-binary-xyz"], 1)
+    assert missing.returncode == 127 and "not found" in missing.stderr
+    slow = default_runner([sys.executable, "-c", "import time; time.sleep(5)"], 0.2)
+    assert slow.returncode == 124 and "timed out" in slow.stderr
+
+
+def test_missing_nginx_is_a_report_not_a_traceback(ctx: Context) -> None:
+    from app.cutover_preflight import default_runner
+
+    ctx.run = lambda cmd, t: default_runner(["definitely-not-a-binary-xyz"], 1)
+    results = run_preflight(ctx)
+    assert _by_name(results, "nginx -t")[0].status == "fail"
+
+
+def test_hash_inside_a_directive_does_not_hide_it() -> None:
+    conf = (
+        "server { server_name a.example.com; return 301 https://$host$request_uri#x; proxy_pass http://127.0.0.1:1; }"
+    )
+    assert "http://127.0.0.1:1" in parse_conf(conf)["proxy_pass"]
+    commented = "# proxy_pass http://no:1;\nserver { proxy_pass http://yes:2; # trailing proxy_pass http://no:3;\n}"
+    assert parse_conf(commented)["proxy_pass"] == {"http://yes:2"}
+
+
+def test_named_upstream_groups_are_expanded() -> None:
+    conf = (
+        "upstream backend { server 10.0.0.5:8080; server 10.0.0.6:8080 weight=2; }\n"
+        "server { proxy_pass http://backend; }"
+    )
+    assert parse_conf(conf)["proxy_pass"] == {"tcp://10.0.0.5:8080", "tcp://10.0.0.6:8080"}
+    assert _upstream_hostport("tcp://10.0.0.5:8080") == ("10.0.0.5", 8080)
+
+
+def test_nginx_t_uses_the_service_prefix(ctx: Context) -> None:
+    seen: list[list[str]] = []
+    base_run = ctx.run
+    ctx.run = lambda cmd, t: (seen.append(cmd), base_run(cmd, t))[1]
+    run_preflight(ctx)
+    t_cmd = next(c for c in seen if "-T" in c)
+    assert t_cmd[t_cmd.index("-p") + 1] == f"{ctx.scratch_dir}/"
