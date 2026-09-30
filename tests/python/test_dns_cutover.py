@@ -85,7 +85,7 @@ def test_restore_replays_content_proxied_and_ttl(monkeypatch) -> None:
         ],
     }
     results = restore_snapshot(snap, HEADERS, 5, 1, dry_run=True)
-    assert [r.status for r in results] == ["updated", "skip", "skip"]
+    assert [r.status for r in results] == ["updated", "manual", "manual"]
     assert calls == [
         (
             "a",
@@ -199,8 +199,8 @@ def test_cli_restore_mode(monkeypatch, tmp_path: Path, capsys) -> None:
     snap = tmp_path / "s.json"
     snap.write_text(json.dumps({"version": 1, "entries": [{"service": "a", "name": "a.example.com", "records": []}]}))
     _cli_env(monkeypatch, tmp_path, "--restore", str(snap), "--dry-run")
-    assert main() == 0
-    assert json.loads(capsys.readouterr().out)[0]["status"] == "skip"
+    assert main() == 1  # "manual": nothing was restored for a name that had no record, so not a clean rollback
+    assert json.loads(capsys.readouterr().out)[0]["status"] == "manual"
 
 
 def test_cli_restore_bad_snapshot_exits_2(monkeypatch, tmp_path: Path) -> None:
@@ -221,5 +221,107 @@ def test_cli_reports_stragglers(monkeypatch, tmp_path: Path, capsys) -> None:
         "app.catalog_dns_sync_cli.find_stragglers",
         lambda *a: [{"zone": "example.com", "name": "vpn.example.com", "type": "A", "content": "198.51.100.7"}],
     )
-    assert main() == 0
+    assert main() == 1  # leftovers make the run non-zero
     assert "NOT IN CATALOG" in capsys.readouterr().err
+
+
+def test_cli_restore_rejects_flags_it_would_ignore(monkeypatch, tmp_path: Path, capsys) -> None:
+    from app.catalog_dns_sync_cli import main
+
+    snap = tmp_path / "s.json"
+    snap.write_text(json.dumps({"version": 1, "entries": []}))
+    for extra in (["--service", "a"], ["--target", "203.0.113.10"], ["--old-target", "198.51.100.7"], ["--proxied"]):
+        _cli_env(monkeypatch, tmp_path, "--restore", str(snap), *extra)
+        assert main() == 2
+    assert "can't be combined" in capsys.readouterr().err
+
+
+def test_cli_stragglers_use_the_whole_catalog_and_fail_the_run(monkeypatch, tmp_path: Path) -> None:
+    from app.catalog_dns_sync_cli import main
+
+    catalog = tmp_path / "full-catalog.json"
+    catalog.write_text(json.dumps({"services": SERVICES[:2]}))
+    _cli_env(monkeypatch, tmp_path, "--target", "203.0.113.10", "--dry-run", "--old-target", "198.51.100.7")
+    monkeypatch.setattr(sys, "argv", [*sys.argv, "--service", "a", "--services-json", str(catalog)])
+    monkeypatch.setattr("app.catalog_dns_sync_cli.sync_dns_record", lambda *a, **kw: SyncResult("a", "noop", ""))
+    seen: list[list[dict]] = []
+
+    def fake(services, *a):
+        seen.append(services)
+        return [{"zone": "example.com", "name": "vpn.example.com", "type": "A", "content": "198.51.100.7"}]
+
+    monkeypatch.setattr("app.catalog_dns_sync_cli.find_stragglers", fake)
+    assert main() == 1
+    assert [s["name"] for s in seen[0]] == ["a", "b"]
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        [{"ttl": 60}],
+        [1],
+        [{"content": ""}],
+        [{"content": "1.1.1.1", "ttl": True}],
+        [{"content": "1.1.1.1", "ttl": "60"}],
+    ],
+)
+def test_load_snapshot_rejects_malformed_records(tmp_path: Path, records) -> None:
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({"version": 1, "entries": [{"name": "a.example.com", "records": records}]}))
+    with pytest.raises(ValueError, match="malformed record"):
+        load_snapshot(path)
+
+
+def test_write_snapshot_leaves_no_temp_file_behind(tmp_path: Path) -> None:
+    path = tmp_path / "s.json"
+    write_snapshot(path, {"version": 1, "entries": []})
+    with pytest.raises(FileExistsError):
+        write_snapshot(path, {"version": 1, "entries": []})
+    assert [p.name for p in tmp_path.iterdir()] == ["s.json"]
+
+
+def test_find_stragglers_normalizes_target_and_case(monkeypatch) -> None:
+    urls: list[str] = []
+
+    def fake(url, headers, timeout, retries, **kw):
+        urls.append(url)
+        if "/zones?name=" in url:
+            return {"result": [{"id": "z1"}]} if url.endswith("name=example.com") else {"result": []}
+        return {"result": [{"name": "A.Example.com", "type": "AAAA"}, {"name": "Vpn.example.com", "type": "AAAA"}]}
+
+    monkeypatch.setattr("app.dns_cutover._cf_request", fake)
+    services = [{"server_name": "a.example.com"}, {"server_name": "b.example.com"}]
+    out = find_stragglers(services, "2001:0DB8:0:0:0:0:0:1", HEADERS, 5, 1)
+    assert [r["name"] for r in out] == ["Vpn.example.com"]
+    assert any("content=2001%3Adb8%3A%3A1" in u for u in urls)
+    assert sum("/zones?name=example.com" in u for u in urls) == 1  # one zone lookup, not one per service
+
+
+def test_sync_dns_record_sends_and_compares_ttl(monkeypatch) -> None:
+    from app.catalog_checks import sync_dns_record
+
+    writes: list[tuple[str, dict | None]] = []
+    existing = {"id": "r1", "type": "A", "content": "203.0.113.10", "proxied": False, "ttl": 1}
+
+    def fake(url, headers, timeout, retries, *, method="GET", data=None):
+        if "/zones?name=" in url:
+            return {"result": [{"id": "z1", "name_servers": []}]}
+        if method in ("PUT", "POST"):
+            writes.append((method, data))
+            existing.update(data or {})
+            return {}
+        return {"result": [dict(existing)]}
+
+    monkeypatch.setattr("app.catalog_checks._cf_request", fake)
+    svc = {"server_name": "a.example.com"}
+    # Same content and proxied flag but a different TTL is an update when a TTL is pinned ...
+    r = sync_dns_record("a", svc, "203.0.113.10", HEADERS, 5, 1, ttl=300, verify_resolution=False)
+    assert r.status == "updated" and writes == [
+        ("PUT", {"type": "A", "name": "a.example.com", "content": "203.0.113.10", "proxied": False, "ttl": 300})
+    ]
+    # ... and a noop when it matches, and when none is pinned.
+    writes.clear()
+    existing["ttl"] = 300
+    assert sync_dns_record("a", svc, "203.0.113.10", HEADERS, 5, 1, ttl=300).status == "noop"
+    assert sync_dns_record("a", svc, "203.0.113.10", HEADERS, 5, 1).status == "noop"
+    assert writes == []

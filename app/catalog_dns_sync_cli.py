@@ -14,7 +14,8 @@ done. `--restore FILE` puts those records back (content, proxied flag, TTL); a r
 is reported, not deleted.
 
 Exit: 0 all synced services created/updated/noop/skipped, 1 any sync
-failed, 2 usage/config error.
+failed (or, with --old-target, records outside the catalog still point at it; or, with --restore,
+anything was left for a human), 2 usage/config error.
 
 Refuses to run anywhere but the host pinned by
 `scripts/setup-service --confirm-host` (see scripts/lib/host-guard).
@@ -89,6 +90,23 @@ def main() -> int:
         return 2
 
     if args.restore:
+        ignored = [
+            flag
+            for flag, given in (
+                ("--target", any(a == "--target" or a.startswith("--target=") for a in sys.argv[1:])),
+                ("--service", bool(args.services)),
+                ("--old-target", bool(args.old_target)),
+                ("--proxied", args.proxied),
+            )
+            if given
+        ]
+        if ignored:
+            print(
+                "catalog-dns-sync: --restore replays the whole snapshot; "
+                f"it can't be combined with {', '.join(ignored)}",
+                file=sys.stderr,
+            )
+            return 2
         return _restore(args)
 
     try:
@@ -114,7 +132,7 @@ def main() -> int:
     if not args.dry_run and not args.no_snapshot:
         try:
             snapshot = take_snapshot(services, cf_headers, args.timeout, args.max_retries)
-            stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
             snapshot_path = args.snapshot_dir / f"{stamp}.json"
             write_snapshot(snapshot_path, snapshot)
         except Exception as e:
@@ -144,7 +162,10 @@ def main() -> int:
     print(json.dumps([asdict(r) for r in results], indent=2))
     if args.old_target:
         try:
-            leftovers = find_stragglers(services, args.old_target, cf_headers, args.timeout, args.max_retries)
+            # The whole catalog, not the --service subset: a record of a service we didn't touch isn't a leftover.
+            leftovers = find_stragglers(
+                catalog.get("services") or [], args.old_target, cf_headers, args.timeout, args.max_retries
+            )
         except Exception as e:
             print(f"catalog-dns-sync: could not list records still pointing at {args.old_target}: {e}", file=sys.stderr)
             return 1
@@ -156,6 +177,8 @@ def main() -> int:
             )
         if not leftovers:
             print(f"catalog-dns-sync: no records outside the catalog point at {args.old_target}", file=sys.stderr)
+        if leftovers:
+            return 1
     return 1 if any(r.status == "failed" for r in results) else 0
 
 
@@ -178,7 +201,7 @@ def _restore(args: argparse.Namespace) -> int:
         verify_resolution=not args.no_verify_resolution,
     )
     print(json.dumps([asdict(r) for r in results], indent=2))
-    return 1 if any(r.status == "failed" for r in results) else 0
+    return 1 if any(r.status in ("failed", "manual") for r in results) else 0
 
 
 if __name__ == "__main__":

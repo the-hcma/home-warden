@@ -64,6 +64,7 @@ class CheckResult:
 class SyncResult:
     service: str
     # "created" | "updated" | "noop" | "would-create" | "would-update" | "failed" | "skip"
+    # | "manual" (a restore left something for a human, #190)
     status: str
     detail: str
 

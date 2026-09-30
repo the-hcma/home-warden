@@ -12,6 +12,7 @@ removing it is left to the operator. The snapshot is what the records were, not 
 from __future__ import annotations
 
 import datetime
+import ipaddress
 import json
 import os
 import urllib.parse
@@ -50,12 +51,18 @@ def take_snapshot(services: list[dict], cf_headers: dict[str, str], timeout: flo
 
 
 def write_snapshot(path: Path, snapshot: dict) -> None:
-    """Write `snapshot` as JSON, mode 0600, refusing to overwrite an existing file."""
+    """Write `snapshot` as JSON, mode 0600, refusing to overwrite an existing file. The file appears
+    complete or not at all: it is written under a temporary name and linked into place."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump(snapshot, f, indent=2)
-        f.write("\n")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(snapshot, f, indent=2)
+            f.write("\n")
+        os.link(tmp, path)  # fails with FileExistsError rather than replacing an existing snapshot
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def load_snapshot(path: Path) -> dict:
@@ -71,6 +78,17 @@ def load_snapshot(path: Path) -> dict:
         isinstance(e, dict) and isinstance(e.get("name"), str) and isinstance(e.get("records"), list) for e in entries
     ):
         raise ValueError(f"{path}: malformed snapshot entries")
+    for entry in entries:
+        for rec in entry["records"]:
+            ttl = rec.get("ttl") if isinstance(rec, dict) else None
+            if (
+                not isinstance(rec, dict)
+                or not isinstance(rec.get("content"), str)
+                or not rec["content"]
+                or isinstance(ttl, bool)
+                or not (ttl is None or isinstance(ttl, int))
+            ):
+                raise ValueError(f"{path}: malformed record for {entry['name']}: {rec!r}")
     return data
 
 
@@ -84,19 +102,23 @@ def restore_snapshot(
     verify_resolution: bool = True,
 ) -> list[SyncResult]:
     """Put each record back to its snapshotted content, proxied flag and TTL, via `sync_dns_record`
-    (same read-back and resolution checks as the original write)."""
+    (same read-back and resolution checks as the original write). A name the restore can't handle
+    (none existed, or several did) gets status "manual": the rollback is not complete until a human
+    has dealt with it, so the CLI exits non-zero for it."""
     results: list[SyncResult] = []
     for entry in snapshot["entries"]:
         service = str(entry.get("service") or entry["name"])
         records = entry["records"]
         if not records:
             results.append(
-                SyncResult(service, "skip", f"no record existed for {entry['name']} before the sync; delete it by hand")
+                SyncResult(
+                    service, "manual", f"no record existed for {entry['name']} before the sync; delete it by hand"
+                )
             )
             continue
         if len(records) > 1:
             results.append(
-                SyncResult(service, "skip", f"{entry['name']} had {len(records)} records; restore them by hand")
+                SyncResult(service, "manual", f"{entry['name']} had {len(records)} records; restore them by hand")
             )
             continue
         rec = records[0]
@@ -104,35 +126,44 @@ def restore_snapshot(
             sync_dns_record(
                 service,
                 {"server_name": entry["name"]},
-                str(rec.get("content")),
+                rec["content"],
                 cf_headers,
                 timeout,
                 max_retries,
                 proxied=bool(rec.get("proxied", False)),
                 dry_run=dry_run,
                 verify_resolution=verify_resolution,
-                ttl=rec.get("ttl") if isinstance(rec.get("ttl"), int) else None,
+                ttl=rec.get("ttl"),
             )
         )
     return results
+
+
+def _normalize_target(target: str) -> str:
+    """Same canonical form `sync_dns_record` compares with: compressed IPv6, bare lower-case hostname."""
+    try:
+        return str(ipaddress.ip_address(target))
+    except ValueError:
+        return target.rstrip(".").lower()
 
 
 def find_stragglers(
     services: list[dict], old_target: str, cf_headers: dict[str, str], timeout: float, max_retries: int
 ) -> list[dict[str, object]]:
     """Records in the catalog services' zones whose content is `old_target` but whose name is not a
-    catalog `server_name`: what a cutover would leave pointing at the old host. Read-only; raises on a
-    Cloudflare error."""
-    catalog_names = {s["server_name"] for s in services if s.get("server_name")}
+    catalog `server_name`: what a cutover would leave pointing at the old host. Pass the whole catalog,
+    not a `--service` subset. Read-only; raises on a Cloudflare error."""
+    old_target = _normalize_target(old_target)
+    catalog_names = {s["server_name"].lower() for s in services if s.get("server_name")}
     zones: dict[str, str] = {}  # zone id -> zone name
+    looked_up: dict[str, list] = {}  # candidate zone name -> API result, one request per distinct name
     for domain in sorted(catalog_names):
         for candidate in candidate_zone_names(domain):
-            data = _cf_request(
-                f"{CF_API_BASE}/zones?name={urllib.parse.quote(candidate)}", cf_headers, timeout, max_retries
-            )
-            found = data.get("result") or []
-            if found:
-                zones[found[0]["id"]] = candidate
+            if candidate not in looked_up:
+                url = f"{CF_API_BASE}/zones?name={urllib.parse.quote(candidate)}"
+                looked_up[candidate] = _cf_request(url, cf_headers, timeout, max_retries).get("result") or []
+            if looked_up[candidate]:
+                zones[looked_up[candidate][0]["id"]] = candidate
     stragglers: list[dict[str, object]] = []
     for zone_id, zone_name in sorted(zones.items(), key=lambda kv: kv[1]):
         for page in range(1, _MAX_PAGES + 1):
@@ -142,7 +173,7 @@ def find_stragglers(
             )
             data = _cf_request(url, cf_headers, timeout, max_retries)
             for rec in data.get("result") or []:
-                if rec.get("name") not in catalog_names:
+                if str(rec.get("name", "")).lower() not in catalog_names:
                     stragglers.append(
                         {
                             "zone": zone_name,
