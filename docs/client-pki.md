@@ -35,14 +35,15 @@ This is a **household CA**: a handful of personal devices (phones, tablets, lapt
 
 - **One certificate per device**, never shared between devices. Losing one device then means revoking one certificate, not re-enrolling everything.
 - **The common name names the person and the device**, for example `alice-phone` or `bob-laptop`. That makes the certificate inventory readable and lets a vhost's `allow_cn` list admit specific people or devices.
-- Certificates are delivered to devices as password-protected PKCS#12 (`.p12`) files, which iOS, Android, macOS, and desktop browsers can all import.
+- **Laptops, desktops, and YubiKeys generate their own key** and send only a certificate signing request (CSR); the CA signs it, and the key never leaves the device, so the store holds no key for them (see [Enroll from a CSR](#enroll-a-laptop-or-yubikey-from-a-csr)).
+- **Phones and tablets get a password-protected PKCS#12 (`.p12`) bundle** the CA builds, key included, since iOS and Android offer no way to make a CSR for browser client authentication outside MDM.
 
 ## Lifecycle overview
 
 | Stage | What happens | Tracked in |
 | --- | --- | --- |
 | CA setup | Create the CA once on the designated host, keep its key private, back it up encrypted, and rotate the CA itself before it expires. See [Running the CA](#running-the-ca). | [#158](https://github.com/the-hcma/home-warden/issues/158) |
-| Enroll | Issue a certificate for a new device and export it as a `.p12`. See [Managing devices](#managing-devices). | [#159](https://github.com/the-hcma/home-warden/issues/159) |
+| Enroll | Issue a certificate for a new device: sign its CSR, or export a `.p12`. See [Managing devices](#managing-devices). | [#159](https://github.com/the-hcma/home-warden/issues/159) |
 | Rotate | Issue a replacement while the old certificate keeps working, install it on the device, then revoke the old serial. | [#159](https://github.com/the-hcma/home-warden/issues/159) |
 | Revoke | Revoke a lost or retired device's serial and publish a new CRL; nginx reloads automatically when the CRL changes. | [#159](https://github.com/the-hcma/home-warden/issues/159) |
 | Keep the CRL fresh | Republish the CRL on a timer before it expires (an expired CRL makes nginx reject every client), and alert on CA or CRL expiry. See [Keeping the CRL fresh](#keeping-the-crl-fresh). | [#160](https://github.com/the-hcma/home-warden/issues/160) |
@@ -168,6 +169,28 @@ Modern devices take the default AES-256 bundle. Only an old device that rejects 
 ./scripts/client-pki enroll old-tablet --password-file ~/.config/home-warden/old-tablet.pass --legacy
 ```
 
+### Enroll a laptop or YubiKey from a CSR
+
+A device that can generate its own key keeps it: it sends a certificate signing request, which holds only the public key, and gets back a certificate. Nothing secret travels, there is no bundle password, and the store (and every backup of it) holds no key that could impersonate the device.
+
+1. **On the device**, generate a key and a CSR. The subject doesn't matter; the CA names the certificate. Pick one:
+   - OpenSSL (Linux, macOS): `openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout bob-laptop.key -out bob-laptop.csr -subj "/CN=bob-laptop"`, then `chmod 600 bob-laptop.key`.
+   - macOS keychain: Keychain Access → Certificate Assistant → Request a Certificate From a Certificate Authority, "Saved to disk", with an ECC 256-bit or RSA 2048+ key.
+   - Windows: `certreq -new` with an `.inf` that sets `Exportable = FALSE` (and the TPM's "Microsoft Platform Crypto Provider" to keep the key in the TPM).
+   - YubiKey (PIV): `ykman piv keys generate --algorithm ECCP256 9a pub.pem`, then `ykman piv certificates request --subject "CN=bob-laptop" 9a pub.pem bob-laptop.csr`.
+2. **Read the fingerprint on the device**: `openssl req -in bob-laptop.csr -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256`.
+3. **Copy the CSR to the designated host** over any channel; it's public.
+4. **Sign it**, vouching for the fingerprint the device's owner reads out:
+
+   ```bash
+   ./scripts/client-pki enroll bob-laptop --csr bob-laptop.csr --fingerprint 3A:7F:...:C2 --out bob-laptop.crt
+   ```
+
+   `enroll` prints tiny-pki's summary of the CSR (key, signature, the SHA-256 of its public key), refuses one tiny-pki wouldn't sign (for example RSA 1024 or a SHA-1 signature), and signs only when the public key matches `--fingerprint` (colons, spaces and case don't matter). Without `--fingerprint` it asks you to confirm at the terminal instead, and refuses when there isn't one. The fingerprint check catches a CSR swapped in transit, which would otherwise get a certificate for someone else's key. The CN is always the name you give; a different CN or any extensions the CSR asks for are ignored with a warning, so a device can't pick its own name for an `allow_cn` list.
+5. **Install the certificate next to the key**: copy `bob-laptop.crt` and the store's `public/ca.crt` back (both public). With OpenSSL, build a browser bundle on the device (`openssl pkcs12 -export -inkey bob-laptop.key -in bob-laptop.crt -certfile ca.crt -out bob-laptop.p12`) and import it; macOS Keychain Access pairs an imported certificate with the key it made; `certreq -accept bob-laptop.crt` installs it on Windows; `ykman piv certificates import 9a bob-laptop.crt` writes it to the YubiKey slot.
+
+`export p12` refuses such a device, since the store has no key to put in a bundle; `export pem` writes the certificate alone.
+
 ### Rotate a device's certificate
 
 Before a certificate expires (`./scripts/client-pki check --kind client --quiet` lists expiring ones), or whenever you want to replace it:
@@ -177,6 +200,12 @@ Before a certificate expires (`./scripts/client-pki check --kind client --quiet`
 ```
 
 That issues a new certificate while the old one keeps working, exports the new bundle, and prints the `revoke` command for each previous serial. Install the new bundle on the device, check it reaches a gated site, then run the printed command, for example `./scripts/client-pki revoke 0x1a2b...`. Until you do, both certificates work.
+
+A device enrolled from a CSR rotates the same way with a fresh key and CSR, and the same fingerprint check:
+
+```bash
+./scripts/client-pki rotate bob-laptop --csr bob-laptop-2026.csr --fingerprint 91:0C:...:4E --out bob-laptop.crt
+```
 
 ### Revoke a lost or retired device
 

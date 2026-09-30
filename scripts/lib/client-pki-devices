@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # scripts/lib/client-pki-devices — the operator's device workflow on top of
-# the tiny-pki CLI: enroll a device (issue + export a PKCS#12 bundle) and
-# rotate its certificate without cutting it off. Sourced by
-# scripts/client-pki, which defines client_pki_tiny_pki (tiny-pki pinned to
-# the store). See docs/client-pki.md and the-hcma/home-warden#159.
+# the tiny-pki CLI: enroll a device and rotate its certificate without cutting
+# it off. A device gets either a PKCS#12 bundle the CA builds (--password-file)
+# or a certificate for a key it generated itself (--csr), which never leaves
+# the device. Sourced by scripts/client-pki, which defines client_pki_tiny_pki
+# (tiny-pki pinned to the store). See docs/client-pki.md and
+# the-hcma/home-warden#159.
 #
-# tiny-pki's plain `create client <cn>` revokes the CN's current certificate
-# at once, so enroll refuses a CN that already has one and rotate always
-# passes --keep-previous. Both run under client_pki_locked, so a concurrent
-# enroll can't slip in between the check and the create; a hand-run
+# tiny-pki's plain `create client <cn>` and `sign client <cn>` revoke the CN's
+# current certificate at once, so enroll refuses a CN that already has one and
+# rotate always passes --keep-previous. Both run under client_pki_locked, so a
+# concurrent enroll can't slip in between the check and the issue; a hand-run
 # `client-pki create client` doesn't take that lock.
 
 # Print the serials of <cn>'s active client certificates, one per line.
@@ -24,14 +26,12 @@ for entry in entries if isinstance(entries, list) else [entries]:
 ' "${cn}"
 }
 
-# enroll <cn> --password-file PATH [--legacy]: issue a first certificate for a
-# device and export it as a .p12 under the store's bundles/.
+# enroll <cn> (--password-file PATH [--legacy] | --csr PATH [--fingerprint HEX]
+# [--out PATH]): issue a device's first certificate.
 client_pki_enroll() {
-  local cn legacy password_file previous
+  local cn previous
   client_pki_parse_device_args "enroll" "$@" || return
   cn="${client_pki_device_cn}"
-  password_file="${client_pki_device_password_file}"
-  legacy="${client_pki_device_legacy}"
 
   if ! previous="$(client_pki_active_serials "${cn}")"; then
     echo "client-pki: could not list ${cn}'s certificates; nothing issued" >&2
@@ -41,21 +41,108 @@ client_pki_enroll() {
     echo "client-pki: ${cn} already has an active certificate; use 'client-pki rotate ${cn}' to replace it" >&2
     return 1
   fi
+  if [[ -n "${client_pki_device_csr}" ]]; then
+    client_pki_sign_csr "${cn}"
+    return
+  fi
   client_pki_tiny_pki create client "${cn}" || return
-  client_pki_export_bundle "${cn}" "${password_file}" "${legacy}"
+  client_pki_export_bundle "${cn}"
 }
 
 client_pki_export_bundle() {
   local -r cn="$1"
-  local -r password_file="$2"
-  local -r legacy="$3"
   local -a extra=()
 
-  if ((legacy)); then
+  if ((client_pki_device_legacy)); then
     extra=(--legacy)
   fi
-  client_pki_tiny_pki export p12 "${cn}" --password-file "${password_file}" "${extra[@]}" || return
+  client_pki_tiny_pki export p12 "${cn}" --password-file "${client_pki_device_password_file}" "${extra[@]}" || return
   echo "client-pki: send the .p12 and its password to the device separately; delete the .p12 once it's installed"
+}
+
+# Print the SHA-256 public-key fingerprint of <csr> with the colons removed,
+# after showing the operator tiny-pki's summary of it on stderr. Fails when
+# tiny-pki would refuse to sign it.
+client_pki_csr_fingerprint() {
+  local -r csr="$1"
+  local summary fingerprint
+
+  if ! summary="$(client_pki_tiny_pki inspect "${csr}")"; then
+    echo "client-pki: could not read the CSR ${csr}; nothing issued" >&2
+    return 1
+  fi
+  printf '%s\n' "${summary}" >&2
+  if [[ "${summary}" == *"status    refused"* ]]; then
+    echo "client-pki: tiny-pki refuses this CSR (see above); have the device generate a new one" >&2
+    return 1
+  fi
+  fingerprint="$(awk '/^public key sha256 / { print $4 }' <<<"${summary}")"
+  if [[ -z "${fingerprint}" ]]; then
+    echo "client-pki: tiny-pki printed no public-key fingerprint for ${csr}; nothing issued" >&2
+    return 1
+  fi
+  printf '%s\n' "${fingerprint//:/}"
+}
+
+# Have the operator vouch for <fingerprint> (colon-free, upper case): it must
+# match --fingerprint, or be confirmed at a terminal prompt.
+client_pki_confirm_fingerprint() {
+  local -r fingerprint="$1"
+  local expected answer
+
+  if [[ -n "${client_pki_device_fingerprint}" ]]; then
+    expected="${client_pki_device_fingerprint//[: ]/}"
+    if [[ "${expected^^}" != "${fingerprint}" ]]; then
+      echo "client-pki: the CSR's public key does not match --fingerprint; nothing issued" >&2
+      return 1
+    fi
+    return 0
+  fi
+  if [[ ! -t 0 ]]; then
+    echo "client-pki: confirm the CSR's public key with --fingerprint HEX when not running at a terminal" >&2
+    return 1
+  fi
+  read -r -p "Has the device's owner confirmed this public key sha256? [y/N] " answer || answer=""
+  if [[ "${answer,,}" != y && "${answer,,}" != yes ]]; then
+    echo "client-pki: fingerprint not confirmed; nothing issued" >&2
+    return 1
+  fi
+}
+
+# Sign the device's CSR as <cn> once its fingerprint is confirmed, keeping the
+# previous certificate when rotating. Inspection and signing both read a
+# private snapshot of the CSR, so a file swapped while the operator checks the
+# fingerprint can't get the swapped-in key signed.
+client_pki_sign_csr() {
+  local -r cn="$1"
+  shift
+  local fingerprint out snapshot_dir snapshot rc=0
+  local -a extra=("$@")
+
+  snapshot_dir="$(mktemp -d "${TMPDIR:-/tmp}/client-pki-csr.XXXXXX")" || return
+  # The script ends after this verb, so an EXIT trap also covers Ctrl-C.
+  # shellcheck disable=SC2064 # expand the directory now, not when the trap fires
+  trap "rm -rf -- $(printf '%q' "${snapshot_dir}")" EXIT
+  trap 'exit 130' HUP INT TERM
+  snapshot="${snapshot_dir}/request.csr"
+  if ! cp -- "${client_pki_device_csr}" "${snapshot}"; then
+    echo "client-pki: could not copy the CSR ${client_pki_device_csr}; nothing issued" >&2
+    rm -rf -- "${snapshot_dir}"
+    return 1
+  fi
+
+  out="${client_pki_device_out:-${cn}.crt}"
+  if fingerprint="$(client_pki_csr_fingerprint "${snapshot}")" && client_pki_confirm_fingerprint "${fingerprint}"; then
+    client_pki_tiny_pki sign client "${cn}" --csr "${snapshot}" --out "${out}" "${extra[@]}" || rc=$?
+  else
+    rc=1
+  fi
+  rm -rf -- "${snapshot_dir}"
+  if ((rc != 0)); then
+    return "${rc}"
+  fi
+  echo "client-pki: copy ${out} and the store's public/ca.crt to the device and install them next to its key;" \
+    "both are public, so any channel works"
 }
 
 # Run <command...> holding an exclusive flock on <dir> (the store's ca/). Not
@@ -79,13 +166,23 @@ client_pki_locked() {
   return "${rc}"
 }
 
-# Parse `<cn> --password-file PATH [--legacy]` into client_pki_device_*.
+client_pki_device_usage() {
+  local -r device_verb="$1"
+  echo "usage: client-pki ${device_verb} <cn> --password-file PATH [--legacy]" >&2
+  echo "       client-pki ${device_verb} <cn> --csr PATH [--fingerprint HEX] [--out PATH]" >&2
+}
+
+# Parse `<cn>` plus either `--password-file PATH [--legacy]` or `--csr PATH
+# [--fingerprint HEX] [--out PATH]` into client_pki_device_*.
 client_pki_parse_device_args() {
   local -r device_verb="$1"
   shift
   client_pki_device_cn=""
-  client_pki_device_password_file=""
+  client_pki_device_csr=""
+  client_pki_device_fingerprint=""
   client_pki_device_legacy=0
+  client_pki_device_out=""
+  client_pki_device_password_file=""
 
   while (($# > 0)); do
     case "$1" in
@@ -93,11 +190,16 @@ client_pki_parse_device_args() {
         client_pki_device_legacy=1
         shift
         ;;
-      --password-file)
+      --csr | --fingerprint | --out | --password-file)
         if (($# < 2)); then
           break
         fi
-        client_pki_device_password_file="$2"
+        case "$1" in
+          --csr) client_pki_device_csr="$2" ;;
+          --fingerprint) client_pki_device_fingerprint="$2" ;;
+          --out) client_pki_device_out="$2" ;;
+          --password-file) client_pki_device_password_file="$2" ;;
+        esac
         shift 2
         ;;
       -*)
@@ -112,22 +214,41 @@ client_pki_parse_device_args() {
         ;;
     esac
   done
-  if (($# > 0)) || [[ -z "${client_pki_device_cn}" || -z "${client_pki_device_password_file}" ]]; then
-    echo "usage: client-pki ${device_verb} <cn> --password-file PATH [--legacy]" >&2
+  if (($# > 0)) || [[ -z "${client_pki_device_cn}" ]]; then
+    client_pki_device_usage "${device_verb}"
+    return 2
+  fi
+  if [[ -n "${client_pki_device_csr}" ]]; then
+    if [[ -n "${client_pki_device_password_file}" ]] || ((client_pki_device_legacy)); then
+      echo "client-pki: --csr issues a certificate only, so --password-file and --legacy don't apply" >&2
+      client_pki_device_usage "${device_verb}"
+      return 2
+    fi
+    if [[ ! -f "${client_pki_device_csr}" || ! -r "${client_pki_device_csr}" ]]; then
+      echo "client-pki: cannot read the CSR ${client_pki_device_csr}" >&2
+      return 1
+    fi
+    return 0
+  fi
+  if [[ -z "${client_pki_device_password_file}" ]]; then
+    client_pki_device_usage "${device_verb}"
+    return 2
+  fi
+  if [[ -n "${client_pki_device_fingerprint}" || -n "${client_pki_device_out}" ]]; then
+    echo "client-pki: --fingerprint and --out go with --csr" >&2
+    client_pki_device_usage "${device_verb}"
     return 2
   fi
   client_pki_require_private_file "${client_pki_device_password_file}" "password file"
 }
 
-# rotate <cn> --password-file PATH [--legacy]: issue a replacement while the
-# current certificate stays valid, export it, and print the serials to revoke
-# once the device has the new bundle.
+# rotate <cn> (--password-file PATH [--legacy] | --csr PATH [--fingerprint HEX]
+# [--out PATH]): issue a replacement while the current certificate stays
+# valid, and print the serials to revoke once the device has the new one.
 client_pki_rotate() {
-  local cn legacy password_file previous serial
+  local cn previous serial
   client_pki_parse_device_args "rotate" "$@" || return
   cn="${client_pki_device_cn}"
-  password_file="${client_pki_device_password_file}"
-  legacy="${client_pki_device_legacy}"
 
   if ! previous="$(client_pki_active_serials "${cn}")"; then
     echo "client-pki: could not list ${cn}'s certificates; nothing issued" >&2
@@ -137,9 +258,14 @@ client_pki_rotate() {
     echo "client-pki: ${cn} has no active certificate; use 'client-pki enroll ${cn}' instead" >&2
     return 1
   fi
-  client_pki_tiny_pki create client "${cn}" --keep-previous >/dev/null || return
-  client_pki_export_bundle "${cn}" "${password_file}" "${legacy}" || return
-  echo "client-pki: once the device has the new bundle, revoke the previous certificate:"
+  if [[ -n "${client_pki_device_csr}" ]]; then
+    client_pki_sign_csr "${cn}" --keep-previous >/dev/null || return
+    echo "client-pki: wrote ${client_pki_device_out:-${cn}.crt}; install it and the store's public/ca.crt on the device"
+  else
+    client_pki_tiny_pki create client "${cn}" --keep-previous >/dev/null || return
+    client_pki_export_bundle "${cn}" || return
+  fi
+  echo "client-pki: once the device has the new certificate, revoke the previous one:"
   for serial in ${previous}; do
     echo "  ./scripts/client-pki revoke 0x${serial}"
   done

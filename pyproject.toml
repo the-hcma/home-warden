@@ -62,6 +62,10 @@ packages = ["app", "config"]
 [tool.uv]
 package = true
 
+# Temporary: tiny-pki's merged `sign client` (the-hcma/tiny-pki#155) until 0.2.0 is on PyPI.
+[tool.uv.sources]
+tiny-pki = { git = "https://github.com/the-hcma/tiny-pki", rev = "89446ee73acbaa2ea03daab12183685871e8abbb" }
+
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
 python_files = ["test_*.py"]
