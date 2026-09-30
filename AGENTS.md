@@ -171,6 +171,16 @@ home-warden runs the local authoritative PowerDNS tooling (`pdns-server` + `pdns
 
 ---
 
+## Host Cutover Tooling
+
+Moving the front door to a replacement host follows [docs/host-migration.md](./docs/host-migration.md) ([#191](https://github.com/the-hcma/home-warden/issues/191)).
+
+- `scripts/cutover-preflight` (`app/cutover_preflight.py`, [#187](https://github.com/the-hcma/home-warden/issues/187)), `scripts/cutover-verify` (`app/cutover_verify.py`, [#188](https://github.com/the-hcma/home-warden/issues/188)) and `scripts/dns-parity` (`app/dns_parity.py`, [#189](https://github.com/the-hcma/home-warden/issues/189)) are **read-only** and need no host guard: they only read config and ask servers questions. Keep them that way; a change that writes belongs in a different tool.
+- `catalog-dns-sync` snapshots the records it is about to change to `$SCRATCH_DIR/dns-sync-snapshots/` and refuses to write if it can't ([#190](https://github.com/the-hcma/home-warden/issues/190)). `--restore` puts them back; a record the sync created is reported, not deleted.
+- `scripts/cutover-assess` is **temporary** (removed after the cutover, tracked in #191).
+
+---
+
 ## Web UI
 
 home-warden's first-party admin web UI ([#55](https://github.com/the-hcma/home-warden/issues/55), scaffolded in [#67](https://github.com/the-hcma/home-warden/issues/67)) follows [the-hcma/domesti-bot](https://github.com/the-hcma/domesti-bot)'s `web/` conventions as its structural/governance model — this repo's needs are a small subset of domesti-bot's, so adopt the shape, not its full scale.
