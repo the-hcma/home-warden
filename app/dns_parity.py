@@ -15,6 +15,9 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 
+# After this many queries in a row that could not be asked at all, stop: a dead server would otherwise cost
+# a full dig timeout per record.
+_MAX_UNREACHABLE_STREAK = 3
 _STATUS_RE = re.compile(r"status:\s*(\w+)")
 _FLAGS_RE = re.compile(r"flags:\s*([a-z ]*);")
 
@@ -38,15 +41,40 @@ class Finding:
     differences: list[str]
 
 
+class ServerUnreachable(RuntimeError):
+    """`dig` could not get an answer at all (timeout, refused, bad address), as opposed to an answer we dislike."""
+
+
+_NAME_TYPES = frozenset({"CNAME", "NS", "PTR", "MX", "SRV", "SOA", "DNAME"})
+
+
 def parse_server(spec: str, default_port: int = 53) -> tuple[str, int]:
-    """`HOST`, `HOST:PORT`, `[V6]` or `[V6]:PORT` -> (host, port)."""
+    """`HOST`, `HOST:PORT`, `[V6]` or `[V6]:PORT` -> (host, port). Raises ValueError on anything else."""
     if spec.startswith("["):
-        host, _, rest = spec[1:].partition("]")
-        return host, int(rest[1:]) if rest.startswith(":") else default_port
-    if spec.count(":") == 1:
-        host, _, port = spec.partition(":")
-        return host, int(port)
-    return spec, default_port
+        host, closed, rest = spec[1:].partition("]")
+        if not closed or (rest and not rest.startswith(":")):
+            raise ValueError(f"malformed address {spec!r}")
+        port_s = rest[1:]
+    elif spec.count(":") == 1:
+        host, _, port_s = spec.partition(":")
+    else:
+        host, port_s = spec, ""
+    if not host or host[0] in "-+":
+        raise ValueError(f"malformed host in {spec!r}")
+    port = int(port_s) if port_s else default_port
+    if not 0 < port < 65536:
+        raise ValueError(f"port out of range in {spec!r}")
+    return host, port
+
+
+def _normalize_rdata(rtype: str, rdata: str) -> str:
+    """Names are case-insensitive and may or may not carry the root dot; TXT is compared exactly."""
+    rdata = rdata.strip()
+    if rtype in _NAME_TYPES:
+        return " ".join((tok.lower().rstrip(".") or tok) for tok in rdata.split())
+    if rtype == "TXT":
+        return rdata
+    return " ".join(rdata.split())
 
 
 def parse_dig(output: str) -> Answer:
@@ -64,7 +92,8 @@ def parse_dig(output: str) -> Answer:
         if len(parts) < 5 or not parts[1].isdigit():
             continue
         owner, ttl, _cls, rtype, rdata = parts
-        key = (owner.lower().rstrip("."), rtype.upper(), " ".join(rdata.split()))
+        rtype = rtype.upper()
+        key = (owner.lower().rstrip("."), rtype, _normalize_rdata(rtype, rdata))
         records.add(key)
         ttls[key] = int(ttl)
     return Answer(rcode_m.group(1), frozenset((flags_m.group(1) if flags_m else "").split()), frozenset(records), ttls)
@@ -72,6 +101,9 @@ def parse_dig(output: str) -> Answer:
 
 def dig(server: tuple[str, int], name: str, rtype: str, timeout: int = 3) -> Answer:
     host, port = server
+    for arg in (name, rtype):
+        if not arg or arg[0] in "-+":
+            raise ValueError(f"refusing to pass {arg!r} to dig: it would be read as an option")
     proc = subprocess.run(
         [
             "dig",
@@ -92,7 +124,9 @@ def dig(server: tuple[str, int], name: str, rtype: str, timeout: int = 3) -> Ans
         check=False,
     )
     if proc.returncode != 0 or "status:" not in proc.stdout:
-        raise RuntimeError(f"dig @{host} -p {port} {name} {rtype} failed: {(proc.stdout + proc.stderr).strip()[:200]}")
+        raise ServerUnreachable(
+            f"dig @{host} -p {port} {name} {rtype} failed: {(proc.stdout + proc.stderr).strip()[:200]}"
+        )
     return parse_dig(proc.stdout)
 
 
@@ -163,11 +197,26 @@ def run_parity(
     asked counts as a difference, never as agreement, and so does an empty answer on both servers for a
     query in `must_answer` (a record zones.yml says exists): both missing it is not parity."""
     findings: list[Finding] = []
-    for name, rtype in queries:
+    streak = 0
+    for i, (name, rtype) in enumerate(queries):
         try:
             old_answer = dig(old, name, rtype, timeout)
             new_answer = dig(new, name, rtype, timeout)
-        except (RuntimeError, ValueError, subprocess.TimeoutExpired) as e:
+            streak = 0
+        except ServerUnreachable as e:
+            findings.append(Finding(name, rtype, [str(e)]))
+            streak += 1
+            if streak >= _MAX_UNREACHABLE_STREAK and i + 1 < len(queries):
+                findings.append(
+                    Finding(
+                        "*",
+                        "*",
+                        [f"stopped after {streak} unreachable queries in a row; {len(queries) - i - 1} not asked"],
+                    )
+                )
+                break
+            continue
+        except (ValueError, subprocess.TimeoutExpired) as e:
             findings.append(Finding(name, rtype, [str(e)]))
             continue
         diffs = compare(old_answer, new_answer)
