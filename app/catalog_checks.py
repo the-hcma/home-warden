@@ -705,6 +705,7 @@ def sync_dns_record(
     proxied: bool = False,
     dry_run: bool = False,
     verify_resolution: bool = True,
+    ttl: int | None = None,
 ) -> SyncResult:
     """Idempotent create-or-update of a Cloudflare A/AAAA/CNAME record for
     `service["server_name"]`, pointed at `target` (this host's own public
@@ -815,9 +816,18 @@ def sync_dns_record(
             "refusing to pick one automatically; round-robin records aren't supported",
         )
 
-    desired = {"type": record_type, "name": domain, "content": target, "proxied": proxied}
+    desired: dict[str, object] = {"type": record_type, "name": domain, "content": target, "proxied": proxied}
+    # `ttl` is only sent (and only compared) when the caller pins one -- a restore from a
+    # snapshot does (#190); a normal sync leaves the record's TTL alone.
+    if ttl is not None:
+        desired["ttl"] = ttl
 
-    if same_type and same_type[0].get("content") == target and same_type[0].get("proxied", False) == proxied:
+    if (
+        same_type
+        and same_type[0].get("content") == target
+        and same_type[0].get("proxied", False) == proxied
+        and (ttl is None or same_type[0].get("ttl") == ttl)
+    ):
         return SyncResult(name, "noop", f"{record_type}={target} already correct in zone {zone_name}")
 
     action = "update" if same_type else "create"
