@@ -126,7 +126,7 @@ probe() {  # probe NAME IP -> one comparable line per check
 }
 
 nginx_parity() {
-  local old="" new="" old6="" new6="" name diffs=0 difffile
+  local old="" new="" old6="" new6="" name diffs=0 difffile checked=0
   difffile="$(mktemp)"
   hosts_file=""
   while [[ $# -gt 0 ]]; do case "$1" in
@@ -136,6 +136,7 @@ nginx_parity() {
   [[ -n "$old" && -n "$new" ]] || { echo "need --old and --new" >&2; exit 2; }
   while read -r name; do
     [[ -n "$name" ]] || continue
+    checked=$((checked + 1))
     if grep --quiet '^https : curl:' <(probe "$name" "$new"); then
       note_fail "v4 $name: new address did not answer"
     elif diff <(probe "$name" "$old") <(probe "$name" "$new") >"$difffile"; then ok "v4 parity $name"
@@ -145,6 +146,8 @@ nginx_parity() {
       else note_fail "v6 differs $name"; sed 's/^/      /' "$difffile"; diffs=1; fi
     fi
   done < <(vhosts)
+  # A failing `vhosts` (nginx -T error, empty file) yields no input, which must not read as "all clear".
+  if ((checked == 0)); then note_fail "no vhosts found to compare (nginx -T failed or --hosts is empty)"; fi
   echo "Note: the cert serial/notAfter are not compared; Server/Date never matter."
   echo "Manual for client_cert vhosts: reject without cert, accept with a test cert, reject after revoke+reload."
   echo "Manual for websocket vhosts: wscat/curl --include with Upgrade headers against --resolve."
@@ -152,13 +155,14 @@ nginx_parity() {
 }
 
 dns_parity() {
-  local old="" new="" zones="${PDNS_ZONES_YAML:-$HOME/home/dns/zones.yml}" name rtype a b
+  local old="" new="" zones="${PDNS_ZONES_YAML:-$HOME/home/dns/zones.yml}" name rtype a b checked=0
   while [[ $# -gt 0 ]]; do case "$1" in
     --old) old="$2"; shift 2 ;; --new) new="$2"; shift 2 ;; --zones) zones="$2"; shift 2 ;;
     *) echo "unknown arg $1" >&2; exit 2 ;; esac; done
   [[ -n "$old" && -n "$new" ]] || { echo "need --old and --new" >&2; exit 2; }
   while read -r name rtype; do
     [[ -n "$name" ]] || continue
+    checked=$((checked + 1))
     a="$(dig "${dig_opts[@]}" +noall +answer "@${old}" "$name" "$rtype" | sort || true)"
     b="$(dig "${dig_opts[@]}" +noall +answer "@${new}" "$name" "$rtype" | sort || true)"
     if [[ "$a" == "$b" && -n "$a" ]]; then ok "$name $rtype"
@@ -175,6 +179,7 @@ for z in data.get("domains", []):
                 print(owner, rtype.upper())
 PY
 )
+  if ((checked == 0)); then note_fail "no records read from ${zones} (missing file, bad YAML, or no yaml module)"; fi
   echo "Also compare by hand: a public name (forwarding), an NXDOMAIN name, and each zone's SOA serial."
 }
 
