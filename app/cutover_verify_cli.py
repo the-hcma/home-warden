@@ -10,13 +10,16 @@ Vhosts come from the catalog's `server_name`s (plus `--host NAME`, repeatable). 
 `scripts/client-pki`) adds an mTLS probe: run it again with a revoked cert to check revocation took
 effect on both. After the cutover, pass the same address twice or the public address as `--new` as a smoke test.
 
-Exit: 0 no differences, 1 any difference (or an address that couldn't be reached), 2 usage/config error.
+Exit: 0 no differences, 1 any difference or an address that couldn't be reached (even if both can't),
+2 usage/config error (including an unusable client cert). The `ok` line shows the new side's status codes:
+after a cutover, read them, since identical 502s on both sides still compare equal.
 Read-only; needs no host guard.
 """
 
 from __future__ import annotations
 
 import argparse
+import ssl
 import sys
 from pathlib import Path
 
@@ -35,7 +38,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", action="append", default=[], help="extra vhost name not in the catalog")
     parser.add_argument("--client-cert", type=Path)
     parser.add_argument("--client-key", type=Path)
-    parser.add_argument("--timeout", type=float, default=min(timeout_seconds(), 15.0))
+    parser.add_argument("--timeout", type=float, default=min(timeout_seconds(), 5.0))
     parser.add_argument("--quiet", "-q", action="store_true", help="only print differences")
     return parser
 
@@ -48,12 +51,19 @@ def main() -> int:
     if bool(args.client_cert) != bool(args.client_key):
         print("cutover-verify: --client-cert and --client-key go together", file=sys.stderr)
         return 2
+    if args.client_cert:
+        try:
+            ssl.create_default_context().load_cert_chain(args.client_cert, args.client_key)
+        except (OSError, ssl.SSLError) as e:
+            print(f"cutover-verify: unusable --client-cert/--client-key: {e}", file=sys.stderr)
+            return 2
     try:
         catalog = load_catalog(args.services_json)
     except (FileNotFoundError, ValueError) as e:
         if not args.host:
             print(f"cutover-verify: {e} (and no --host given)", file=sys.stderr)
             return 2
+        print(f"cutover-verify: WARNING: catalog not used ({e}); checking only the --host names", file=sys.stderr)
         catalog = {"services": []}
 
     vhosts: dict[str, bool] = {}  # name -> websocket
@@ -74,12 +84,8 @@ def main() -> int:
     bad = 0
     for name, ws in sorted(vhosts.items()):
         for label, old_addr, new_addr in pairs:
-            try:
-                old = probe_vhost(name, old_addr, timeout=args.timeout, client_cert=client, websocket=ws)
-                new = probe_vhost(name, new_addr, timeout=args.timeout, client_cert=client, websocket=ws)
-            except ValueError as e:  # e.g. an unreadable client cert/key
-                print(f"cutover-verify: {e}", file=sys.stderr)
-                return 2
+            old = probe_vhost(name, old_addr, timeout=args.timeout, client_cert=client, websocket=ws)
+            new = probe_vhost(name, new_addr, timeout=args.timeout, client_cert=client, websocket=ws)
             diffs = compare(old, new)
             if diffs:
                 bad += 1
@@ -87,8 +93,8 @@ def main() -> int:
                 for d in diffs:
                     print(f"     {d}")
             elif not args.quiet:
-                not_after = f"old={old.info.get('tls.notAfter')} new={new.info.get('tls.notAfter')}"
-                print(f"ok   {label} {name}  (cert notAfter {not_after})")
+                seen = f"http={new.facts.get('http.status')} https={new.facts.get('https.status')}"
+                print(f"ok   {label} {name}  ({seen}, cert notAfter {new.info.get('tls.notAfter')})")
     print(f"cutover-verify: {len(vhosts)} vhosts, {bad} with differences", file=sys.stderr)
     return 1 if bad else 0
 

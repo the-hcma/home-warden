@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import http.client
 import http.server
 import ssl
 import sys
@@ -16,7 +17,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from app.cutover_verify import Probe, compare, probe_vhost
+from app.cutover_verify import Probe, _describe_cert, compare, failure_kind, probe_vhost
 from app.cutover_verify_cli import main
 
 
@@ -115,10 +116,25 @@ def test_identical_servers_have_no_differences_and_a_missing_header_is_one(serve
     assert any("strict-transport-security" in d for d in diffs)
 
 
-def test_unreachable_address_is_a_fact_not_a_crash() -> None:
+def test_unreachable_address_is_a_difference_even_when_both_are_down() -> None:
     p = probe_vhost("app.example.com", "127.0.0.1", timeout=1, http_port=1, https_port=1)
-    assert "http.error" in p.facts
-    assert compare(p, p) == []
+    assert p.unreachable == ["127.0.0.1:1 ConnectionRefusedError"]
+    diffs = compare(p, p)
+    assert "old unreachable: 127.0.0.1:1 ConnectionRefusedError" in diffs and len(diffs) == 2
+
+
+def test_failure_kind_groups_rejections() -> None:
+    assert failure_kind(ssl.SSLError()) == "rejected"
+    assert failure_kind(ConnectionResetError()) == "rejected"
+    assert failure_kind(http.client.RemoteDisconnected("closed")) == "rejected"
+    assert failure_kind(TimeoutError()) == "timeout"
+    assert failure_kind(ConnectionRefusedError()) == "ConnectionRefusedError"
+
+
+def test_unparsable_certificate_is_a_fact_not_a_crash() -> None:
+    p = Probe()
+    _describe_cert(b"not a certificate", p)
+    assert p.facts == {"tls.cert": "unparsable"}
 
 
 def test_compare_ignores_info() -> None:
@@ -127,11 +143,28 @@ def test_compare_ignores_info() -> None:
 
 def test_cli_argument_validation(monkeypatch, tmp_path: Path) -> None:
     base = ["cutover-verify", "--old", "a", "--new", "b", "--services-json", str(tmp_path / "none.json")]
-    for extra in (["--old6", "::1"], ["--client-cert", "c"]):
+    for extra in (
+        ["--old6", "::1"],
+        ["--client-cert", "c"],
+        ["--client-cert", "/typo.crt", "--client-key", "/typo.key"],
+    ):
         monkeypatch.setattr(sys, "argv", base + extra)
         assert main() == 2
     monkeypatch.setattr(sys, "argv", base)  # no catalog, no --host
     assert main() == 2
+
+
+def test_cli_warns_when_the_catalog_is_unusable_but_hosts_were_given(monkeypatch, tmp_path: Path, capsys) -> None:
+    bad = tmp_path / "services.json"
+    bad.write_text("{oops")
+    monkeypatch.setattr("app.cutover_verify_cli.probe_vhost", lambda *a, **kw: Probe({"x": "1"}))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["cutover-verify", "--old", "a", "--new", "b", "--services-json", str(bad), "--host", "h.example.com"],
+    )
+    assert main() == 0
+    assert "WARNING: catalog not used" in capsys.readouterr().err
 
 
 def test_cli_exit_code_follows_differences(monkeypatch, tmp_path: Path, capsys) -> None:
