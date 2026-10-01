@@ -35,6 +35,35 @@ def test_invalid_timeout_is_a_usage_error(tmp_path: Path) -> None:
     assert "CERTBOT_TIMEOUT_SEC must be a positive integer" in result.stderr
 
 
+def _tree(root: Path) -> dict[str, bytes | None]:
+    return {str(p.relative_to(root)): (p.read_bytes() if p.is_file() else None) for p in sorted(root.rglob("*"))}
+
+
+def test_dry_run_leaves_an_incomplete_lineage_untouched(tmp_path: Path) -> None:
+    """#199: files under live/archive but no renewal config (certs copied onto a new host) used to be moved
+    aside by --dry-run before certbot ran. A dry run must change nothing under the certs directory."""
+    certs = tmp_path / "conf" / "certs"
+    (certs / "live" / "app.example.com").mkdir(parents=True)
+    (certs / "live" / "app.example.com" / "fullchain.pem").write_text("cert")
+    (certs / "archive" / "app.example.com").mkdir(parents=True)
+    (certs / "archive" / "app.example.com" / "fullchain1.pem").write_text("cert")
+    before = _tree(certs)
+
+    result = _run(tmp_path, stub_body='echo "$@" >>"$(dirname "$0")/args"', timeout_sec="5")
+
+    assert result.returncode == 0, result.stderr
+    assert _tree(certs) == before
+    assert not (tmp_path / "scratch" / "certs-staging-backup").exists()
+    assert "incomplete lineage" in result.stdout and "Leaving it untouched" in result.stdout
+    assert not (tmp_path / "args").exists()  # certbot isn't asked to certonly against a half-present lineage
+
+
+def test_dry_run_still_checks_a_domain_with_no_lineage(tmp_path: Path) -> None:
+    result = _run(tmp_path, stub_body='echo "$@" >"$(dirname "$0")/args"', timeout_sec="5")
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "args").read_text().startswith("certonly -d app.example.com ")
+
+
 def _run(tmp_path: Path, *, stub_body: str, timeout_sec: str) -> subprocess.CompletedProcess[str]:
     certbot = tmp_path / "certbot"
     certbot.write_text(f"#!/usr/bin/env bash\n{stub_body}\n")

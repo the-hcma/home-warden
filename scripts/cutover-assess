@@ -90,12 +90,11 @@ preflight() {
   else
     note_fail "conf/certbot-domains missing"
   fi
-  # NOT run by default: cert-renewer --dry-run moves live/archive/renewal aside for a lineage with no
-  # renewal config (a host with copied-in certs), so it is not read-only. Opt in with WITH_CERTBOT=1.
+  # Opt in with WITH_CERTBOT=1: it needs a pinned host and talks to Let's Encrypt staging.
   if [[ "${WITH_CERTBOT:-0}" == 1 ]]; then
     if ./scripts/cert-renewer --dry-run; then ok "cert-renewer --dry-run"; else note_fail "cert-renewer --dry-run"; fi
   else
-    warn "cert-renewer --dry-run skipped (WITH_CERTBOT=1 to run it; see its mv of staging lineages)"
+    warn "cert-renewer --dry-run skipped (WITH_CERTBOT=1 to run it; needs a pinned host)"
   fi
   echo "--- catalog health (read-only)"
   ./scripts/catalog-health-check || warn "catalog-health-check reported problems (see above)"

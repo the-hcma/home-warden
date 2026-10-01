@@ -3,8 +3,8 @@
 Usage:
   cutover-preflight [--certbot-dry-run] [--no-sudo] [--quiet]
 
-Read-only by default (`--certbot-dry-run` adds `cert-renewer --dry-run`, which is host-guarded and can move a
-copied-in lineage aside; see app.cutover_preflight). Reads the served conf from $HOME_NGINX_CONF
+Read-only. `--certbot-dry-run` adds `cert-renewer --dry-run`, which needs a pinned host and talks to Let's
+Encrypt staging (see app.cutover_preflight). Reads the served conf from $HOME_NGINX_CONF
 (default ~/home/nginx/server/nginx.conf), the catalog from $SERVICES_JSON_PATH, and the same conf/ paths the
 other tools use. Prints ok/WARN/FAIL per check, each failure with what to fix.
 
@@ -36,7 +36,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--certbot-dry-run",
         action="store_true",
-        help="also run cert-renewer --dry-run (host-guarded; hits LE staging; can move a copied-in lineage aside)",
+        help="also run cert-renewer --dry-run (needs a pinned host; talks to Let's Encrypt staging; changes nothing)",
     )
     parser.add_argument("--no-sudo", action="store_true", help="run nginx -T without sudo")
     parser.add_argument("--quiet", "-q", action="store_true", help="only print warnings and failures")
