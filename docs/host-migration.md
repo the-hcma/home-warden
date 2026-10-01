@@ -2,7 +2,7 @@
 
 How to move nginx, certificates, DNS and the client CA from the current host to a replacement without an outage, and how to go back. The epic is [#191](https://github.com/the-hcma/home-warden/issues/191). Hostnames and addresses are placeholders here, per `.cursor/rules/no-private-infra.mdc`.
 
-Stages 0 to 3 change nothing live (the certificate reissue in stage 1 is on the replacement only, and counts against Let's Encrypt's duplicate-certificate limit). Do not start a stage until the previous stage's exit criterion holds. Every rollback below is a single action, and is only as fast as the DNS TTLs you lowered in stage 4.
+Stages 0 to 3 change nothing live (the certificate reissue in stage 1 is on the replacement only, and counts against Let's Encrypt's duplicate-certificate limit). Do not start a stage until the previous stage's exit criterion holds. Each step's rollback is listed next to it. Some are one command and some need follow-up (replaying revocations, moving names by hand), so plan the rollback window from the table, not from the assumption that it is one command. DNS-based rollbacks are only as fast as the TTLs you lowered in stage 4.
 
 ## Tools
 
@@ -52,7 +52,7 @@ Exit: green.
 
 1. Install the prerequisites in [host-prerequisites.md](./host-prerequisites.md) and put the items from the table above in place, except the client CA. Follow that doc's certificates section for the order of first issuance and `setup-service`: the validation in `setup-service` needs the certificates the served conf names.
 2. `./scripts/setup-service --confirm-host` pins the replacement. Then disable `home-warden-catalog-heal.timer` (see the overlap table).
-3. `./scripts/cutover-preflight`.
+3. `./scripts/cutover-preflight`. Its certbot check looks where `cert-renewer` runs it (`$CERTBOT`, default `/usr/bin/certbot`), not on `PATH`: a snap install at `/snap/bin/certbot` needs the symlink or `CERTBOT` set.
 4. Fix every `FAIL`. A `FAIL` on an upstream means the app isn't reachable from this host: either the app moves too, or the served conf points at an address that is routable from both hosts. A `WARN` for a vhost missing from the catalog is informational: the catalog-driven checks won't cover it.
 5. Optional, once the host is pinned: `./scripts/cutover-preflight --certbot-dry-run`. It runs `cert-renewer --dry-run`, which today moves an incomplete lineage (certificates copied in without their renewal config) aside before its dry run ([#199](https://github.com/the-hcma/home-warden/issues/199)). Don't use it on a host whose certificates you just copied in until that is fixed.
 
@@ -97,7 +97,7 @@ Exit: no differences.
 
 1. `./scripts/dns-sync --target <new> --old-target <old> --dry-run`. Records listed as not in the catalog still point at the old host and need their own move.
 2. Know the limits of `dns-sync` before relying on it. It writes one address type per name (`--target` decides A or AAAA), so a name that has both an A and an AAAA record fails with a "different type" error and must be moved by hand, and `--restore` reports such a name as left for you. It sets `proxied` from `--proxied` (default off), so an orange-cloud name loses its proxy unless you pass `--proxied`; the snapshot does record the old flag and a restore puts it back. List which names these apply to now.
-3. Lower the TTLs of the records involved in Cloudflare and wait out the old TTL.
+3. Lower the TTLs of the records involved in Cloudflare and wait out the old TTL. `dns-sync` updates records with a Cloudflare `PATCH` that sends only the content and proxied flag, so it leaves the lowered TTL (and any comment and tags) alone; confirm that on the throwaway name in the next step. A `--restore` puts back the TTL the snapshot recorded.
 4. Rehearse the rollback on one throwaway name that is a catalog entry: `./scripts/dns-sync --target <new> --service <name>`, then `./scripts/dns-sync --restore <snapshot>` (the snapshot path is printed). Always pass `--service` here, or the rehearsal moves every record. A record the sync created (none existed before) is left for you and makes `--restore` exit 1; delete it by hand.
 
 Exit: rollback rehearsed, time recorded.
@@ -117,7 +117,7 @@ After each step, check what the public names now resolve to (`dig +short <vhost>
 
 Keep the current host up but idle for about a week. Watch `catalog-health-check`, the healthcheck mail, one certificate renewal and one CRL refresh on the replacement, and one `zones.yml` edit through the reload gate. Then:
 
-1. Restore the TTLs lowered in stage 4.
+1. Restore the TTLs you lowered in stage 4.
 2. Delete `scripts/cutover-assess`.
 3. On the current host: `systemctl disable --now` the home-warden units, remove its CA copy, and unpin it.
 4. Retire tinydns separately ([#175](https://github.com/the-hcma/home-warden/issues/175)).
