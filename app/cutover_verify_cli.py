@@ -81,22 +81,22 @@ def main() -> int:
     if args.old6:
         pairs.append(("v6", args.old6, args.new6))
 
-    bad = 0
+    bad_names: set[str] = set()
     for name, ws in sorted(vhosts.items()):
         for label, old_addr, new_addr in pairs:
             old = probe_vhost(name, old_addr, timeout=args.timeout, client_cert=client, websocket=ws)
             new = probe_vhost(name, new_addr, timeout=args.timeout, client_cert=client, websocket=ws)
             diffs = compare(old, new)
             if diffs:
-                bad += 1
+                bad_names.add(name)
                 print(f"DIFF {label} {name}")
                 for d in diffs:
                     print(f"     {d}")
             elif not args.quiet:
                 seen = f"http={new.facts.get('http.status')} https={new.facts.get('https.status')}"
                 print(f"ok   {label} {name}  ({seen}, cert notAfter {new.info.get('tls.notAfter')})")
-    print(f"cutover-verify: {len(vhosts)} vhosts, {bad} with differences", file=sys.stderr)
-    return 1 if bad else 0
+    print(f"cutover-verify: {len(vhosts)} vhosts, {len(bad_names)} with differences", file=sys.stderr)
+    return 1 if bad_names else 0
 
 
 if __name__ == "__main__":

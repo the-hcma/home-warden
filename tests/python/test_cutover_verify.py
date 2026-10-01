@@ -185,3 +185,29 @@ def test_cli_exit_code_follows_differences(monkeypatch, tmp_path: Path, capsys) 
     answers = iter([Probe({"x": "1"}), Probe({"x": "2"})])
     assert main() == 1
     assert "DIFF v4 app.example.com" in capsys.readouterr().out
+
+
+def test_cli_counts_vhosts_not_address_families(monkeypatch, tmp_path: Path, capsys) -> None:
+    catalog = tmp_path / "services.json"
+    catalog.write_text('{"services": [{"name": "s", "server_name": "app.example.com"}]}')
+    answers = iter([Probe({"x": "1"}), Probe({"x": "2"}), Probe({"x": "1"}), Probe({"x": "2"})])
+    monkeypatch.setattr("app.cutover_verify_cli.probe_vhost", lambda *a, **kw: next(answers))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "cutover-verify",
+            "--old",
+            "a",
+            "--new",
+            "b",
+            "--old6",
+            "::1",
+            "--new6",
+            "::2",
+            "--services-json",
+            str(catalog),
+        ],
+    )
+    assert main() == 1
+    assert "1 vhosts, 1 with differences" in capsys.readouterr().err  # differs over v4 and v6, still one vhost
