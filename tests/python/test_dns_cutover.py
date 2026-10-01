@@ -84,8 +84,9 @@ def test_restore_replays_content_proxied_and_ttl(monkeypatch) -> None:
             {"service": "c", "name": "c.example.com", "records": [{"content": "1.1.1.1"}, {"content": "2.2.2.2"}]},
         ],
     }
+    monkeypatch.setattr("app.dns_cutover.list_cloudflare_records", lambda *a: None)
     results = restore_snapshot(snap, HEADERS, 5, 1, dry_run=True)
-    assert [r.status for r in results] == ["updated", "manual", "manual"]
+    assert [r.status for r in results] == ["updated", "noop", "manual"]
     assert calls == [
         (
             "a",
@@ -94,7 +95,7 @@ def test_restore_replays_content_proxied_and_ttl(monkeypatch) -> None:
             {"proxied": True, "dry_run": True, "verify_resolution": True, "ttl": 300},
         )
     ]
-    assert "delete it by hand" in results[1].detail
+    assert "has none now" in results[1].detail
 
 
 def _fake_cf(zone_records: dict[str, list[dict]], pages: int = 1):
@@ -198,9 +199,16 @@ def test_cli_restore_mode(monkeypatch, tmp_path: Path, capsys) -> None:
 
     snap = tmp_path / "s.json"
     snap.write_text(json.dumps({"version": 1, "entries": [{"service": "a", "name": "a.example.com", "records": []}]}))
+    snap.write_text(json.dumps({"version": 1, "entries": [{"service": "a", "name": "a.example.com", "records": []}]}))
+    monkeypatch.setattr(
+        "app.dns_cutover.list_cloudflare_records",
+        lambda *a: [{"type": "A", "content": "203.0.113.10", "ttl": 1, "proxied": False}],
+    )
     _cli_env(monkeypatch, tmp_path, "--restore", str(snap), "--dry-run")
-    assert main() == 1  # "manual": nothing was restored for a name that had no record, so not a clean rollback
-    assert json.loads(capsys.readouterr().out)[0]["status"] == "manual"
+    # The sync created a record the snapshot didn't have: a human has to delete it, so not a clean rollback.
+    assert main() == 1
+    out = json.loads(capsys.readouterr().out)[0]
+    assert out["status"] == "manual" and "A 203.0.113.10" in out["detail"]
 
 
 def test_cli_restore_bad_snapshot_exits_2(monkeypatch, tmp_path: Path) -> None:
@@ -306,7 +314,7 @@ def test_sync_dns_record_sends_and_compares_ttl(monkeypatch) -> None:
     def fake(url, headers, timeout, retries, *, method="GET", data=None):
         if "/zones?name=" in url:
             return {"result": [{"id": "z1", "name_servers": []}]}
-        if method in ("PUT", "POST"):
+        if method in ("PATCH", "POST"):
             writes.append((method, data))
             existing.update(data or {})
             return {}
@@ -316,12 +324,31 @@ def test_sync_dns_record_sends_and_compares_ttl(monkeypatch) -> None:
     svc = {"server_name": "a.example.com"}
     # Same content and proxied flag but a different TTL is an update when a TTL is pinned ...
     r = sync_dns_record("a", svc, "203.0.113.10", HEADERS, 5, 1, ttl=300, verify_resolution=False)
-    assert r.status == "updated" and writes == [
-        ("PUT", {"type": "A", "name": "a.example.com", "content": "203.0.113.10", "proxied": False, "ttl": 300})
-    ]
+    assert r.status == "updated" and writes == [("PATCH", {"content": "203.0.113.10", "proxied": False, "ttl": 300})]
     # ... and a noop when it matches, and when none is pinned.
     writes.clear()
     existing["ttl"] = 300
     assert sync_dns_record("a", svc, "203.0.113.10", HEADERS, 5, 1, ttl=300).status == "noop"
     assert sync_dns_record("a", svc, "203.0.113.10", HEADERS, 5, 1).status == "noop"
     assert writes == []
+
+
+def test_restore_reports_manual_when_the_current_state_cannot_be_read(monkeypatch) -> None:
+    def boom(*a):
+        raise RuntimeError("403")
+
+    monkeypatch.setattr("app.dns_cutover.list_cloudflare_records", boom)
+    snap = {"version": 1, "entries": [{"service": "a", "name": "a.example.com", "records": []}]}
+    result = restore_snapshot(snap, HEADERS, 5, 1)[0]
+    assert result.status == "manual" and "couldn't check" in result.detail
+
+
+def test_find_stragglers_refuses_a_truncated_listing(monkeypatch) -> None:
+    def fake(url, headers, timeout, retries, **kw):
+        if "/zones?name=" in url:
+            return {"result": [{"id": "z1"}]} if url.endswith("name=example.com") else {"result": []}
+        return {"result": [], "result_info": {"total_pages": 99}}
+
+    monkeypatch.setattr("app.dns_cutover._cf_request", fake)
+    with pytest.raises(RuntimeError, match="incomplete"):
+        find_stragglers(SERVICES, "198.51.100.7", HEADERS, 5, 1)

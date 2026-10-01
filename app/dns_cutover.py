@@ -110,11 +110,7 @@ def restore_snapshot(
         service = str(entry.get("service") or entry["name"])
         records = entry["records"]
         if not records:
-            results.append(
-                SyncResult(
-                    service, "manual", f"no record existed for {entry['name']} before the sync; delete it by hand"
-                )
-            )
+            results.append(_restore_absent(service, entry["name"], cf_headers, timeout, max_retries))
             continue
         if len(records) > 1:
             results.append(
@@ -145,6 +141,21 @@ def _normalize_target(target: str) -> str:
         return str(ipaddress.ip_address(target))
     except ValueError:
         return target.rstrip(".").lower()
+
+
+def _restore_absent(
+    service: str, name: str, cf_headers: dict[str, str], timeout: float, max_retries: int
+) -> SyncResult:
+    """The name had no record when the snapshot was taken. If it still has none, the sync never created one
+    (it failed or was skipped) and the rollback is already complete; if it has one now, say exactly what to delete."""
+    try:
+        current = list_cloudflare_records(name, cf_headers, timeout, max_retries)
+    except Exception as e:
+        return SyncResult(service, "manual", f"{name} had no record before the sync; couldn't check it now ({e})")
+    if not current:
+        return SyncResult(service, "noop", f"{name} had no record before the sync and has none now")
+    now = ", ".join(f"{r.get('type')} {r.get('content')}" for r in current)
+    return SyncResult(service, "manual", f"{name} had no record before the sync, but has {now} now: delete it by hand")
 
 
 def find_stragglers(
@@ -185,4 +196,10 @@ def find_stragglers(
             total_pages = (data.get("result_info") or {}).get("total_pages", 1)
             if page >= total_pages:
                 break
+            if page == _MAX_PAGES:
+                # Reporting "no leftovers" off a truncated listing would be the false all-clear this exists to avoid.
+                raise RuntimeError(
+                    f"zone {zone_name} has more than {_MAX_PAGES * _PER_PAGE} records pointing at {old_target}; "
+                    "the leftover list would be incomplete"
+                )
     return stragglers

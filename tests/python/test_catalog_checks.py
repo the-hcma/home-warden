@@ -1252,16 +1252,18 @@ def test_sync_dns_record_update_success() -> None:
         result = sync_dns_record("svc", service, "203.0.113.10", {"x": "y"}, timeout=5, max_retries=3)
     assert result.status == "updated"
     write_call = mock_cf.call_args_list[2]
-    assert write_call.kwargs["method"] == "PUT"
-    # Update is idempotent (PUT to a specific record id) -- it forwards the
+    assert write_call.kwargs["method"] == "PATCH"
+    # Update is idempotent (PATCH to a specific record id) -- it forwards the
     # caller's own max_retries, unlike create's hardcoded single attempt.
     assert write_call.args[3] == 3
     assert write_call.kwargs["data"]["content"] == "203.0.113.10"
+    # Only what the sync manages is sent: a PUT-style body would reset the TTL and wipe comment/tags.
+    assert write_call.kwargs["data"] == {"content": "203.0.113.10", "proxied": False}
 
 
 def test_sync_dns_record_proxied_mismatch_triggers_update_not_noop() -> None:
     # Content already matches but the orange-cloud state doesn't -- must
-    # still PUT, not report noop and leave the live record's proxy state
+    # still PATCH, not report noop and leave the live record's proxy state
     # wrong with a success status.
     service = {"server_name": "app.example.com"}
     with (
