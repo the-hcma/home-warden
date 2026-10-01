@@ -26,6 +26,7 @@ The longer-term goal: a one-stop front door for all home services, local and rem
 | --- | --- |
 | [docs/architecture-socket-activation.md](./docs/architecture-socket-activation.md) | How socket activation works; security posture and known gaps |
 | [docs/client-pki.md](./docs/client-pki.md) | Private client-certificate CA: purpose, threat model, lifecycle |
+| [docs/host-migration.md](./docs/host-migration.md) | Moving the front door to a replacement host: staged cutover, parity checks, rollback |
 | [docs/host-prerequisites.md](./docs/host-prerequisites.md) | Ubuntu 26 host install, day-2 ops, unit reference |
 | [PLAN.md](./PLAN.md) | Original design rationale, phases, open questions |
 | [AGENTS.md](./AGENTS.md) | Contributor / agent ground rules |
