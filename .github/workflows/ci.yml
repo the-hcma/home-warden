@@ -96,8 +96,9 @@ jobs:
     needs: guard
     if: needs.guard.outputs.skip != 'true'
     runs-on: ubuntu-latest
-    # Measured ~15s on ubuntu-latest (nginx -t + shellcheck step ~11s); 3× ≈ 45s → 1m cap.
-    timeout-minutes: 1
+    # The work is ~15s, but the apt steps below sit on a mirror that is sometimes slow: give them room
+    # (a 20s `apt-get update` cap failed with exit 124 in the merge queue, #201) and keep the job bounded.
+    timeout-minutes: 4
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -117,13 +118,13 @@ jobs:
       - name: nginx -t + shellcheck
         env:
           DEBIAN_FRONTEND: noninteractive
-        # Step itself was ~11s in CI; 3× → 33s hard cap (fails instead of hanging).
-        timeout-minutes: 1
+        # Step work was ~11s; the rest is apt. Bounded below, so a hung mirror fails instead of hanging.
+        timeout-minutes: 3
         run: |
           set -euo pipefail
-          sudo timeout 20 apt-get update -qq
-          sudo timeout 30 apt-get install -y -qq \
-            -o DPkg::Lock::Timeout=30 \
+          sudo timeout 60 apt-get update -qq
+          sudo timeout 120 apt-get install -y -qq \
+            -o DPkg::Lock::Timeout=60 \
             nginx shellcheck
           nginx -t -c "$PWD/nginx/nginx.conf"
           ./scripts/ci-shellcheck
@@ -175,7 +176,8 @@ jobs:
     needs: guard
     if: needs.guard.outputs.skip != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    # apt on a slow mirror dominates; same bounds as the other install steps (#201).
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -190,8 +192,8 @@ jobs:
         # "unknown directive stream" against the plain nginx package).
         run: |
           set -euo pipefail
-          sudo timeout 20 apt-get update -qq
-          sudo timeout 30 apt-get install -y -qq -o DPkg::Lock::Timeout=30 nginx-full
+          sudo timeout 60 apt-get update -qq
+          sudo timeout 120 apt-get install -y -qq -o DPkg::Lock::Timeout=60 nginx-full
       - name: Render catalog fixture + nginx -t + Gixy-Next
         run: bash .github/ci/catalog-render-validate
       # The Pytest job has no nginx, so this test skips there; here it must run.
