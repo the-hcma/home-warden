@@ -205,7 +205,9 @@ jobs:
     needs: guard
     if: needs.guard.outputs.skip != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    # The install step alone measured ~35-60s (pdns-backend-geoip pulls geoip-database); the job cap leaves
+    # room for it plus the fixture run (#201).
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -214,10 +216,12 @@ jobs:
       - name: Install PowerDNS + GeoIP backend + dig
         env:
           DEBIAN_FRONTEND: noninteractive
+        # Was `timeout 30`, which the install routinely overran (exit 124 before any validation ran, #201);
+        # still bounded, so a hung mirror fails the job in minutes instead of hanging it.
         run: |
           set -euo pipefail
-          sudo timeout 20 apt-get update -qq
-          sudo timeout 30 apt-get install -y -qq -o DPkg::Lock::Timeout=30 \
+          sudo timeout 60 apt-get update -qq
+          sudo timeout 150 apt-get install -y -qq -o DPkg::Lock::Timeout=60 \
             pdns-server pdns-backend-geoip dnsutils
       - name: Convert tinydns fixture + pdns_server + dig
         run: bash .github/ci/dns-catalog-validate
