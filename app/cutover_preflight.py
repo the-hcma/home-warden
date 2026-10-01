@@ -14,6 +14,7 @@ covers the same ground for a host without `uv`.
 from __future__ import annotations
 
 import datetime
+import os
 import re
 import shutil
 import socket
@@ -25,7 +26,7 @@ from pathlib import Path
 
 from cryptography import x509
 
-_TOOLS = ("nginx", "dig", "uv", "gpg", "openssl", "certbot")
+_TOOLS = ("nginx", "dig", "uv", "gpg", "openssl")
 _MIN_SYSTEMD = 259
 _MIN_NGINX = (1, 28)
 _PORTS = (80, 443, 853)
@@ -74,6 +75,10 @@ class Context:
     run: Runner = default_runner
     connect: Connector = default_connector
     which: Callable[[str], str | None] = shutil.which
+    # cert-renewer runs ${CERTBOT:-/usr/bin/certbot} and refuses anything else, so check that path, not PATH
+    # (a snap install is on PATH as /snap/bin/certbot but not at /usr/bin/certbot).
+    certbot: str = "/usr/bin/certbot"
+    is_executable: Callable[[str], bool] = lambda path: os.access(path, os.X_OK)
     now: Callable[[], datetime.datetime] = lambda: datetime.datetime.now(datetime.timezone.utc)
     use_sudo: bool = True
     certbot_dry_run: bool = False
@@ -155,6 +160,11 @@ def check_tools(ctx: Context) -> list[Result]:
         Result(f"tool:{t}", "ok" if ctx.which(t) else "fail", "present" if ctx.which(t) else f"{t} not installed")
         for t in _TOOLS
     ]
+    if ctx.is_executable(ctx.certbot):
+        out.append(Result("tool:certbot", "ok", ctx.certbot))
+    else:
+        detail = f"{ctx.certbot} is not executable; cert-renewer needs it there (set CERTBOT or symlink it)"
+        out.append(Result("tool:certbot", "fail", detail))
     if ctx.which("nginx"):
         proc = ctx.run(["nginx", "-v"], ctx.timeout)
         m = re.search(r"nginx/(\d+)\.(\d+)", proc.stderr + proc.stdout)
@@ -165,9 +175,11 @@ def check_tools(ctx: Context) -> list[Result]:
     if ctx.which("systemctl"):
         m = re.search(r"systemd (\d+)", ctx.run(["systemctl", "--version"], ctx.timeout).stdout)
         if m and int(m.group(1)) < _MIN_SYSTEMD:
-            out.append(
-                Result("systemd-version", "fail", f"systemd {m.group(1)} < {_MIN_SYSTEMD} (ConditionHost needs it)")
+            detail = (
+                f"systemd {m.group(1)} < {_MIN_SYSTEMD}: machine-id ConditionHost needs {_MIN_SYSTEMD}+; "
+                "the hostname guard still works"
             )
+            out.append(Result("systemd-version", "warn", detail))
         elif m:
             out.append(Result("systemd-version", "ok", f"systemd {m.group(1)}"))
     return out
@@ -258,7 +270,7 @@ def check_domains(ctx: Context, conf: dict[str, set[str]]) -> list[Result]:
         domains = {
             line.strip()
             for line in ctx.certbot_domains.read_text().splitlines()
-            if line.strip() and not line.startswith("#")
+            if line.strip() and not line.strip().startswith("#")
         }
     except OSError:
         return [Result("certbot-domains", "fail", f"{ctx.certbot_domains} missing")]

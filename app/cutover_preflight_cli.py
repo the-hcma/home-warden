@@ -60,6 +60,7 @@ def main() -> int:
         session_secret=session_secret_path(),
         pki_store=client_pki_store(),
         use_sudo=not args.no_sudo,
+        certbot=os.environ.get("CERTBOT", "/usr/bin/certbot"),
         certbot_dry_run=args.certbot_dry_run,
         scratch_dir=scratch_dir(),
         catalog=catalog,
