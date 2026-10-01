@@ -10,8 +10,9 @@
 set -euo pipefail
 
 readonly curl_opts=(--silent --show-error --connect-timeout 5 --max-time 15)
-readonly dig_opts=(+time=3 +tries=1)
+readonly dig_opts=(+time=3 +tries=1 +nottlid)
 fail=0
+difffile=
 note_fail() { echo "FAIL: $*"; fail=1; }
 ok() { echo "ok:   $*"; }
 warn() { echo "WARN: $*"; }
@@ -30,7 +31,7 @@ preflight() {
   ./scripts/setup-service --status || warn "setup-service --status failed"
 
   local listening
-  listening="$(ss --listening --numeric --tcp)"
+  listening="$(ss --listening --numeric --tcp)" || { warn "ss failed; port check skipped"; listening=""; }
   for port in 80 443 853; do
     if grep --quiet --extended-regexp "[:.]${port}[[:space:]]" <<<"$listening"; then
       warn "port ${port} already has a listener (fine if it is home-warden/pdns)"
@@ -44,13 +45,22 @@ preflight() {
   if HOME_NGINX_CONF="$conf" ./scripts/nginx-security-lint; then ok "gixy"; else note_fail "gixy findings"; fi
 
   local dump
-  dump="$(sudo nginx -T -c "$conf" 2>/dev/null)"
+  if ! dump="$(sudo nginx -T -c "$conf" 2>/dev/null)"; then
+    note_fail "nginx -T failed; upstream, certificate and domain checks skipped"
+    return
+  fi
   echo "--- upstream reachability (proxy_pass targets, from THIS host)"
   while read -r url; do
     hostport="${url#*://}"; hostport="${hostport%%/*}"
     [[ "$hostport" == *'$'* || "$hostport" == unix:* ]] && { warn "skip dynamic/unix upstream: $url"; continue; }
-    host="${hostport%%:*}"; port="${hostport##*:}"
-    if [[ "$port" == "$hostport" ]]; then
+    if [[ "$hostport" == \[* ]]; then  # [v6]:port, as the catalog renderer emits
+      host="${hostport#\[}"; host="${host%%]*}"; port="${hostport##*]:}"
+      [[ "$port" == "$hostport" ]] && port=""
+    else
+      host="${hostport%%:*}"; port="${hostport##*:}"
+      [[ "$port" == "$hostport" ]] && port=""
+    fi
+    if [[ -z "$port" ]]; then
       if [[ "$url" == https* ]]; then port=443; else port=80; fi
     fi
     if timeout 5 bash -c ">/dev/tcp/${host}/${port}" 2>/dev/null; then ok "upstream ${host}:${port}"
@@ -71,7 +81,7 @@ preflight() {
   if [[ -r conf/certbot-domains ]]; then
     while read -r dom; do
       [[ -z "$dom" || "$dom" == \#* ]] && continue
-      if grep --quiet --fixed-strings --word-regexp "$dom" <<<"$dump"; then
+      if served_names <<<"$dump" | grep --quiet --fixed-strings --line-regexp "$dom"; then
         ok "domain served: $dom"
       else
         warn "in certbot-domains, not served: $dom"
@@ -92,15 +102,18 @@ preflight() {
   : "$repo_dir"
 }
 
+served_names() {  # server_name tokens (no wildcards/regex) from nginx -T on stdin, comments removed
+  sed 's/^[[:space:]]*#.*//' | grep --only-matching --extended-regexp 'server_name +[^;]+' \
+    | cut --delimiter=' ' --fields=2- | tr ' ' '\n' \
+    | grep --extended-regexp '^[A-Za-z0-9.-]+\.[A-Za-z]+$' | sort --unique
+}
+
 vhosts() {  # one name per line: from --hosts FILE, else nginx -T server_name (no wildcards/regex)
   if [[ -n "${hosts_file:-}" ]]; then
     grep --invert-match --extended-regexp '^\s*(#|$)' "$hosts_file"
     return
   fi
-  sudo nginx -T -c "$(conf_path)" 2>/dev/null \
-    | grep --only-matching --extended-regexp 'server_name +[^;]+' \
-    | cut --delimiter=' ' --fields=2- | tr ' ' '\n' \
-    | grep --extended-regexp '^[A-Za-z0-9.-]+\.[A-Za-z]+$' | sort --unique
+  sudo nginx -T -c "$(conf_path)" 2>/dev/null | served_names
 }
 
 probe() {  # probe NAME IP -> one comparable line per check
@@ -110,7 +123,7 @@ probe() {  # probe NAME IP -> one comparable line per check
   local http_fmt='http=%{http_code} redir=%{redirect_url}'
   local https_fmt='https=%{http_code} verify=%{ssl_verify_result} ver=%{ssl_version}\n'
   local header_re='^(https=|strict-transport|x-frame|x-content-type|content-security'
-  header_re+='|referrer-policy|location:|server:|curl:)'
+  header_re+='|referrer-policy|location:|curl:)'
   out="$(curl "${curl_opts[@]}" "${resolve[@]}" --output /dev/null \
     --write-out "$http_fmt" "http://${name}/" 2>&1 || true)"
   echo "http  : ${out}"
@@ -125,9 +138,25 @@ probe() {  # probe NAME IP -> one comparable line per check
   echo "tls   : ${out:-handshake failed (expected for client_cert vhosts without a cert)}"
 }
 
+compare_family() {  # compare_family LABEL NAME OLD NEW [6]; uses difffile from nginx_parity
+  local label="$1" name="$2" old_addr="$3" new_addr="$4" fam="$5" side
+  for side in "$old_addr" "$new_addr"; do
+    if grep --quiet '^https : curl:' <(probe "$name" "$side" "$fam"); then
+      note_fail "$label $name: ${side} did not answer"
+      return
+    fi
+  done
+  if diff <(probe "$name" "$old_addr" "$fam") <(probe "$name" "$new_addr" "$fam") >"$difffile"; then
+    ok "$label parity $name"
+  else
+    note_fail "$label differs $name"
+    sed 's/^/      /' "$difffile"
+  fi
+}
+
 nginx_parity() {
-  local old="" new="" old6="" new6="" name diffs=0 difffile checked=0
-  difffile="$(mktemp)"
+  local old="" new="" old6="" new6="" name checked=0
+  difffile="$(mktemp)"  # shared with compare_family
   hosts_file=""
   while [[ $# -gt 0 ]]; do case "$1" in
     --old) old="$2"; shift 2 ;; --new) new="$2"; shift 2 ;;
@@ -137,21 +166,14 @@ nginx_parity() {
   while read -r name; do
     [[ -n "$name" ]] || continue
     checked=$((checked + 1))
-    if grep --quiet '^https : curl:' <(probe "$name" "$new"); then
-      note_fail "v4 $name: new address did not answer"
-    elif diff <(probe "$name" "$old") <(probe "$name" "$new") >"$difffile"; then ok "v4 parity $name"
-    else note_fail "v4 differs $name"; sed 's/^/      /' "$difffile"; diffs=1; fi
-    if [[ -n "$old6" && -n "$new6" ]]; then
-      if diff <(probe "$name" "$old6" 6) <(probe "$name" "$new6" 6) >"$difffile"; then ok "v6 parity $name"
-      else note_fail "v6 differs $name"; sed 's/^/      /' "$difffile"; diffs=1; fi
-    fi
+    compare_family v4 "$name" "$old" "$new" ""
+    if [[ -n "$old6" && -n "$new6" ]]; then compare_family v6 "$name" "$old6" "$new6" 6; fi
   done < <(vhosts)
   # A failing `vhosts` (nginx -T error, empty file) yields no input, which must not read as "all clear".
   if ((checked == 0)); then note_fail "no vhosts found to compare (nginx -T failed or --hosts is empty)"; fi
-  echo "Note: the cert serial/notAfter are not compared; Server/Date never matter."
+  echo "Note: the cert serial/notAfter and the Server/Date headers are not compared."
   echo "Manual for client_cert vhosts: reject without cert, accept with a test cert, reject after revoke+reload."
   echo "Manual for websocket vhosts: wscat/curl --include with Upgrade headers against --resolve."
-  : "$diffs"
 }
 
 dns_parity() {
