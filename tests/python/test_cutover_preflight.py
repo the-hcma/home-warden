@@ -94,6 +94,7 @@ def ctx(tmp_path: Path) -> Context:
         run=run,
         connect=lambda host, port, timeout: True,
         which=lambda name: f"/usr/bin/{name}",
+        is_executable=lambda path: True,
         now=lambda: NOW,
         use_sudo=False,
     )
@@ -155,7 +156,8 @@ def test_missing_tool_and_old_systemd_fail(ctx: Context) -> None:
     ctx.run = lambda cmd, t: _proc(out="systemd 255") if cmd[0] == "systemctl" else base_run(cmd, t)
     results = run_preflight(ctx)
     assert _by_name(results, "tool:gpg")[0].status == "fail"
-    assert _by_name(results, "systemd-version")[0].status == "fail"
+    # scripts/bootstrap only warns here: setup-service can still pin the host by hostname
+    assert _by_name(results, "systemd-version")[0].status == "warn"
 
 
 def test_listener_on_443_is_only_a_warning(ctx: Context) -> None:
@@ -261,3 +263,19 @@ def test_nginx_t_uses_the_service_prefix(ctx: Context) -> None:
     run_preflight(ctx)
     t_cmd = next(c for c in seen if "-T" in c)
     assert t_cmd[t_cmd.index("-p") + 1] == f"{ctx.scratch_dir}/"
+
+
+def test_certbot_is_checked_where_cert_renewer_runs_it(ctx: Context) -> None:
+    # /snap/bin/certbot is on PATH, but cert-renewer wants ${CERTBOT:-/usr/bin/certbot}.
+    ctx.which = lambda name: f"/snap/bin/{name}" if name == "certbot" else f"/usr/bin/{name}"
+    ctx.is_executable = lambda path: path != "/usr/bin/certbot"
+    result = _by_name(run_preflight(ctx), "tool:certbot")[0]
+    assert result.status == "fail" and "/usr/bin/certbot" in result.detail
+    ctx.certbot = "/snap/bin/certbot"
+    ctx.is_executable = lambda path: path == "/snap/bin/certbot"
+    assert _by_name(run_preflight(ctx), "tool:certbot")[0].status == "ok"
+
+
+def test_indented_comment_in_certbot_domains_is_not_a_domain(ctx: Context) -> None:
+    ctx.certbot_domains.write_text("app.example.com\nwww.example.com\n  # old.example.com\n")
+    assert _by_name(run_preflight(ctx), "domains")[0].status == "ok"
