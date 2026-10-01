@@ -4,11 +4,11 @@ Nothing here changes the host: it reads the served nginx config, certificates, s
 `certbot-domains` and the catalog, and tries TCP connects to every `proxy_pass` upstream. Each check yields
 ok / warn / fail with what to fix; only `fail` makes `cutover-preflight` exit non-zero.
 
-`cert-renewer --dry-run` is opt-in (`--certbot-dry-run`), not part of the default run: for a lineage with no
-renewal config (a host whose certs were copied in) it moves `live/`, `archive/` and `renewal/` aside before
-its dry-run `certonly`, and it is host-guarded, so it can't run before the host is pinned. Run it only once the
-host is pinned and you accept that. `scripts/cutover-assess preflight` (the temporary shell version from #192)
-covers the same ground for a host without `uv`.
+`cert-renewer --dry-run` is opt-in (`--certbot-dry-run`), not part of the default run: it talks to Let's Encrypt
+staging and is host-guarded, so it can't run before the host is pinned. It changes nothing on the host: a lineage
+with no renewal config (certs copied in) is reported and skipped, not moved (#199).
+`scripts/cutover-assess preflight` (the temporary shell version from #192) covers the same ground for a host
+without `uv`.
 """
 
 from __future__ import annotations
@@ -320,7 +320,11 @@ def check_secrets(ctx: Context) -> list[Result]:
 def check_certbot_dry_run(ctx: Context) -> list[Result]:
     if not ctx.certbot_dry_run:
         return [
-            Result("certbot-dry-run", "warn", "not run (opt in with --certbot-dry-run; it can move staging lineages)")
+            Result(
+                "certbot-dry-run",
+                "warn",
+                "not run (opt in with --certbot-dry-run; needs a pinned host and talks to LE staging)",
+            )
         ]
     proc = ctx.run([str(ctx.repo_dir / "scripts" / "cert-renewer"), "--dry-run"], 900)
     return [
