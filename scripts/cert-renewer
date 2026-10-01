@@ -21,7 +21,7 @@
 #
 # Usage:
 #   ./scripts/cert-renewer
-#   ./scripts/cert-renewer --dry-run
+#   ./scripts/cert-renewer --dry-run   (changes nothing: an incomplete lineage is reported, not moved or re-issued)
 # Logs (timer): ~/scratch/home-warden/cert-renewer.log
 #
 # Refuses to run anywhere but the host pinned by
@@ -227,6 +227,12 @@ for domain in "${domains[@]}"; do
       "${dry_run_args[@]}"
   else
     if [[ -e "${certbot_config_dir}/live/${domain}" ]] || [[ -e "${certbot_config_dir}/archive/${domain}" ]] || [[ -f "${renewal_conf}" ]]; then
+      if ((dry_run)); then
+        # A real run moves the lineage aside before `certonly`; a dry run must change nothing, and
+        # `certbot certonly` would refuse to run against a half-present lineage anyway (#199).
+        echo "cert-renewer: dry-run: ${domain} has an incomplete lineage (no renewal config); a real run would move it to ${scratch_dir}/certs-staging-backup/ and reissue. Leaving it untouched and skipping certonly."
+        continue
+      fi
       echo "cert-renewer: clearing incomplete/staging lineage for ${domain} before certonly"
       # Unique backup dir so we can mv without rm-first (avoids data-loss if mv fails).
       staging_backup="${scratch_dir}/certs-staging-backup/$(date -u +%Y%m%dT%H%M%SZ)-$$"
