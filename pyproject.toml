@@ -33,6 +33,7 @@ dependencies = [
     "pyyaml>=6.0.3",
     "six>=1.17.0",
     "tiny-pki[cli]==0.1.0",
+    "urllib3==2.8.0",
     "uvicorn[standard]>=0.53.0",
 ]
 
