@@ -7,8 +7,19 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from app.catalog_checks import SyncResult
 from app.catalog_dns_sync_cli import main
+
+
+@pytest.fixture(autouse=True)
+def _no_network_snapshot(monkeypatch, tmp_path: Path) -> None:
+    # A real (non-dry-run) sync snapshots first (#190); keep these CLI tests off the network.
+    monkeypatch.setenv("SCRATCH_DIR", str(tmp_path / "scratch"))
+    monkeypatch.setattr(
+        "app.catalog_dns_sync_cli.take_snapshot", lambda *a, **kw: {"version": 1, "taken_at": "t", "entries": []}
+    )
 
 
 def _write_credentials(tmp_path: Path) -> Path:

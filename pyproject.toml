@@ -33,6 +33,7 @@ dependencies = [
     "pyyaml>=6.0.3",
     "six>=1.17.0",
     "tiny-pki[cli]==0.1.0",
+    "urllib3==2.8.0",
     "uvicorn[standard]>=0.53.0",
 ]
 
@@ -41,6 +42,9 @@ catalog-dns-sync = "app.catalog_dns_sync_cli:main"
 catalog-heal = "app.catalog_heal_cli:main"
 catalog-health-check = "app.catalog_health_cli:main"
 catalog-register = "app.catalog_register_cli:main"
+cutover-verify = "app.cutover_verify_cli:main"
+cutover-preflight = "app.cutover_preflight_cli:main"
+dns-parity = "app.dns_parity_cli:main"
 dns-tinydns-convert = "app.dns_tinydns_convert_cli:main"
 dns-zones-yaml-check = "app.dns_zones_yaml_check_cli:main"
 render-catalog = "app.catalog_render_cli:main"

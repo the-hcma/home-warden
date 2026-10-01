@@ -64,6 +64,7 @@ class CheckResult:
 class SyncResult:
     service: str
     # "created" | "updated" | "noop" | "would-create" | "would-update" | "failed" | "skip"
+    # | "manual" (a restore left something for a human, #190)
     status: str
     detail: str
 
@@ -705,6 +706,7 @@ def sync_dns_record(
     proxied: bool = False,
     dry_run: bool = False,
     verify_resolution: bool = True,
+    ttl: int | None = None,
 ) -> SyncResult:
     """Idempotent create-or-update of a Cloudflare A/AAAA/CNAME record for
     `service["server_name"]`, pointed at `target` (this host's own public
@@ -725,8 +727,9 @@ def sync_dns_record(
     response was lost. The safe retry path is calling this function
     again -- it always starts by re-reading existing records, so a
     previously-successful create is detected as already-correct (`noop`)
-    on the next call, never re-POSTed. Update (PUT to a specific record
-    id) is idempotent and retried directly via `_cf_request`.
+    on the next call, never re-POSTed. Update (PATCH to a specific record
+    id, so the TTL, comment and tags it doesn't manage are left alone) is
+    idempotent and retried directly via `_cf_request`.
 
     Validates the outcome for real before reporting success (see
     the-hcma/home-warden#109): reads the record back via the Cloudflare
@@ -815,9 +818,18 @@ def sync_dns_record(
             "refusing to pick one automatically; round-robin records aren't supported",
         )
 
-    desired = {"type": record_type, "name": domain, "content": target, "proxied": proxied}
+    desired: dict[str, object] = {"type": record_type, "name": domain, "content": target, "proxied": proxied}
+    # `ttl` is only sent (and only compared) when the caller pins one -- a restore from a
+    # snapshot does (#190); a normal sync leaves the record's TTL alone (the update is a PATCH).
+    if ttl is not None:
+        desired["ttl"] = ttl
 
-    if same_type and same_type[0].get("content") == target and same_type[0].get("proxied", False) == proxied:
+    if (
+        same_type
+        and same_type[0].get("content") == target
+        and same_type[0].get("proxied", False) == proxied
+        and (ttl is None or same_type[0].get("ttl") == ttl)
+    ):
         return SyncResult(name, "noop", f"{record_type}={target} already correct in zone {zone_name}")
 
     action = "update" if same_type else "create"
@@ -829,7 +841,10 @@ def sync_dns_record(
         if action == "update":
             record_id = same_type[0]["id"]
             write_url = f"{CF_API_BASE}/zones/{zone_id}/dns_records/{record_id}"
-            _cf_request(write_url, cf_headers, timeout, max_retries, method="PUT", data=desired)
+            # PATCH, not PUT: a PUT overwrites the whole record, resetting the TTL to auto and wiping the
+            # comment and tags. Only what this call manages is sent (the TTL only when the caller pins one).
+            patch_body = {k: v for k, v in desired.items() if k in ("content", "proxied", "ttl")}
+            _cf_request(write_url, cf_headers, timeout, max_retries, method="PATCH", data=patch_body)
         else:
             write_url = f"{CF_API_BASE}/zones/{zone_id}/dns_records"
             _cf_request(write_url, cf_headers, timeout, 1, method="POST", data=desired)

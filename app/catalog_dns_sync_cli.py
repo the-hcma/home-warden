@@ -5,9 +5,17 @@ Usage:
   catalog-dns-sync --target 203.0.113.10
   catalog-dns-sync --target 203.0.113.10 --dry-run
   catalog-dns-sync --target 203.0.113.10 --service my-service
+  catalog-dns-sync --target 203.0.113.10 --old-target 198.51.100.7   # also list leftovers
+  catalog-dns-sync --restore ~/scratch/home-warden/dns-sync-snapshots/<file>.json [--dry-run]
+
+Before writing anything (unless --dry-run or --no-snapshot), the current records are saved to a
+0600 snapshot under $SCRATCH_DIR/dns-sync-snapshots/ (#190), and the write is refused if that can't be
+done. `--restore FILE` puts those records back (content, proxied flag, TTL); a record the sync created
+is reported, not deleted.
 
 Exit: 0 all synced services created/updated/noop/skipped, 1 any sync
-failed, 2 usage/config error.
+failed (or, with --old-target, records outside the catalog still point at it; or, with --restore,
+anything was left for a human), 2 usage/config error.
 
 Refuses to run anywhere but the host pinned by
 `scripts/setup-service --confirm-host` (see scripts/lib/host-guard).
@@ -16,6 +24,7 @@ Refuses to run anywhere but the host pinned by
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import sys
 from dataclasses import asdict
@@ -27,9 +36,11 @@ from app.catalog_health_settings import (
     dns_sync_target,
     enforce_host_guard,
     max_retries,
+    scratch_dir,
     services_json_path,
     timeout_seconds,
 )
+from app.dns_cutover import find_stragglers, load_snapshot, restore_snapshot, take_snapshot, write_snapshot
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -48,6 +59,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-verify-resolution", action="store_true", help="Skip the authoritative-nameserver dig check"
     )
+    parser.add_argument("--restore", type=Path, metavar="SNAPSHOT", help="Put the records in this snapshot back")
+    parser.add_argument("--snapshot-dir", type=Path, default=scratch_dir() / "dns-sync-snapshots")
+    parser.add_argument("--no-snapshot", action="store_true", help="Skip the pre-write snapshot (not recommended)")
+    parser.add_argument(
+        "--old-target",
+        help="Also list records in the catalog's zones still pointing at this IP/hostname that aren't in the catalog",
+    )
     parser.add_argument("--service", action="append", dest="services", help="Limit to this service name (repeatable)")
     parser.add_argument("--verbose", "-v", action="store_true")
     return parser
@@ -64,12 +82,32 @@ def main() -> int:
         print(f"catalog-dns-sync: {e}", file=sys.stderr)
         return 2
 
-    if not args.target:
+    if not args.target and not args.restore:
         print("catalog-dns-sync: --target is required (or set DNS_SYNC_TARGET)", file=sys.stderr)
         return 2
 
     if not enforce_host_guard("catalog-dns-sync"):
         return 2
+
+    if args.restore:
+        ignored = [
+            flag
+            for flag, given in (
+                ("--target", any(a == "--target" or a.startswith("--target=") for a in sys.argv[1:])),
+                ("--service", bool(args.services)),
+                ("--old-target", bool(args.old_target)),
+                ("--proxied", args.proxied),
+            )
+            if given
+        ]
+        if ignored:
+            print(
+                "catalog-dns-sync: --restore replays the whole snapshot; "
+                f"it can't be combined with {', '.join(ignored)}",
+                file=sys.stderr,
+            )
+            return 2
+        return _restore(args)
 
     try:
         catalog = load_catalog(args.services_json)
@@ -91,6 +129,17 @@ def main() -> int:
             return 2
         services = matched
 
+    if not args.dry_run and not args.no_snapshot:
+        try:
+            snapshot = take_snapshot(services, cf_headers, args.timeout, args.max_retries)
+            stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+            snapshot_path = args.snapshot_dir / f"{stamp}.json"
+            write_snapshot(snapshot_path, snapshot)
+        except Exception as e:
+            print(f"catalog-dns-sync: could not snapshot the current records, refusing to write: {e}", file=sys.stderr)
+            return 1
+        print(f"catalog-dns-sync: snapshot written to {snapshot_path}", file=sys.stderr)
+
     results = [
         sync_dns_record(
             s.get("name", "<unnamed>"),
@@ -111,7 +160,48 @@ def main() -> int:
             print(f"{r.status:14} {r.service:24} {r.detail}", file=sys.stderr)
 
     print(json.dumps([asdict(r) for r in results], indent=2))
+    if args.old_target:
+        try:
+            # The whole catalog, not the --service subset: a record of a service we didn't touch isn't a leftover.
+            leftovers = find_stragglers(
+                catalog.get("services") or [], args.old_target, cf_headers, args.timeout, args.max_retries
+            )
+        except Exception as e:
+            print(f"catalog-dns-sync: could not list records still pointing at {args.old_target}: {e}", file=sys.stderr)
+            return 1
+        for rec in leftovers:
+            print(
+                f"catalog-dns-sync: NOT IN CATALOG, still points at {args.old_target}: "
+                f"{rec['type']} {rec['name']} (zone {rec['zone']})",
+                file=sys.stderr,
+            )
+        if not leftovers:
+            print(f"catalog-dns-sync: no records outside the catalog point at {args.old_target}", file=sys.stderr)
+        if leftovers:
+            return 1
     return 1 if any(r.status == "failed" for r in results) else 0
+
+
+def _restore(args: argparse.Namespace) -> int:
+    try:
+        snapshot = load_snapshot(args.restore)
+        cf_headers = parse_cloudflare_credentials(args.cloudflare_credentials)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"catalog-dns-sync: {e}", file=sys.stderr)
+        return 2
+    if cf_headers is None:
+        print(f"catalog-dns-sync: no Cloudflare credentials at {args.cloudflare_credentials}", file=sys.stderr)
+        return 2
+    results = restore_snapshot(
+        snapshot,
+        cf_headers,
+        args.timeout,
+        args.max_retries,
+        dry_run=args.dry_run,
+        verify_resolution=not args.no_verify_resolution,
+    )
+    print(json.dumps([asdict(r) for r in results], indent=2))
+    return 1 if any(r.status in ("failed", "manual") for r in results) else 0
 
 
 if __name__ == "__main__":

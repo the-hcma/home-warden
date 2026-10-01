@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+# TEMPORARY (home-warden#191): read-only cutover assessment. Delete after the cutover;
+# superseded by cutover-preflight (#187), cutover-verify (#188) and dns-parity (#189).
+#
+#   cutover-assess preflight                       # on the replacement host, from the repo root
+#   cutover-assess nginx --old IP --new IP [--old6 IP --new6 IP] [--hosts FILE]
+#   cutover-assess dns   --old IP --new IP [--zones FILE]   # resolvers/servers queried on :53
+#
+# Changes nothing: no setup-service, no certbot run (unless WITH_CERTBOT=1), no DNS writes.
+set -euo pipefail
+
+readonly curl_opts=(--silent --show-error --connect-timeout 5 --max-time 15)
+readonly dig_opts=(+time=3 +tries=1 +nottlid)
+fail=0
+difffile=
+note_fail() { echo "FAIL: $*"; fail=1; }
+ok() { echo "ok:   $*"; }
+warn() { echo "WARN: $*"; }
+
+conf_path() { echo "${HOME_NGINX_CONF:-$HOME/home/nginx/server/nginx.conf}"; }
+
+preflight() {
+  local conf repo_dir cmd url hostport host port path dom
+  conf="$(conf_path)"
+  repo_dir="$(pwd)"
+  for cmd in nginx dig uv gpg openssl certbot; do
+    if command -v "$cmd" >/dev/null 2>&1; then ok "$cmd present"; else note_fail "$cmd missing"; fi
+  done
+  nginx -v 2>&1 | sed 's/^/      /'
+  systemctl --version | head -1 | sed 's/^/      /'
+  ./scripts/setup-service --status || warn "setup-service --status failed"
+
+  local listening
+  listening="$(ss --listening --numeric --tcp)" || { warn "ss failed; port check skipped"; listening=""; }
+  for port in 80 443 853; do
+    if grep --quiet --extended-regexp "[:.]${port}[[:space:]]" <<<"$listening"; then
+      warn "port ${port} already has a listener (fine if it is home-warden/pdns)"
+    else
+      ok "port ${port} free"
+    fi
+  done
+
+  [[ -r "$conf" ]] || { note_fail "served conf not readable: $conf"; return; }
+  if sudo nginx -t -c "$conf"; then ok "nginx -t"; else note_fail "nginx -t"; fi
+  if HOME_NGINX_CONF="$conf" ./scripts/nginx-security-lint; then ok "gixy"; else note_fail "gixy findings"; fi
+
+  local dump
+  if ! dump="$(sudo nginx -T -c "$conf" 2>/dev/null)"; then
+    note_fail "nginx -T failed; upstream, certificate and domain checks skipped"
+    return
+  fi
+  echo "--- upstream reachability (proxy_pass targets, from THIS host)"
+  while read -r url; do
+    hostport="${url#*://}"; hostport="${hostport%%/*}"
+    [[ "$hostport" == *'$'* || "$hostport" == unix:* ]] && { warn "skip dynamic/unix upstream: $url"; continue; }
+    if [[ "$hostport" == \[* ]]; then  # [v6]:port, as the catalog renderer emits
+      host="${hostport#\[}"; host="${host%%]*}"; port="${hostport##*]:}"
+      [[ "$port" == "$hostport" ]] && port=""
+    else
+      host="${hostport%%:*}"; port="${hostport##*:}"
+      [[ "$port" == "$hostport" ]] && port=""
+    fi
+    if [[ -z "$port" ]]; then
+      if [[ "$url" == https* ]]; then port=443; else port=80; fi
+    fi
+    if timeout 5 bash -c ">/dev/tcp/${host}/${port}" 2>/dev/null; then ok "upstream ${host}:${port}"
+    else note_fail "upstream ${host}:${port} unreachable from this host"; fi
+  done < <(grep --only-matching --extended-regexp 'proxy_pass +[a-z]+://[^;]+' <<<"$dump" \
+    | awk '{print $2}' | sort --unique)
+
+  echo "--- certificates referenced by the served conf"
+  while read -r path; do
+    if [[ ! -r "$path" ]]; then note_fail "cert not readable: $path"; continue; fi
+    if openssl x509 -in "$path" -noout -checkend $((30*86400)) >/dev/null; then
+      ok "cert $path valid >30d: $(openssl x509 -in "$path" -noout -enddate)"
+    else note_fail "cert $path expires within 30d or is invalid"; fi
+  done < <(grep --only-matching --extended-regexp 'ssl_certificate +[^;]+' <<<"$dump" \
+    | awk '{print $2}' | sort --unique)
+
+  echo "--- certbot-domains vs served server_name"
+  if [[ -r conf/certbot-domains ]]; then
+    while read -r dom; do
+      [[ -z "$dom" || "$dom" == \#* ]] && continue
+      if served_names <<<"$dump" | grep --quiet --fixed-strings --line-regexp "$dom"; then
+        ok "domain served: $dom"
+      else
+        warn "in certbot-domains, not served: $dom"
+      fi
+    done < conf/certbot-domains
+  else
+    note_fail "conf/certbot-domains missing"
+  fi
+  # NOT run by default: cert-renewer --dry-run moves live/archive/renewal aside for a lineage with no
+  # renewal config (a host with copied-in certs), so it is not read-only. Opt in with WITH_CERTBOT=1.
+  if [[ "${WITH_CERTBOT:-0}" == 1 ]]; then
+    if ./scripts/cert-renewer --dry-run; then ok "cert-renewer --dry-run"; else note_fail "cert-renewer --dry-run"; fi
+  else
+    warn "cert-renewer --dry-run skipped (WITH_CERTBOT=1 to run it; see its mv of staging lineages)"
+  fi
+  echo "--- catalog health (read-only)"
+  ./scripts/catalog-health-check || warn "catalog-health-check reported problems (see above)"
+  : "$repo_dir"
+}
+
+served_names() {  # server_name tokens (no wildcards/regex) from nginx -T on stdin, comments removed
+  sed 's/^[[:space:]]*#.*//' | grep --only-matching --extended-regexp 'server_name +[^;]+' \
+    | cut --delimiter=' ' --fields=2- | tr ' ' '\n' \
+    | grep --extended-regexp '^[A-Za-z0-9.-]+\.[A-Za-z]+$' | sort --unique
+}
+
+vhosts() {  # one name per line: from --hosts FILE, else nginx -T server_name (no wildcards/regex)
+  if [[ -n "${hosts_file:-}" ]]; then
+    grep --invert-match --extended-regexp '^\s*(#|$)' "$hosts_file"
+    return
+  fi
+  sudo nginx -T -c "$(conf_path)" 2>/dev/null | served_names
+}
+
+probe() {  # probe NAME IP -> one comparable line per check
+  local name="$1" ip="$2" fam="${3:-}" out
+  local -a resolve=(--resolve "${name}:443:${ip}" --resolve "${name}:80:${ip}")
+  [[ "$fam" == 6 ]] && resolve=(--resolve "${name}:443:[${ip}]" --resolve "${name}:80:[${ip}]")
+  local http_fmt='http=%{http_code} redir=%{redirect_url}'
+  local https_fmt='https=%{http_code} verify=%{ssl_verify_result} ver=%{ssl_version}\n'
+  local header_re='^(https=|strict-transport|x-frame|x-content-type|content-security'
+  header_re+='|referrer-policy|location:|curl:)'
+  out="$(curl "${curl_opts[@]}" "${resolve[@]}" --output /dev/null \
+    --write-out "$http_fmt" "http://${name}/" 2>&1 || true)"
+  echo "http  : ${out}"
+  out="$(curl "${curl_opts[@]}" "${resolve[@]}" --output /dev/null --dump-header /dev/stdout \
+    --write-out "$https_fmt" "https://${name}/" 2>&1 \
+    | tr -d '\r' | grep --ignore-case --extended-regexp "$header_re" | sed 's/^/https : /' || true)"
+  echo "$out"
+  local target="${ip}:443"
+  [[ "$fam" == 6 ]] && target="[${ip}]:443"
+  out="$(echo | timeout 10 openssl s_client -connect "$target" -servername "$name" 2>/dev/null \
+    | openssl x509 -noout -issuer -ext subjectAltName 2>/dev/null | tr '\n' ' ' || true)"
+  echo "tls   : ${out:-handshake failed (expected for client_cert vhosts without a cert)}"
+}
+
+compare_family() {  # compare_family LABEL NAME OLD NEW [6]; uses difffile from nginx_parity
+  local label="$1" name="$2" old_addr="$3" new_addr="$4" fam="$5" side
+  for side in "$old_addr" "$new_addr"; do
+    if grep --quiet '^https : curl:' <(probe "$name" "$side" "$fam"); then
+      note_fail "$label $name: ${side} did not answer"
+      return
+    fi
+  done
+  if diff <(probe "$name" "$old_addr" "$fam") <(probe "$name" "$new_addr" "$fam") >"$difffile"; then
+    ok "$label parity $name"
+  else
+    note_fail "$label differs $name"
+    sed 's/^/      /' "$difffile"
+  fi
+}
+
+nginx_parity() {
+  local old="" new="" old6="" new6="" name checked=0
+  difffile="$(mktemp)"  # shared with compare_family
+  hosts_file=""
+  while [[ $# -gt 0 ]]; do case "$1" in
+    --old) old="$2"; shift 2 ;; --new) new="$2"; shift 2 ;;
+    --old6) old6="$2"; shift 2 ;; --new6) new6="$2"; shift 2 ;;
+    --hosts) hosts_file="$2"; shift 2 ;; *) echo "unknown arg $1" >&2; exit 2 ;; esac; done
+  [[ -n "$old" && -n "$new" ]] || { echo "need --old and --new" >&2; exit 2; }
+  while read -r name; do
+    [[ -n "$name" ]] || continue
+    checked=$((checked + 1))
+    compare_family v4 "$name" "$old" "$new" ""
+    if [[ -n "$old6" && -n "$new6" ]]; then compare_family v6 "$name" "$old6" "$new6" 6; fi
+  done < <(vhosts)
+  # A failing `vhosts` (nginx -T error, empty file) yields no input, which must not read as "all clear".
+  if ((checked == 0)); then note_fail "no vhosts found to compare (nginx -T failed or --hosts is empty)"; fi
+  echo "Note: the cert serial/notAfter and the Server/Date headers are not compared."
+  echo "Manual for client_cert vhosts: reject without cert, accept with a test cert, reject after revoke+reload."
+  echo "Manual for websocket vhosts: wscat/curl --include with Upgrade headers against --resolve."
+}
+
+dns_parity() {
+  local old="" new="" zones="${PDNS_ZONES_YAML:-$HOME/home/dns/zones.yml}" name rtype a b checked=0
+  while [[ $# -gt 0 ]]; do case "$1" in
+    --old) old="$2"; shift 2 ;; --new) new="$2"; shift 2 ;; --zones) zones="$2"; shift 2 ;;
+    *) echo "unknown arg $1" >&2; exit 2 ;; esac; done
+  [[ -n "$old" && -n "$new" ]] || { echo "need --old and --new" >&2; exit 2; }
+  while read -r name rtype; do
+    [[ -n "$name" ]] || continue
+    checked=$((checked + 1))
+    a="$(dig "${dig_opts[@]}" +noall +answer "@${old}" "$name" "$rtype" | sort || true)"
+    b="$(dig "${dig_opts[@]}" +noall +answer "@${new}" "$name" "$rtype" | sort || true)"
+    if [[ "$a" == "$b" && -n "$a" ]]; then ok "$name $rtype"
+    elif [[ "$a" == "$b" ]]; then note_fail "$name $rtype empty on both servers"
+    else note_fail "$name $rtype differs"; diff <(echo "$a") <(echo "$b") | sed 's/^/      /' || true; fi
+  done < <(uv run python - "$zones" <<'PY'
+import sys, yaml
+data = yaml.safe_load(open(sys.argv[1]))
+for z in data.get("domains", []):
+    print(z["domain"], "SOA")
+    for owner, entries in (z.get("records") or {}).items():
+        for e in entries or []:
+            for rtype in e:
+                print(owner, rtype.upper())
+PY
+)
+  if ((checked == 0)); then note_fail "no records read from ${zones} (missing file, bad YAML, or no yaml module)"; fi
+  echo "Also compare by hand: a public name (forwarding), an NXDOMAIN name, and each zone's SOA serial."
+}
+
+case "${1:-}" in
+  preflight) shift; preflight "$@" ;;
+  nginx) shift; nginx_parity "$@" ;;
+  dns) shift; dns_parity "$@" ;;
+  *) sed -n 2,9p "$0"; exit 2 ;;
+esac
+exit "$fail"
