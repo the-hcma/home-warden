@@ -54,7 +54,7 @@ Exit: green.
 2. `./scripts/setup-service --confirm-host` pins the replacement. Then disable `home-warden-catalog-heal.timer` (see the overlap table).
 3. `./scripts/cutover-preflight`. Its certbot check looks where `cert-renewer` runs it (`$CERTBOT`, default `/usr/bin/certbot`), not on `PATH`: a snap install at `/snap/bin/certbot` needs the symlink or `CERTBOT` set.
 4. Fix every `FAIL`. A `FAIL` on an upstream means the app isn't reachable from this host: either the app moves too, or the served conf points at an address that is routable from both hosts. A `WARN` for a vhost missing from the catalog is informational: the catalog-driven checks won't cover it.
-5. Optional, once the host is pinned: `./scripts/cutover-preflight --certbot-dry-run`. It runs `cert-renewer --dry-run`, which today moves an incomplete lineage (certificates copied in without their renewal config) aside before its dry run ([#199](https://github.com/the-hcma/home-warden/issues/199)). Don't use it on a host whose certificates you just copied in until that is fixed.
+5. Optional, once the host is pinned: `./scripts/cutover-preflight --certbot-dry-run`. It runs `cert-renewer --dry-run`, which talks to Let's Encrypt staging. It changes nothing on the host: a lineage whose certificates were copied in without a renewal config is reported and skipped, not moved aside ([#199](https://github.com/the-hcma/home-warden/issues/199)).
 
 Exit: no `FAIL`.
 
