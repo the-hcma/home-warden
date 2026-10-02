@@ -86,6 +86,29 @@ def test_enroll_from_a_csr_needs_a_confirmed_fingerprint(tmp_path: Path, fingerp
     assert _active_serials(tmp_path, store, "bob-laptop") == []
 
 
+@pytest.mark.parametrize("where", ["missing-parent", "directory"])
+def test_enroll_from_a_csr_refuses_an_unwritable_out_before_issuing(tmp_path: Path, where: str) -> None:
+    """tiny-pki records the certificate before it writes --out, so a bad path is caught up front (nothing issued)."""
+    store = _init_store(tmp_path)
+    csr, key = _device_csr(tmp_path, "bob-laptop")
+    out = tmp_path / "no-such-dir" / "bob.crt" if where == "missing-parent" else tmp_path
+    result = _client_pki(
+        tmp_path,
+        store,
+        "enroll",
+        "bob-laptop",
+        "--csr",
+        str(csr),
+        "--fingerprint",
+        _fingerprint(key),
+        "--out",
+        str(out),
+    )
+    assert result.returncode == 1
+    assert "nothing issued" in result.stderr and ("cannot write" in result.stderr or "is a directory" in result.stderr)
+    assert _active_serials(tmp_path, store, "bob-laptop") == []
+
+
 def test_enroll_from_a_csr_signs_the_device_key_and_stores_none(tmp_path: Path) -> None:
     store = _init_store(tmp_path)
     csr, key = _device_csr(tmp_path, "bob-laptop")
@@ -202,6 +225,25 @@ def test_enroll_waits_for_a_concurrent_enroll_and_gives_up(tmp_path: Path) -> No
     assert _active_serials(tmp_path, store, "alice-phone") == []
 
 
+def test_issued_but_unwritten_note_names_the_recovery_command(tmp_path: Path) -> None:
+    """If the store gained a certificate but --out failed, the operator is told how to get it back."""
+    lib = REPO / "scripts" / "lib" / "client-pki-devices"
+
+    def note(previous_count: int) -> str:
+        # The store now lists two active certificates for the device.
+        script = f"""
+        source '{lib}'
+        client_pki_active_serials() {{ printf '01\\n02\\n'; }}
+        client_pki_note_issued_but_unwritten bob-laptop {previous_count}
+        """
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30).stderr
+
+    gained = note(1)
+    assert "recorded in the store but could not be written" in gained
+    assert "export pem bob-laptop --out PATH" in gained
+    assert note(2) == ""  # nothing new was recorded, so nothing to recover
+
+
 def test_legacy_bundle_uses_3des_for_older_devices(tmp_path: Path) -> None:
     store = _init_store(tmp_path)
     _ok(_client_pki(tmp_path, store, "enroll", "alice-phone", "--password-file", str(_password(tmp_path)), "--legacy"))
@@ -237,6 +279,28 @@ def test_non_read_only_verbs_refuse_off_the_designated_host(tmp_path: Path, args
 def test_read_only_verbs_run_off_the_designated_host(tmp_path: Path, args: list[str]) -> None:
     result = _client_pki(tmp_path, tmp_path / "pki", *args, guard=True)
     assert "no designated host" not in result.stderr
+
+
+def test_rotate_from_a_csr_refuses_an_unwritable_out_before_issuing(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    _ok(_client_pki(tmp_path, store, "enroll", "alice-phone", "--password-file", str(_password(tmp_path))))
+    before = _active_serials(tmp_path, store, "alice-phone")
+    csr, key = _device_csr(tmp_path, "alice-phone")
+    result = _client_pki(
+        tmp_path,
+        store,
+        "rotate",
+        "alice-phone",
+        "--csr",
+        str(csr),
+        "--fingerprint",
+        _fingerprint(key),
+        "--out",
+        str(tmp_path / "no-such-dir" / "alice.crt"),
+    )
+    assert result.returncode == 1
+    assert "nothing issued" in result.stderr
+    assert _active_serials(tmp_path, store, "alice-phone") == before
 
 
 def test_rotate_from_a_new_csr_keeps_the_current_certificate(tmp_path: Path) -> None:

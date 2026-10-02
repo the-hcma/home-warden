@@ -26,10 +26,47 @@ for entry in entries if isinstance(entries, list) else [entries]:
 ' "${cn}"
 }
 
+# Fail before anything is issued when <out> can't be written. tiny-pki records
+# the certificate in the store before it writes --out, so discovering a bad path
+# afterwards leaves a certificate the operator has to go and recover.
+client_pki_check_out_writable() {
+  local -r out="$1"
+  local dir
+
+  dir="$(dirname -- "${out}")"
+  if [[ -d "${out}" ]]; then
+    echo "client-pki: --out ${out} is a directory; nothing issued" >&2
+    return 1
+  fi
+  if [[ ! -d "${dir}" || ! -w "${dir}" ]]; then
+    echo "client-pki: cannot write ${out}: ${dir} is not a writable directory; nothing issued" >&2
+    return 1
+  fi
+  if [[ -e "${out}" && ! -w "${out}" ]]; then
+    echo "client-pki: cannot write ${out}: the file is not writable; nothing issued" >&2
+    return 1
+  fi
+}
+
+# After a failed CSR signing: if the store nonetheless gained a certificate for
+# <cn> (it was recorded, then writing --out failed), say how to get it back.
+client_pki_note_issued_but_unwritten() {
+  local -r cn="$1"
+  local -r previous_count="$2"
+  local current count
+
+  current="$(client_pki_active_serials "${cn}")" || return 0
+  count="$(printf '%s\n' "${current}" | grep --count .)" || count=0
+  if ((count > previous_count)); then
+    echo "client-pki: the certificate for ${cn} was recorded in the store but could not be written;" \
+      "recover it with ./scripts/client-pki export pem ${cn} --out PATH" >&2
+  fi
+}
+
 # enroll <cn> (--password-file PATH [--legacy] | --csr PATH [--fingerprint HEX]
 # [--out PATH]): issue a device's first certificate.
 client_pki_enroll() {
-  local cn previous
+  local cn previous rc=0
   client_pki_parse_device_args "enroll" "$@" || return
   cn="${client_pki_device_cn}"
 
@@ -42,8 +79,11 @@ client_pki_enroll() {
     return 1
   fi
   if [[ -n "${client_pki_device_csr}" ]]; then
-    client_pki_sign_csr "${cn}"
-    return
+    client_pki_sign_csr "${cn}" || rc=$?
+    if ((rc != 0)); then
+      client_pki_note_issued_but_unwritten "${cn}" 0
+    fi
+    return "${rc}"
   fi
   client_pki_tiny_pki create client "${cn}" || return
   client_pki_export_bundle "${cn}"
@@ -228,6 +268,7 @@ client_pki_parse_device_args() {
       echo "client-pki: cannot read the CSR ${client_pki_device_csr}" >&2
       return 1
     fi
+    client_pki_check_out_writable "${client_pki_device_out:-${client_pki_device_cn}.crt}" || return 1
     return 0
   fi
   if [[ -z "${client_pki_device_password_file}" ]]; then
@@ -246,7 +287,7 @@ client_pki_parse_device_args() {
 # [--out PATH]): issue a replacement while the current certificate stays
 # valid, and print the serials to revoke once the device has the new one.
 client_pki_rotate() {
-  local cn previous serial
+  local cn previous rc=0
   client_pki_parse_device_args "rotate" "$@" || return
   cn="${client_pki_device_cn}"
 
@@ -259,14 +300,28 @@ client_pki_rotate() {
     return 1
   fi
   if [[ -n "${client_pki_device_csr}" ]]; then
-    client_pki_sign_csr "${cn}" --keep-previous >/dev/null || return
+    client_pki_sign_csr "${cn}" --keep-previous >/dev/null || rc=$?
+    if ((rc != 0)); then
+      # Both certificates may be live now: still say which serials to revoke once the device has the new one.
+      client_pki_note_issued_but_unwritten "${cn}" "$(printf '%s\n' "${previous}" | grep --count .)"
+      client_pki_print_revoke_hints "${previous}" >&2
+      return "${rc}"
+    fi
     echo "client-pki: wrote ${client_pki_device_out:-${cn}.crt}; install it and the store's public/ca.crt on the device"
   else
     client_pki_tiny_pki create client "${cn}" --keep-previous >/dev/null || return
     client_pki_export_bundle "${cn}" || return
   fi
+  client_pki_print_revoke_hints "${previous}"
+}
+
+# Print the revoke commands for <serials> (newline-separated, as listed before the rotation).
+client_pki_print_revoke_hints() {
+  local -r serials="$1"
+  local serial
+
   echo "client-pki: once the device has the new certificate, revoke the previous one:"
-  for serial in ${previous}; do
+  for serial in ${serials}; do
     echo "  ./scripts/client-pki revoke 0x${serial}"
   done
 }
