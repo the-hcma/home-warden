@@ -23,6 +23,8 @@
 #   ./scripts/client-pki init --cn "Home client CA"
 #   ./scripts/client-pki enroll alice-phone --password-file PATH [--legacy]
 #   ./scripts/client-pki rotate alice-phone --password-file PATH [--legacy]
+#   ./scripts/client-pki enroll bob-laptop --csr PATH [--fingerprint HEX] [--out PATH]
+#   ./scripts/client-pki rotate bob-laptop --csr PATH [--fingerprint HEX] [--out PATH]
 #   ./scripts/client-pki revoke 0x<old serial>                 # once rotated
 #   ./scripts/client-pki revoke alice-phone
 #   ./scripts/client-pki list clients

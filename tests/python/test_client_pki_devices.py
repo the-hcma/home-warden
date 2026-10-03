@@ -1,11 +1,13 @@
 """scripts/client-pki's device workflow and host guard (#159).
 
 Runs the real wrapper against a throwaway store: `enroll` issues a device's
-first certificate and exports a PKCS#12 bundle, `rotate` issues a replacement
+first certificate and exports a PKCS#12 bundle, or signs the device's own CSR
+once the operator vouches for its fingerprint, `rotate` issues a replacement
 while the current one stays valid, and every verb that isn't read-only
 refuses to run off the designated host.
 """
 
+import hashlib
 import json
 import os
 import subprocess
@@ -13,11 +15,24 @@ import time
 from pathlib import Path
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.serialization import pkcs12
+from cryptography.x509.oid import NameOID
 
 REPO = Path(__file__).resolve().parents[2]
 CLIENT_PKI = REPO / "scripts" / "client-pki"
 PASSWORD = "a-long-enough-bundle-password"
+
+
+def test_enroll_accepts_a_fingerprint_in_any_case_with_or_without_colons(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    csr, key = _device_csr(tmp_path, "bob-laptop")
+    plain = _fingerprint(key).lower()
+    spaced = " ".join(plain[i : i + 2] for i in range(0, len(plain), 2))
+    _ok(_client_pki(tmp_path, store, "enroll", "bob-laptop", "--csr", str(csr), "--fingerprint", spaced))
+    assert len(_active_serials(tmp_path, store, "bob-laptop")) == 1
 
 
 def test_enroll_exports_a_bundle_the_password_opens(tmp_path: Path) -> None:
@@ -29,6 +44,107 @@ def test_enroll_exports_a_bundle_the_password_opens(tmp_path: Path) -> None:
     assert bundle.stat().st_mode & 0o777 == 0o600
     _key, cert, _extra = pkcs12.load_key_and_certificates(bundle.read_bytes(), PASSWORD.encode())
     assert cert is not None and cert.serial_number == int(serial, 16)
+
+
+@pytest.mark.parametrize("confirmed", [True, False], ids=["signed", "refused"])
+def test_enroll_from_a_csr_leaves_no_snapshot_behind(tmp_path: Path, confirmed: bool) -> None:
+    store = _init_store(tmp_path)
+    csr, key = _device_csr(tmp_path, "bob-laptop")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    fingerprint = _fingerprint(key) if confirmed else "00" * 32
+    result = _client_pki(
+        tmp_path,
+        store,
+        "enroll",
+        "bob-laptop",
+        "--csr",
+        str(csr),
+        "--fingerprint",
+        fingerprint,
+        extra_env={"TMPDIR": str(scratch)},
+    )
+    assert result.returncode == (0 if confirmed else 1), result.stderr
+    assert list(scratch.glob("client-pki-csr.*")) == []
+
+
+@pytest.mark.parametrize(
+    ("fingerprint", "message"),
+    [
+        ("00" * 32, "does not match --fingerprint"),
+        (None, "confirm the CSR's public key with --fingerprint"),
+    ],
+    ids=["mismatch", "missing-without-terminal"],
+)
+def test_enroll_from_a_csr_needs_a_confirmed_fingerprint(tmp_path: Path, fingerprint: str | None, message: str) -> None:
+    store = _init_store(tmp_path)
+    csr, _key = _device_csr(tmp_path, "bob-laptop")
+    extra = ["--fingerprint", fingerprint] if fingerprint else []
+    result = _client_pki(tmp_path, store, "enroll", "bob-laptop", "--csr", str(csr), *extra)
+    assert result.returncode == 1
+    assert message in result.stderr
+    assert _active_serials(tmp_path, store, "bob-laptop") == []
+
+
+@pytest.mark.parametrize("where", ["missing-parent", "directory"])
+def test_enroll_from_a_csr_refuses_an_unwritable_out_before_issuing(tmp_path: Path, where: str) -> None:
+    """tiny-pki records the certificate before it writes --out, so a bad path is caught up front (nothing issued)."""
+    store = _init_store(tmp_path)
+    csr, key = _device_csr(tmp_path, "bob-laptop")
+    out = tmp_path / "no-such-dir" / "bob.crt" if where == "missing-parent" else tmp_path
+    result = _client_pki(
+        tmp_path,
+        store,
+        "enroll",
+        "bob-laptop",
+        "--csr",
+        str(csr),
+        "--fingerprint",
+        _fingerprint(key),
+        "--out",
+        str(out),
+    )
+    assert result.returncode == 1
+    assert "nothing issued" in result.stderr and ("cannot write" in result.stderr or "is a directory" in result.stderr)
+    assert _active_serials(tmp_path, store, "bob-laptop") == []
+
+
+def test_enroll_from_a_csr_signs_the_device_key_and_stores_none(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    csr, key = _device_csr(tmp_path, "bob-laptop")
+    out = tmp_path / "bob-laptop.crt"
+    result = _client_pki(
+        tmp_path,
+        store,
+        "enroll",
+        "bob-laptop",
+        "--csr",
+        str(csr),
+        "--fingerprint",
+        _fingerprint(key),
+        "--out",
+        str(out),
+    )
+    _ok(result)
+    assert "public key sha256" in result.stderr, "the operator must see the fingerprint being vouched for"
+    assert "public/ca.crt" in result.stdout
+    cert = x509.load_pem_x509_certificate(out.read_bytes())
+    assert cert.public_key() == key.public_key()
+    assert cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value == "bob-laptop"
+    (serial,) = _active_serials(tmp_path, store, "bob-laptop")
+    assert cert.serial_number == int(serial, 16)
+    assert list((store / "clients").glob("*.key")) == []
+    assert list((store / "bundles").glob("*.p12")) == []
+
+
+def test_enroll_refuses_a_csr_tiny_pki_would_not_sign(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    csr, key = _device_csr(tmp_path, "bob-laptop", key=rsa.generate_private_key(public_exponent=65537, key_size=1024))
+    result = _client_pki(tmp_path, store, "enroll", "bob-laptop", "--csr", str(csr), "--fingerprint", _fingerprint(key))
+    assert result.returncode == 1
+    assert "tiny-pki refuses this CSR" in result.stderr
+    assert "RSA key is 1024 bits" in result.stderr
+    assert _active_serials(tmp_path, store, "bob-laptop") == []
 
 
 def test_enroll_refuses_a_device_that_already_has_a_certificate(tmp_path: Path) -> None:
@@ -68,6 +184,25 @@ def test_enroll_refuses_when_it_cannot_list_the_device(tmp_path: Path) -> None:
     assert _active_serials(tmp_path, store, "alice-phone") == before, "a failed listing must not revoke the device"
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--csr", "device.csr", "--password-file", "p"],
+        ["--csr", "device.csr", "--legacy"],
+        ["--password-file", "p", "--fingerprint", "AB"],
+        ["--password-file", "p", "--out", "x.crt"],
+        [],
+    ],
+    ids=["csr-and-password", "csr-and-legacy", "fingerprint-without-csr", "out-without-csr", "neither"],
+)
+def test_enroll_rejects_mixed_or_missing_delivery_flags(tmp_path: Path, args: list[str]) -> None:
+    store = _init_store(tmp_path)
+    (tmp_path / "device.csr").write_text("placeholder\n")
+    result = _client_pki(tmp_path, store, "enroll", "bob-laptop", *args)
+    assert result.returncode == 2
+    assert "usage: client-pki enroll <cn>" in result.stderr
+
+
 def test_enroll_waits_for_a_concurrent_enroll_and_gives_up(tmp_path: Path) -> None:
     store = _init_store(tmp_path)
     holder = subprocess.Popen(["flock", "--exclusive", str(store / "ca"), "sleep", "10"])
@@ -88,6 +223,25 @@ def test_enroll_waits_for_a_concurrent_enroll_and_gives_up(tmp_path: Path) -> No
     assert result.returncode == 1
     assert "another enroll or rotate is running" in result.stderr
     assert _active_serials(tmp_path, store, "alice-phone") == []
+
+
+def test_issued_but_unwritten_note_names_the_recovery_command(tmp_path: Path) -> None:
+    """If the store gained a certificate but --out failed, the operator is told how to get it back."""
+    lib = REPO / "scripts" / "lib" / "client-pki-devices"
+
+    def note(previous_count: int) -> str:
+        # The store now lists two active certificates for the device.
+        script = f"""
+        source '{lib}'
+        client_pki_active_serials() {{ printf '01\\n02\\n'; }}
+        client_pki_note_issued_but_unwritten bob-laptop {previous_count}
+        """
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30).stderr
+
+    gained = note(1)
+    assert "recorded in the store but could not be written" in gained
+    assert "export pem bob-laptop --out PATH" in gained
+    assert note(2) == ""  # nothing new was recorded, so nothing to recover
 
 
 def test_legacy_bundle_uses_3des_for_older_devices(tmp_path: Path) -> None:
@@ -125,6 +279,61 @@ def test_non_read_only_verbs_refuse_off_the_designated_host(tmp_path: Path, args
 def test_read_only_verbs_run_off_the_designated_host(tmp_path: Path, args: list[str]) -> None:
     result = _client_pki(tmp_path, tmp_path / "pki", *args, guard=True)
     assert "no designated host" not in result.stderr
+
+
+def test_rotate_from_a_csr_refuses_an_unwritable_out_before_issuing(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    _ok(_client_pki(tmp_path, store, "enroll", "alice-phone", "--password-file", str(_password(tmp_path))))
+    before = _active_serials(tmp_path, store, "alice-phone")
+    csr, key = _device_csr(tmp_path, "alice-phone")
+    result = _client_pki(
+        tmp_path,
+        store,
+        "rotate",
+        "alice-phone",
+        "--csr",
+        str(csr),
+        "--fingerprint",
+        _fingerprint(key),
+        "--out",
+        str(tmp_path / "no-such-dir" / "alice.crt"),
+    )
+    assert result.returncode == 1
+    assert "nothing issued" in result.stderr
+    assert _active_serials(tmp_path, store, "alice-phone") == before
+
+
+def test_rotate_from_a_new_csr_keeps_the_current_certificate(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    first_csr, first_key = _device_csr(tmp_path, "bob-laptop")
+    _ok(
+        _client_pki(
+            tmp_path, store, "enroll", "bob-laptop", "--csr", str(first_csr), "--fingerprint", _fingerprint(first_key)
+        )
+    )
+    (old,) = _active_serials(tmp_path, store, "bob-laptop")
+
+    csr, key = _device_csr(tmp_path, "bob-laptop-next")
+    out = tmp_path / "next.crt"
+    result = _client_pki(
+        tmp_path,
+        store,
+        "rotate",
+        "bob-laptop",
+        "--csr",
+        str(csr),
+        "--fingerprint",
+        _fingerprint(key),
+        "--out",
+        str(out),
+    )
+    _ok(result)
+    active = _active_serials(tmp_path, store, "bob-laptop")
+    assert old in active and len(active) == 2
+    (new,) = [serial for serial in active if serial != old]
+    cert = x509.load_pem_x509_certificate(out.read_bytes())
+    assert cert.serial_number == int(new, 16) and cert.public_key() == key.public_key()
+    assert f"./scripts/client-pki revoke 0x{old}" in result.stdout
 
 
 def test_rotate_keeps_the_current_certificate_until_it_is_revoked(tmp_path: Path) -> None:
@@ -179,7 +388,31 @@ def _client_pki(
     env.pop("HOME_WARDEN_SKIP_HOST_GUARD", None)
     if not guard:
         env["HOME_WARDEN_SKIP_HOST_GUARD"] = "1"
-    return subprocess.run([str(CLIENT_PKI), *args], capture_output=True, cwd=tmp_path, env=env, text=True, timeout=120)
+    return subprocess.run(
+        [str(CLIENT_PKI), *args],
+        capture_output=True,
+        cwd=tmp_path,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        timeout=120,
+    )
+
+
+def _device_csr(
+    tmp_path: Path, name: str, *, key: ec.EllipticCurvePrivateKey | rsa.RSAPrivateKey | None = None
+) -> tuple[Path, ec.EllipticCurvePrivateKey | rsa.RSAPrivateKey]:
+    """A CSR as a device would make it; the key stays with the test, never in the store."""
+    key = key or ec.generate_private_key(ec.SECP256R1())
+    csr = x509.CertificateSigningRequestBuilder().subject_name(x509.Name([])).sign(key, hashes.SHA256())
+    path = tmp_path / f"{name}.csr"
+    path.write_bytes(csr.public_bytes(serialization.Encoding.PEM))
+    return path, key
+
+
+def _fingerprint(key: ec.EllipticCurvePrivateKey | rsa.RSAPrivateKey) -> str:
+    spki = key.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    return ":".join(f"{b:02X}" for b in hashlib.sha256(spki).digest())
 
 
 def _init_store(tmp_path: Path) -> Path:

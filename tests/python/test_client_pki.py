@@ -12,7 +12,8 @@ End-to-end tests point a throwaway unprivileged nginx at the store's
   CRLs, clients of both CAs are accepted, an old-CA revocation takes effect,
   and dropping the old CA cuts its clients off;
 - a client certificate is accepted, then rejected once it is revoked and
-  nginx reloads;
+  nginx reloads, including one signed from a device's CSR, whose key the
+  store never holds;
 - a rotated client keeps working on both certificates until the old serial is
   revoked;
 - a vhost rendered from the catalog with `client_cert.allow_cn` admits only
@@ -40,6 +41,8 @@ from pathlib import Path
 
 import pytest
 from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 from tiny_pki.store import CertificateStore
 
 from app.catalog_render import RenderContext, render_catalog
@@ -151,6 +154,33 @@ def test_client_certificate_accepted_then_rejected_after_revoke(tmp_path: Path) 
         _nginx_signal(tmp_path, "reload")
         assert _eventually(lambda: _get(port, ca_cert, alice) == 400), "revoked client still accepted after reload"
         assert "certificate revoked" in (tmp_path / "nginx" / "error.log").read_text()
+
+
+@requires_nginx
+def test_client_signed_from_a_csr_is_accepted_then_rejected_after_revoke(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    device_key = tmp_path / "device" / "bob-laptop.key"
+    device_key.parent.mkdir(mode=0o700)
+    key = ec.generate_private_key(ec.SECP256R1())
+    device_key.write_bytes(
+        key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+    )
+    csr = x509.CertificateSigningRequestBuilder().subject_name(x509.Name([])).sign(key, hashes.SHA256())
+    csr_path = tmp_path / "device" / "bob-laptop.csr"
+    csr_path.write_bytes(csr.public_bytes(serialization.Encoding.PEM))
+
+    _tiny_pki(store, "sign", "client", "bob-laptop", "--csr", str(csr_path))
+    (entry,) = _entries(store, "clients")
+    assert entry["key_path"] == "", "the store must hold no key for a CSR-signed device"
+    bob = {**entry, "key_path": str(device_key)}
+    ca_cert, _ = _public_files(store)
+
+    with _nginx(tmp_path, _verify_client_http(store)) as port:
+        assert _get(port, ca_cert, bob) == 200
+
+        _tiny_pki(store, "revoke", "bob-laptop")
+        _nginx_signal(tmp_path, "reload")
+        assert _eventually(lambda: _get(port, ca_cert, bob) == 400), "revoked CSR client still accepted after reload"
 
 
 def test_concurrent_crl_refresh_never_drops_a_revocation(tmp_path: Path) -> None:
