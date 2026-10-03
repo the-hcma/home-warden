@@ -90,7 +90,7 @@ known-first-party = ["app", "config"]
 
 [dependency-groups]
 dev = [
-    "httpx2>=2.13.0",
+    "httpx2>=2.13.1",
     "pyright>=1.1.414",
     "pytest>=9.1.1",
     "ruff>=0.16.8",
