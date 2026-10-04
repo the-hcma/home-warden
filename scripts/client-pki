@@ -86,7 +86,7 @@ run_backup_or_restore() {
     esac
     shift 2
   done
-  if (($# > 0)); then
+  if (($# > 0)) || [[ "${verb}" == backup && -n "${key_secret_file}" ]]; then
     usage_backup_restore
     return 2
   fi

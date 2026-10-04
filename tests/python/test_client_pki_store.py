@@ -98,6 +98,17 @@ def test_restore_checks_an_encrypted_key_against_its_certificate(tmp_path: Path)
     assert not (tmp_path / "t3").exists()
 
 
+def test_backup_rejects_a_key_secret_file_it_would_ignore(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    result = _client_pki(
+        tmp_path, store, "backup", "--out", str(tmp_path / "b.gpg"), "--passphrase-file", str(_passphrase(tmp_path)),
+        "--key-secret-file", str(tmp_path / "key-secret"),
+    )  # fmt: skip
+    assert result.returncode == 2
+    assert "usage" in result.stderr
+    assert not (tmp_path / "b.gpg").exists()
+
+
 def test_backup_of_an_encrypted_store_restores_it_still_encrypted(tmp_path: Path) -> None:
     store = _init_store(tmp_path)
     passphrase = _passphrase(tmp_path)

@@ -417,6 +417,12 @@ client_pki_store_has_ca() {
   [[ -f "${client_pki_store}/ca/ca.crt" ]]
 }
 
+# The secret file is root-only, and its directory may be too, so an operator-side
+# `-f` can say "missing" for a file that exists; ask root when that happens.
+client_pki_key_secret_exists() {
+  [[ -f "${client_pki_key_secret}" ]] || sudo --non-interactive test -f "${client_pki_key_secret}" 2>/dev/null
+}
+
 # tiny-pki marks an encrypted CA key with this first line (tiny-pki >= 1.0).
 client_pki_key_is_encrypted() {
   [[ "$(head --lines=1 -- "${client_pki_store}/ca/ca.key" 2>/dev/null)" == TINY-PKI-ENCRYPTED-CA-KEY-V1 ]]
@@ -426,7 +432,7 @@ client_pki_key_is_encrypted() {
 # and hands it to that one unit as $CREDENTIALS_DIRECTORY/tiny-pki-key, which
 # tiny-pki looks for itself. Empty when no secret file is provisioned.
 client_pki_key_credential_line() {
-  if [[ -f "${client_pki_key_secret}" ]]; then
+  if client_pki_key_secret_exists; then
     printf 'LoadCredential=tiny-pki-key:%s\n' "${client_pki_key_secret}"
   fi
 }
@@ -1358,8 +1364,8 @@ main() {
 
   if client_pki_store_has_ca; then
     client_pki_crl_enabled=1
-    if client_pki_key_is_encrypted && [[ ! -f "${client_pki_key_secret}" ]]; then
-      echo "WARNING: the client CA key is encrypted but ${client_pki_key_secret} does not exist —" \
+    if client_pki_key_is_encrypted && ! client_pki_key_secret_exists; then
+      echo "WARNING: the client CA key is encrypted but ${client_pki_key_secret} is missing or unreadable (is its directory traversable?) —" \
         "the CRL refresh timer cannot sign until it does (see docs/client-pki.md, #184)" >&2
     fi
   else

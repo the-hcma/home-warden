@@ -66,7 +66,6 @@ packages = ["app", "config"]
 [tool.uv]
 package = true
 
-
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
 python_files = ["test_*.py"]
