@@ -118,6 +118,11 @@ readonly client_pki_store
 client_pki_crl_enabled=0
 client_pki_key_secret="${CLIENT_PKI_KEY_SECRET_FILE:-/etc/home-warden/client-pki-key-secret}"
 readonly client_pki_key_secret
+# The path is substituted into the CRL unit with sed (s|...|...|), so keep it plain.
+if [[ "${client_pki_key_secret}" != /* || "${client_pki_key_secret}" =~ [\|\&\\[:space:]] ]]; then
+  echo "ERROR: CLIENT_PKI_KEY_SECRET_FILE must be an absolute path without spaces, pipes, ampersands or backslashes" >&2
+  exit 1
+fi
 deployed_commit="${DEPLOYED_COMMIT:-}"
 nginx_dump=""
 nginx_extra_read_paths=""
