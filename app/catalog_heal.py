@@ -73,7 +73,7 @@ def heal_catalog(
     certs_live_dir: Path,
     alert_days: int,
     client_ca_alert_days: int = 60,
-    client_crl_alert_days: int = 7,
+    client_crl_alert_days: int = 3,
     cf_headers: dict[str, str] | None,
     dns_target: str | None,
     local_dns_port: int,

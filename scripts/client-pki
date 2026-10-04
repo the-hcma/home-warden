@@ -15,12 +15,18 @@
 #   HOME_WARDEN_PKI_STORE  CA store directory (default: conf/pki in this repo;
 #                          conf/ is gitignored, like conf/cloudflare.ini)
 #
+# `init` encrypts the CA key at rest (tiny-pki --encrypt-key) unless given
+# --plaintext-key. The secret comes from --key-secret-file, TINY_PKI_KEY_SECRET_FILE,
+# a systemd tiny-pki-key credential (how the CRL timer gets it), or a prompt; never
+# argv. Reads (list, show, check, inspect) never need it. See docs/client-pki.md.
+#
 # Point a catalog vhost's client_cert.ca_bundle / client_cert.crl at the
 # store's key-free public/ca.crt and public/crl.pem, never at ca/ (which
 # holds the CA key).
 #
 # Usage:
-#   ./scripts/client-pki init --cn "Home client CA"
+#   ./scripts/client-pki init --cn "Home client CA" [--key-secret-file PATH | --plaintext-key]
+#   ./scripts/client-pki encrypt-key [--key-secret-file PATH]   # migrate a plaintext store
 #   ./scripts/client-pki enroll alice-phone --password-file PATH [--legacy]
 #   ./scripts/client-pki rotate alice-phone --password-file PATH [--legacy]
 #   ./scripts/client-pki enroll bob-laptop --csr PATH [--fingerprint HEX] [--out PATH]
@@ -30,7 +36,7 @@
 #   ./scripts/client-pki list clients
 #   ./scripts/client-pki check --quiet
 #   ./scripts/client-pki backup --out PATH --passphrase-file PATH
-#   ./scripts/client-pki restore --in PATH --passphrase-file PATH
+#   ./scripts/client-pki restore --in PATH --passphrase-file PATH [--key-secret-file PATH]
 
 set -euo pipefail
 
@@ -59,14 +65,14 @@ is_read_only_verb() {
 
 usage_backup_restore() {
   echo "usage: client-pki backup --out PATH --passphrase-file PATH" >&2
-  echo "       client-pki restore --in PATH --passphrase-file PATH" >&2
+  echo "       client-pki restore --in PATH --passphrase-file PATH [--key-secret-file PATH]" >&2
 }
 
 run_backup_or_restore() {
   local -r verb="$1"
   shift
   local archive_flag="--in"
-  local archive="" passphrase_file=""
+  local archive="" passphrase_file="" key_secret_file=""
 
   if [[ "${verb}" == backup ]]; then
     archive_flag="--out"
@@ -75,11 +81,12 @@ run_backup_or_restore() {
     case "$1" in
       "${archive_flag}") archive="$2" ;;
       --passphrase-file) passphrase_file="$2" ;;
+      --key-secret-file) key_secret_file="$2" ;;
       *) break ;;
     esac
     shift 2
   done
-  if (($# > 0)); then
+  if (($# > 0)) || [[ "${verb}" == backup && -n "${key_secret_file}" ]]; then
     usage_backup_restore
     return 2
   fi
@@ -92,8 +99,30 @@ run_backup_or_restore() {
     client_pki_check_store_permissions "${store}" || return 1
     client_pki_backup "${store}" "${archive}" "${passphrase_file}"
   else
-    client_pki_restore "${store}" "${archive}" "${passphrase_file}"
+    client_pki_restore "${store}" "${archive}" "${passphrase_file}" "${key_secret_file}"
   fi
+}
+
+# init: encrypt the CA key unless the operator opts out with --plaintext-key
+# (which only this wrapper knows) or already passed --encrypt-key.
+client_pki_init() {
+  local arg
+  local encrypt=1
+  local -a args=()
+
+  for arg in "$@"; do
+    case "${arg}" in
+      --plaintext-key) encrypt=0 ;;
+      --encrypt-key) ;;
+      *) args+=("${arg}") ;;
+    esac
+  done
+  if ((encrypt)); then
+    args+=(--encrypt-key)
+  else
+    echo "client-pki: WARNING: --plaintext-key leaves the CA key unencrypted at rest" >&2
+  fi
+  exec uv run --project "${repo_dir}" tiny-pki --store "${store}" init "${args[@]}"
 }
 
 requested_verb="${1:-}"
@@ -125,6 +154,10 @@ case "${requested_verb}" in
   rotate)
     shift
     client_pki_locked "${store}/ca" client_pki_rotate "$@"
+    ;;
+  init)
+    shift
+    client_pki_init "$@"
     ;;
   *)
     exec uv run --project "${repo_dir}" tiny-pki --store "${store}" "$@"

@@ -78,8 +78,8 @@ def client_ca_alert_days() -> int:
 def client_crl_alert_days() -> int:
     """Days before the published client CRL expires to start alerting
     (#160). The refresh timer re-signs it daily, so an alert means the timer
-    has been failing for most of the CRL's lifetime."""
-    return int(os.environ.get("CLIENT_CRL_ALERT_DAYS", "7"))
+    has been failing for several days (tiny-pki 1.0 signs CRLs for 7)."""
+    return int(os.environ.get("CLIENT_CRL_ALERT_DAYS", "3"))
 
 
 def client_pki_store() -> Path:

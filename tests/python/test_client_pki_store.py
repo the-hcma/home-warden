@@ -11,6 +11,7 @@ import fcntl
 import os
 import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,123 @@ REPO = Path(__file__).resolve().parents[2]
 CLIENT_PKI = REPO / "scripts" / "client-pki"
 
 pytestmark = pytest.mark.skipif(shutil.which("gpg") is None, reason="gpg not installed")
+
+
+def test_a_store_made_by_the_wrapper_has_an_encrypted_key_that_only_signing_needs_the_secret_for(
+    tmp_path: Path,
+) -> None:
+    store = _init_store(tmp_path)
+    assert (store / "ca" / "ca.key").read_bytes().startswith(b"TINY-PKI-ENCRYPTED-CA-KEY-V1")
+    _ok(_client_pki(tmp_path, store, "create", "client", "alice", "--key-size", "2048"))
+
+    # The read-only paths (GET /pki/status, catalog-health-check) run without the secret.
+    no_secret: dict[str, str | None] = {"TINY_PKI_KEY_SECRET_FILE": None}
+    for args in (["list", "clients", "--json"], ["check", "--json"]):
+        _ok(_client_pki(tmp_path, store, *args, extra_env=no_secret))
+    refused = _client_pki(tmp_path, store, "crl", extra_env=no_secret)
+    assert refused.returncode != 0
+    assert "key-secret-file" in refused.stderr + refused.stdout
+    _ok(_client_pki(tmp_path, store, "crl"))
+
+
+def test_a_systemd_credential_unlocks_the_key_for_the_crl_refresh(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    credentials = tmp_path / "credentials"
+    credentials.mkdir(mode=0o700)
+    (credentials / "tiny-pki-key").write_text("k" * 40 + "\n")
+    (credentials / "tiny-pki-key").chmod(0o600)
+    result = _client_pki(
+        tmp_path, store, "crl", extra_env={"TINY_PKI_KEY_SECRET_FILE": None, "CREDENTIALS_DIRECTORY": str(credentials)}
+    )
+    _ok(result)
+
+
+def test_restore_checks_an_encrypted_key_against_its_certificate(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    other = tmp_path / "other"
+    other.mkdir()
+    other_store = _init_store(other)
+    passphrase = _passphrase(tmp_path)
+    good = tmp_path / "good.gpg"
+    _ok(_client_pki(tmp_path, store, "backup", "--out", str(good), "--passphrase-file", str(passphrase)))
+
+    no_secret: dict[str, str | None] = {"TINY_PKI_KEY_SECRET_FILE": None}
+    missing = _client_pki(
+        tmp_path,
+        tmp_path / "t1",
+        "restore",
+        "--in",
+        str(good),
+        "--passphrase-file",
+        str(passphrase),
+        extra_env=no_secret,
+    )
+    assert missing.returncode == 1
+    assert "--key-secret-file" in missing.stderr
+    assert not (tmp_path / "t1").exists()
+
+    wrong = tmp_path / "wrong-secret"
+    wrong.write_text("w" * 40 + "\n")
+    wrong.chmod(0o600)
+    unlock = _client_pki(
+        tmp_path, tmp_path / "t2", "restore", "--in", str(good), "--passphrase-file", str(passphrase),
+        "--key-secret-file", str(wrong), extra_env=no_secret,
+    )  # fmt: skip
+    assert unlock.returncode == 1
+    assert "could not unlock" in unlock.stderr
+    assert not (tmp_path / "t2").exists()
+
+    (store / "ca" / "ca.key").write_bytes((other_store / "ca" / "ca.key").read_bytes())
+    swapped = tmp_path / "swapped.gpg"
+    _ok(_client_pki(tmp_path, store, "backup", "--out", str(swapped), "--passphrase-file", str(passphrase)))
+    mismatch = _client_pki(
+        tmp_path, tmp_path / "t3", "restore", "--in", str(swapped), "--passphrase-file", str(passphrase)
+    )
+    assert mismatch.returncode == 1
+    assert "does not match" in mismatch.stderr
+    assert not (tmp_path / "t3").exists()
+
+
+def test_backup_rejects_a_key_secret_file_it_would_ignore(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    result = _client_pki(
+        tmp_path, store, "backup", "--out", str(tmp_path / "b.gpg"), "--passphrase-file", str(_passphrase(tmp_path)),
+        "--key-secret-file", str(tmp_path / "key-secret"),
+    )  # fmt: skip
+    assert result.returncode == 2
+    assert "usage" in result.stderr
+    assert not (tmp_path / "b.gpg").exists()
+
+
+def test_backup_of_an_encrypted_store_restores_it_still_encrypted(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    passphrase = _passphrase(tmp_path)
+    backup = tmp_path / "b.gpg"
+    _ok(_client_pki(tmp_path, store, "backup", "--out", str(backup), "--passphrase-file", str(passphrase)))
+    restored = tmp_path / "restored"
+    result = _client_pki(tmp_path, restored, "restore", "--in", str(backup), "--passphrase-file", str(passphrase))
+    _ok(result)
+    assert (restored / "ca" / "ca.key").read_bytes().startswith(b"TINY-PKI-ENCRYPTED-CA-KEY-V1")
+    _ok(_client_pki(tmp_path, restored, "crl"))
+
+
+def test_encrypt_key_migrates_a_plaintext_store_in_place(tmp_path: Path) -> None:
+    store = _init_store(tmp_path, plaintext=True)
+    key = store / "ca" / "ca.key"
+    assert b"PRIVATE KEY" in key.read_bytes()
+    _ok(_client_pki(tmp_path, store, "encrypt-key"))
+    assert key.read_bytes().startswith(b"TINY-PKI-ENCRYPTED-CA-KEY-V1")
+    _ok(_client_pki(tmp_path, store, "crl"))
+    _ok(_client_pki(tmp_path, store, "decrypt-key"))
+    assert b"PRIVATE KEY" in key.read_bytes()
+
+
+def test_plaintext_key_is_an_explicit_opt_out_that_warns(tmp_path: Path) -> None:
+    store = tmp_path / "pki"
+    result = _client_pki(tmp_path, store, "init", "--cn", "x", "--key-size", "2048", "--plaintext-key", extra_env={})
+    _ok(result)
+    assert "unencrypted at rest" in result.stderr
+    assert b"PRIVATE KEY" in (store / "ca" / "ca.key").read_bytes()
 
 
 def test_backup_refuses_a_dangling_symlink_as_output(tmp_path: Path) -> None:
@@ -166,10 +284,10 @@ def test_restore_into_an_existing_empty_directory(tmp_path: Path) -> None:
 
 
 def test_restore_refuses_a_ca_key_that_does_not_match(tmp_path: Path) -> None:
-    store = _init_store(tmp_path)
+    store = _init_store(tmp_path, plaintext=True)
     other = tmp_path / "other"
     other.mkdir()
-    other_store = _init_store(other)
+    other_store = _init_store(other, plaintext=True)
     (store / "ca" / "ca.key").write_bytes((other_store / "ca" / "ca.key").read_bytes())
     passphrase = _passphrase(tmp_path)
     backup = tmp_path / "b.gpg"
@@ -225,24 +343,46 @@ def test_restore_with_the_wrong_passphrase_leaves_nothing_behind(tmp_path: Path)
 
 
 def _client_pki(
-    tmp_path: Path, store: Path, *args: str, extra_env: dict[str, str] | None = None
+    tmp_path: Path, store: Path, *args: str, extra_env: Mapping[str, str | None] | None = None
 ) -> subprocess.CompletedProcess[str]:
     gnupg = tmp_path / "gnupg"
     gnupg.mkdir(mode=0o700, exist_ok=True)
-    env = {
+    merged: dict[str, str | None] = {
         **os.environ,
         "GNUPGHOME": str(gnupg),
         "HOME_WARDEN_PKI_STORE": str(store),
         "HOME_WARDEN_SKIP_HOST_GUARD": "1",
-        **(extra_env or {}),
+        **(_key_env(tmp_path) if extra_env is None else extra_env),
     }
+    env = {k: v for k, v in merged.items() if v is not None}
     return subprocess.run([str(CLIENT_PKI), *args], capture_output=True, env=env, text=True, timeout=120)
 
 
-def _init_store(tmp_path: Path) -> Path:
+def _init_store(tmp_path: Path, plaintext: bool = False) -> Path:
     store = tmp_path / "pki"
-    _ok(_client_pki(tmp_path, store, "init", "--cn", "backup test CA", "--key-size", "2048"))
+    flags = ["--plaintext-key"] if plaintext else []
+    _ok(
+        _client_pki(
+            tmp_path,
+            store,
+            "init",
+            "--cn",
+            "backup test CA",
+            "--key-size",
+            "2048",
+            *flags,
+            extra_env=_key_env(tmp_path),
+        )
+    )
     return store
+
+
+def _key_env(tmp_path: Path) -> dict[str, str]:
+    secret = tmp_path / "key-secret"
+    if not secret.exists():
+        secret.write_text("k" * 40 + "\n")
+        secret.chmod(0o600)
+    return {"TINY_PKI_KEY_SECRET_FILE": str(secret)}
 
 
 def _layout(store: Path) -> dict[str, tuple[int, bytes | None]]:

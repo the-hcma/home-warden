@@ -417,7 +417,7 @@ def _fingerprint(key: ec.EllipticCurvePrivateKey | rsa.RSAPrivateKey) -> str:
 
 def _init_store(tmp_path: Path) -> Path:
     store = tmp_path / "pki"
-    _ok(_client_pki(tmp_path, store, "init", "--cn", "device test CA", "--key-size", "2048"))
+    _ok(_client_pki(tmp_path, store, "init", "--cn", "device test CA", "--key-size", "2048", "--plaintext-key"))
     return store
 
 

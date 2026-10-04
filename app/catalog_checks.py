@@ -641,7 +641,7 @@ def run_all(
     timeout: float,
     max_retries: int,
     client_ca_alert_days: int = 60,
-    client_crl_alert_days: int = 7,
+    client_crl_alert_days: int = 3,
     skip_cert: bool = False,
     skip_client_cert: bool = False,
     skip_dns: bool = False,

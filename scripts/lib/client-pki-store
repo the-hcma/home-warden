@@ -18,6 +18,8 @@
 
 client_pki_lock_timeout_sec="${CLIENT_PKI_LOCK_TIMEOUT_SEC:-30}"
 readonly client_pki_lock_timeout_sec
+client_pki_repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+readonly client_pki_repo_dir
 
 # Back up <store> to <out> (must not exist), encrypted with the passphrase in
 # <passphrase_file>, then decrypt and list the archive to prove it restores.
@@ -106,9 +108,73 @@ client_pki_decrypt() {
     --passphrase-file "${passphrase_file}" --decrypt "${archive}"
 }
 
+# tiny-pki marks an encrypted CA key with this first line (tiny-pki >= 1.0).
+client_pki_key_is_encrypted() {
+  [[ "$(head --lines=1 -- "$1/ca.key" 2>/dev/null)" == TINY-PKI-ENCRYPTED-CA-KEY-V1 ]]
+}
+
+# Resolve the CA-key secret file the way tiny-pki does: an explicit path, else
+# TINY_PKI_KEY_SECRET_FILE, else the systemd tiny-pki-key credential.
+client_pki_key_secret_path() {
+  local -r explicit="$1"
+
+  if [[ -n "${explicit}" ]]; then
+    printf '%s\n' "${explicit}"
+  elif [[ -n "${TINY_PKI_KEY_SECRET_FILE:-}" ]]; then
+    printf '%s\n' "${TINY_PKI_KEY_SECRET_FILE}"
+  elif [[ -n "${CREDENTIALS_DIRECTORY:-}" && -f "${CREDENTIALS_DIRECTORY}/tiny-pki-key" ]]; then
+    printf '%s\n' "${CREDENTIALS_DIRECTORY}/tiny-pki-key"
+  fi
+}
+
+# Decrypt an encrypted ca.key with the secret in <secret_file> and check that it
+# belongs to ca.crt. Reads only; nothing is written.
+client_pki_encrypted_key_matches_cert() {
+  local -r ca_dir="$1"
+  local -r secret_file="$2"
+
+  if [[ -z "${secret_file}" ]]; then
+    echo "client-pki: ca/ca.key is encrypted; pass --key-secret-file (or set TINY_PKI_KEY_SECRET_FILE)" \
+      "so the restore can check it against ca/ca.crt" >&2
+    return 1
+  fi
+  uv run --project "${client_pki_repo_dir}" python - "${ca_dir}" "${secret_file}" <<'PY' || {
+import sys
+from pathlib import Path
+
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+from cryptography.fernet import InvalidToken
+from tiny_pki.secrets import decrypt_private_key_scrypt
+
+ca_dir, secret_file = Path(sys.argv[1]), Path(sys.argv[2])
+prefix = b"TINY-PKI-ENCRYPTED-CA-KEY-V1\n"
+lines = secret_file.read_text(encoding="utf-8").splitlines()
+secret = lines[0] if lines else ""
+try:
+    pem = decrypt_private_key_scrypt((ca_dir / "ca.key").read_bytes()[len(prefix):], secret)
+    key = serialization.load_pem_private_key(pem, password=None)
+except (InvalidToken, ValueError):
+    sys.exit("could not unlock ca/ca.key with that secret")
+cert = x509.load_pem_x509_certificate((ca_dir / "ca.crt").read_bytes())
+public = serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+if key.public_key().public_bytes(*public) != cert.public_key().public_bytes(*public):
+    sys.exit("ca/ca.key does not match ca/ca.crt")
+PY
+    echo "client-pki: the encrypted ca/ca.key failed its check against ca/ca.crt" >&2
+    return 1
+  }
+}
+
 client_pki_key_matches_cert() {
   local -r ca_dir="$1"
+  local -r secret_file="${2:-}"
   local cert_pub key_pub
+
+  if client_pki_key_is_encrypted "${ca_dir}"; then
+    client_pki_encrypted_key_matches_cert "${ca_dir}" "${secret_file}"
+    return
+  fi
 
   cert_pub="$(openssl x509 -in "${ca_dir}/ca.crt" -noout -pubkey 2>/dev/null)" || return 1
   key_pub="$(openssl pkey -in "${ca_dir}/ca.key" -pubout 2>/dev/null)" || return 1
@@ -150,8 +216,9 @@ client_pki_restore() {
   local -r store_dir="$1"
   local -r archive="$2"
   local -r passphrase_file="$3"
-  local parent staging
+  local key_secret_file parent staging
 
+  key_secret_file="$(client_pki_key_secret_path "${4:-}")"
   client_pki_require_private_file "${passphrase_file}" "passphrase file" || return 1
   if [[ ! -f "${archive}" ]]; then
     echo "client-pki: backup ${archive} not found" >&2
@@ -176,7 +243,7 @@ client_pki_restore() {
     echo "client-pki: could not decrypt or unpack ${archive} (wrong passphrase?)" >&2
     return 1
   fi
-  if ! client_pki_require_ca "${staging}" || ! client_pki_key_matches_cert "${staging}/ca"; then
+  if ! client_pki_require_ca "${staging}" || ! client_pki_key_matches_cert "${staging}/ca" "${key_secret_file}"; then
     rm -rf -- "${staging}"
     echo "client-pki: ${archive} does not hold a usable CA; nothing restored" >&2
     return 1
