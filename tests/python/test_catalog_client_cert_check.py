@@ -92,9 +92,9 @@ def test_crl_expired_fails(tmp_path: Path) -> None:
 
 def test_crl_expiring_within_the_window_fails(tmp_path: Path) -> None:
     ca = _Ca("Home client CA")
-    result = _check(_service(tmp_path, ca.cert_pem(), ca.crl_pem(days=3)))
+    result = _check(_service(tmp_path, ca.cert_pem(), ca.crl_pem(days=2)))
     assert result.status == "fail"
-    assert "expires within 7d" in result.detail
+    assert "expires within 3d" in result.detail
 
 
 def test_crl_not_signed_by_the_ca_fails(tmp_path: Path) -> None:
@@ -131,7 +131,18 @@ def test_mode_off_is_skipped() -> None:
 def test_real_tiny_pki_store_is_ok(tmp_path: Path) -> None:
     store = tmp_path / "pki"
     subprocess.run(
-        ["uv", "run", "--project", str(REPO_ROOT), "tiny-pki", "--store", str(store), "init", "--cn", "Test CA"],
+        [
+            "uv",
+            "run",
+            "--project",
+            str(REPO_ROOT),
+            "tiny-pki",
+            "--store",
+            str(store),
+            "init",
+            "--cn",
+            "Test CA",
+        ],
         check=True,
         capture_output=True,
         env={**os.environ, "NO_COLOR": "1"},
@@ -226,7 +237,7 @@ def test_valid_ca_and_crl_is_ok(tmp_path: Path) -> None:
 
 
 def _check(service: dict) -> CheckResult:
-    return check_client_cert("svc", service, ca_alert_days=60, crl_alert_days=7)
+    return check_client_cert("svc", service, ca_alert_days=60, crl_alert_days=3)
 
 
 def _public_file(tmp_path: Path, name: str, data: bytes) -> Path:

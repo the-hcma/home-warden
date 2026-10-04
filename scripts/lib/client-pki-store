@@ -106,9 +106,19 @@ client_pki_decrypt() {
     --passphrase-file "${passphrase_file}" --decrypt "${archive}"
 }
 
+# tiny-pki marks an encrypted CA key with this first line (tiny-pki >= 1.0).
+client_pki_key_is_encrypted() {
+  [[ "$(head --lines=1 -- "$1/ca.key" 2>/dev/null)" == TINY-PKI-ENCRYPTED-CA-KEY-V1 ]]
+}
+
 client_pki_key_matches_cert() {
   local -r ca_dir="$1"
   local cert_pub key_pub
+
+  if client_pki_key_is_encrypted "${ca_dir}"; then
+    echo "client-pki: ca/ca.key is encrypted; not checking it against ca/ca.crt (that needs the key secret)" >&2
+    return 0
+  fi
 
   cert_pub="$(openssl x509 -in "${ca_dir}/ca.crt" -noout -pubkey 2>/dev/null)" || return 1
   key_pub="$(openssl pkey -in "${ca_dir}/ca.key" -pubout 2>/dev/null)" || return 1

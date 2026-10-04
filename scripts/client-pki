@@ -15,12 +15,18 @@
 #   HOME_WARDEN_PKI_STORE  CA store directory (default: conf/pki in this repo;
 #                          conf/ is gitignored, like conf/cloudflare.ini)
 #
+# `init` encrypts the CA key at rest (tiny-pki --encrypt-key) unless given
+# --plaintext-key. The secret comes from --key-secret-file, TINY_PKI_KEY_SECRET_FILE,
+# a systemd tiny-pki-key credential (how the CRL timer gets it), or a prompt; never
+# argv. Reads (list, show, check, inspect) never need it. See docs/client-pki.md.
+#
 # Point a catalog vhost's client_cert.ca_bundle / client_cert.crl at the
 # store's key-free public/ca.crt and public/crl.pem, never at ca/ (which
 # holds the CA key).
 #
 # Usage:
-#   ./scripts/client-pki init --cn "Home client CA"
+#   ./scripts/client-pki init --cn "Home client CA" [--key-secret-file PATH | --plaintext-key]
+#   ./scripts/client-pki encrypt-key [--key-secret-file PATH]   # migrate a plaintext store
 #   ./scripts/client-pki enroll alice-phone --password-file PATH [--legacy]
 #   ./scripts/client-pki rotate alice-phone --password-file PATH [--legacy]
 #   ./scripts/client-pki enroll bob-laptop --csr PATH [--fingerprint HEX] [--out PATH]
@@ -96,6 +102,28 @@ run_backup_or_restore() {
   fi
 }
 
+# init: encrypt the CA key unless the operator opts out with --plaintext-key
+# (which only this wrapper knows) or already passed --encrypt-key.
+client_pki_init() {
+  local arg
+  local encrypt=1
+  local -a args=()
+
+  for arg in "$@"; do
+    case "${arg}" in
+      --plaintext-key) encrypt=0 ;;
+      --encrypt-key) ;;
+      *) args+=("${arg}") ;;
+    esac
+  done
+  if ((encrypt)); then
+    args+=(--encrypt-key)
+  else
+    echo "client-pki: WARNING: --plaintext-key leaves the CA key unencrypted at rest" >&2
+  fi
+  exec uv run --project "${repo_dir}" tiny-pki --store "${store}" init "${args[@]}"
+}
+
 requested_verb="${1:-}"
 readonly requested_verb
 
@@ -125,6 +153,10 @@ case "${requested_verb}" in
   rotate)
     shift
     client_pki_locked "${store}/ca" client_pki_rotate "$@"
+    ;;
+  init)
+    shift
+    client_pki_init "$@"
     ;;
   *)
     exec uv run --project "${repo_dir}" tiny-pki --store "${store}" "$@"

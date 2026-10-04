@@ -40,7 +40,10 @@ def test_missing_uv_fails_with_a_hint(tmp_path: Path) -> None:
 def test_real_wrapper_creates_and_reads_the_selected_store(tmp_path: Path) -> None:
     store = tmp_path / "pki"
     env = {**os.environ, "HOME_WARDEN_PKI_STORE": str(store), "HOME_WARDEN_SKIP_HOST_GUARD": "1"}
-    for args in (["init", "--cn", "wrapper test CA", "--key-size", "2048"], ["create", "client", "alice"]):
+    for args in (
+        ["init", "--cn", "wrapper test CA", "--key-size", "2048", "--plaintext-key"],
+        ["create", "client", "alice"],
+    ):
         result = subprocess.run([str(CLIENT_PKI), *args], capture_output=True, env=env, text=True, timeout=120)
         assert result.returncode == 0, result.stdout + result.stderr
     assert (store / "public" / "ca.crt").is_file()

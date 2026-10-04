@@ -25,6 +25,10 @@ Environment=PATH=@@HOME_DIR@@/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbi
 # under the operator's ~/.config, not /root/.config.
 Environment=HOME=@@HOME_DIR@@
 Environment=HOME_WARDEN_PKI_STORE=@@CLIENT_PKI_STORE@@
+# Encrypted CA key (#184): the line below is `LoadCredential=tiny-pki-key:<root-only secret file>`
+# when setup-service finds that file, else empty. tiny-pki reads the secret from
+# $CREDENTIALS_DIRECTORY/tiny-pki-key, so it never sits in a file the operator can read.
+@@CLIENT_PKI_KEY_CREDENTIAL@@
 ExecStart=@@REPO_DIR@@/scripts/client-pki crl
 TimeoutStartSec=10min
 TimeoutStopSec=2min

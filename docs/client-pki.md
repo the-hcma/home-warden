@@ -57,7 +57,7 @@ Already in place on `main`: the nginx sandbox sees a republished CRL ([#148](htt
 
 **On the designated host**, the one `scripts/setup-service --confirm-host` pinned. The CA store lives there, in `conf/pki` under the repo checkout by default (`HOME_WARDEN_PKI_STORE` overrides it; `conf/` is gitignored, like `conf/cloudflare.ini`).
 
-The alternative, keeping the CA key on an operator machine and copying only `ca.crt` and `crl.pem` to the host, would keep the key off the internet-facing machine, but every revoke and every CRL refresh would then need a manual sync, and a missed refresh makes nginx reject every client once the CRL expires. On the host, the CRL refresh timer ([#160](https://github.com/the-hcma/home-warden/issues/160)) and revocations take effect without anyone copying files. The cost is the threat-model row above: whoever compromises the host's operator account can issue certificates. The key protection below, and encrypting the key at rest once tiny-pki supports it, are what limit that.
+The alternative, keeping the CA key on an operator machine and copying only `ca.crt` and `crl.pem` to the host, would keep the key off the internet-facing machine, but every revoke and every CRL refresh would then need a manual sync, and a missed refresh makes nginx reject every client once the CRL expires. On the host, the CRL refresh timer ([#160](https://github.com/the-hcma/home-warden/issues/160)) and revocations take effect without anyone copying files. The cost is the threat-model row above: whoever compromises the host's operator account can issue certificates. The key protection below, including encrypting the key at rest, is what limits that.
 
 ### Creating the CA
 
@@ -78,11 +78,33 @@ That creates the store with tiny-pki's layout. Point a catalog entry's `client_c
 
 tiny-pki writes this layout itself. `scripts/client-pki` checks it before every command and refuses to run when anything is looser, for example a key made group-readable by a careless copy, listing each offending path. It also refuses a `public/` or public file that `home-warden-nginx` couldn't read (a directory tighter than `0755` or a file tighter than `0644`), since the vhost would then fail to load. nginx never sees `ca/`: the sandbox binds only `public/`, so the key isn't readable by `home-warden-nginx` even if a mode slips.
 
-The key is **not encrypted at rest** yet: tiny-pki's store writes it in the clear, protected by these modes. Encryption at rest is [tiny-pki#150](https://github.com/the-hcma/tiny-pki/issues/150); home-warden will adopt it once it lands.
+#### Encrypting the CA key at rest
+
+`./scripts/client-pki init` encrypts `ca/ca.key` (tiny-pki's `--encrypt-key`, tiny-pki ≥ 1.0) unless you pass `--plaintext-key`. The secret must be at least 32 characters; generate one with `head -c 32 /dev/urandom | base64`. tiny-pki takes it from `--key-secret-file PATH`, `TINY_PKI_KEY_SECRET_FILE`, a systemd `tiny-pki-key` credential, or a terminal prompt, never from the command line. Commands that only read (`list`, `show`, `check`, `inspect`, so `GET /pki/status` and `catalog-health-check`) don't need it; anything that signs (`create`, `sign`, `revoke`, `crl`) does.
+
+Where the secret lives, and why:
+
+- **Interactive use** (enroll, rotate, revoke): you supply it, from a prompt or a `0600` file you keep somewhere other than the host, such as a password manager. The host doesn't have to hold it.
+- **The unattended CRL refresh** (`home-warden-client-pki-crl.service`) is the only automated signer. Put the secret in a **root-owned, `0600` file**, `/etc/home-warden/client-pki-key-secret` (override with `CLIENT_PKI_KEY_SECRET_FILE` when running `setup-service`). `setup-service` then adds `LoadCredential=tiny-pki-key:<file>` to that one unit: systemd reads the file as root and hands the secret to the refresh as `$CREDENTIALS_DIRECTORY/tiny-pki-key`, which tiny-pki looks for itself. To keep it encrypted on disk too, use `systemd-creds encrypt` and `LoadCredentialEncrypted=` in a drop-in instead.
+- **Effect on the threat model.** A copy of the store that loses its permissions (a backup, a disk image, a careless `cp`) no longer yields a key. A compromised operator account without root can't read the secret at rest either, since it lives root-only and reaches the CRL service as a credential. It does **not** stop an attacker with root, or one who can run code while the CRL refresh runs, and anyone who types the secret on a compromised host exposes it. Treat the host as holding the CA key for those cases.
+
+If the key is encrypted and the secret file is missing, `setup-service` warns, and the refresh fails until it exists (the `client_cert` health check alerts as the CRL runs down).
+
+##### Migrating an existing plaintext store
+
+```bash
+./scripts/client-pki backup --out ~/backups/client-pki-before-encrypt.tar.gpg --passphrase-file ~/.config/home-warden/pki-backup-passphrase
+./scripts/client-pki encrypt-key --key-secret-file ~/.config/home-warden/pki-key-secret
+sudo install --mode=0600 --owner=root -D ~/.config/home-warden/pki-key-secret /etc/home-warden/client-pki-key-secret
+./scripts/setup-service
+./scripts/client-pki crl --key-secret-file ~/.config/home-warden/pki-key-secret   # proves the secret works
+```
+
+Then remove the secret file from the operator's home if you keep the root copy plus your own off-host copy. `./scripts/client-pki decrypt-key` reverses it. Losing the secret loses the CA key (the backup holds the key encrypted too), so keep a copy off the host.
 
 ### Backup and restore
 
-Back up the whole store (CA key, index, serial and CRL state, issued certificates) as a `gpg --symmetric` (AES-256) archive. The passphrase comes from a file readable only by you, never from the command line:
+Back up the whole store (CA key, which stays encrypted inside the archive when the store encrypts it, index, serial and CRL state, issued certificates) as a `gpg --symmetric` (AES-256) archive. The passphrase comes from a file readable only by you, never from the command line:
 
 ```bash
 ./scripts/client-pki backup --out ~/backups/client-pki-$(date +%F).tar.gpg --passphrase-file ~/.config/home-warden/pki-backup-passphrase
@@ -96,7 +118,7 @@ To restore, onto the same host or a replacement:
 ./scripts/client-pki restore --in client-pki-2026-09-28.tar.gpg --passphrase-file ~/.config/home-warden/pki-backup-passphrase
 ```
 
-Restore refuses to write over a store that isn't empty (move it aside first), unpacks into a private staging directory, checks that the CA key matches the CA certificate, and only then moves it into place. Certificates issued before the backup keep working, revocations in it stay revoked, and new certificates continue the serial sequence. Rerun `./scripts/setup-service` afterwards so the sandbox binds and reload watch point at the restored `public/`.
+Restore refuses to write over a store that isn't empty (move it aside first), unpacks into a private staging directory, checks that the CA key matches the CA certificate (skipped for an encrypted key, which needs the secret to read; run `./scripts/client-pki crl` afterwards to prove it), and only then moves it into place. Certificates issued before the backup keep working, revocations in it stay revoked, and new certificates continue the serial sequence. Rerun `./scripts/setup-service` afterwards so the sandbox binds and reload watch point at the restored `public/`.
 
 ### CA expiry and rotation
 
@@ -122,7 +144,7 @@ Rotating to a new CA without locking any device out:
 
 ### Keeping the CRL fresh
 
-tiny-pki signs each CRL for 30 days (`crl --days N` changes that), and nginx rejects **every** client certificate once the CRL it loads has expired. Once the store has a CA, `./scripts/setup-service` installs `home-warden-client-pki-crl.timer`, which runs `scripts/client-pki crl` daily at 04:45 as the operator account and logs to `client-pki-crl.log` in the scratch directory. tiny-pki replaces `public/crl.pem` atomically, and the reload watch on `public/` picks up the new file, so no step of its own reloads nginx. A refresh takes the store lock like any other write, so it can't race a revoke and drop it.
+tiny-pki signs each CRL for 7 days by default (`crl --days N` changes that), and nginx rejects **every** client certificate once the CRL it loads has expired. Once the store has a CA, `./scripts/setup-service` installs `home-warden-client-pki-crl.timer`, which runs `scripts/client-pki crl` daily at 04:45 as the operator account and logs to `client-pki-crl.log` in the scratch directory. tiny-pki replaces `public/crl.pem` atomically, and the reload watch on `public/` picks up the new file, so no step of its own reloads nginx. A refresh takes the store lock like any other write, so it can't race a revoke and drop it.
 
 To refresh by hand: `sudo systemctl start home-warden-client-pki-crl.service`, or `./scripts/client-pki crl`.
 
@@ -133,7 +155,7 @@ To refresh by hand: `sudo systemctl start home-warden-client-pki-crl.service`, o
 - `ca_bundle` or `crl` isn't set (without a CRL, nginx accepts revoked certificates), or its file is missing, unreadable, unparseable, or not an absolute path;
 - `home-warden-nginx` couldn't read a file: it needs `o+r` (for example `0644`) and its directory, which the nginx sandbox binds, needs `o+rx` (`0755`);
 - a CA in the bundle is expired or expires within `CLIENT_CA_ALERT_DAYS` (default 60, long enough to rotate the CA);
-- a CRL is expired or expires within `CLIENT_CRL_ALERT_DAYS` (default 7; with the daily refresh, that means the timer has been failing for about three weeks);
+- a CRL is expired or expires within `CLIENT_CRL_ALERT_DAYS` (default 3; with the daily refresh and 7-day CRLs, that means the timer has been failing for about four days);
 - a CRL isn't signed by a CA in the bundle, or a CA in the bundle has no CRL (nginx rejects that CA's clients).
 
 `catalog-heal` reports it as alert-only and mails it through the same path as its other alerts (`CATALOG_HEAL_ALERT_TO`, see `etc/home-warden-catalog-heal.env.example`); it never re-signs anything itself. Both settings go in `~/.config/home-warden-catalog-heal.env`.

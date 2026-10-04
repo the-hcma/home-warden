@@ -116,6 +116,8 @@ catalog_heal_enabled=0
 client_pki_store="$(realpath --canonicalize-missing "${HOME_WARDEN_PKI_STORE:-${repo_dir}/conf/pki}")"
 readonly client_pki_store
 client_pki_crl_enabled=0
+client_pki_key_secret="${CLIENT_PKI_KEY_SECRET_FILE:-/etc/home-warden/client-pki-key-secret}"
+readonly client_pki_key_secret
 deployed_commit="${DEPLOYED_COMMIT:-}"
 nginx_dump=""
 nginx_extra_read_paths=""
@@ -413,6 +415,20 @@ resolve_services_json() {
 # only once `scripts/client-pki init` has created the CA.
 client_pki_store_has_ca() {
   [[ -f "${client_pki_store}/ca/ca.crt" ]]
+}
+
+# tiny-pki marks an encrypted CA key with this first line (tiny-pki >= 1.0).
+client_pki_key_is_encrypted() {
+  [[ "$(head --lines=1 -- "${client_pki_store}/ca/ca.key" 2>/dev/null)" == TINY-PKI-ENCRYPTED-CA-KEY-V1 ]]
+}
+
+# The CRL unit's LoadCredential= line: systemd reads the (root-only) secret file
+# and hands it to that one unit as $CREDENTIALS_DIRECTORY/tiny-pki-key, which
+# tiny-pki looks for itself. Empty when no secret file is provisioned.
+client_pki_key_credential_line() {
+  if [[ -f "${client_pki_key_secret}" ]]; then
+    printf 'LoadCredential=tiny-pki-key:%s\n' "${client_pki_key_secret}"
+  fi
 }
 
 is_valid_fqdn() {
@@ -736,6 +752,9 @@ expand_unit() {
   host_name="$(hw_first_line "${hw_pinned_host_file}")"
   machine_id="$(hw_first_line "${hw_pinned_machine_id_file}")"
 
+  local key_credential
+  key_credential="$(client_pki_key_credential_line)"
+
   generated="$(
     sed \
       -e "s|@@OWNER@@|${owner}|g" \
@@ -747,6 +766,7 @@ expand_unit() {
       -e "s|@@PDNS_ZONES_YAML_DIR@@|${pdns_zones_yaml_dir}|g" \
       -e "s|@@SERVICES_JSON_PATH@@|${services_json}|g" \
       -e "s|@@CLIENT_PKI_STORE@@|${client_pki_store}|g" \
+      -e "s|@@CLIENT_PKI_KEY_CREDENTIAL@@|${key_credential}|g" \
       -e "s|@@REPO_DIR@@|${repo_dir}|g" \
       -e "s|@@HOME_DIR@@|${HOME}|g" \
       -e "s|@@DEPLOYED_COMMIT@@|${deployed_commit}|g" \
@@ -1178,6 +1198,9 @@ print_status() {
   echo "  services.json:   ${services_json:-<unset, catalog-heal wiring skipped>}"
   if client_pki_store_has_ca; then
     echo "  client CA store: ${client_pki_store}"
+    if client_pki_key_is_encrypted; then
+      echo "  client CA key:   encrypted, secret ${client_pki_key_secret}"
+    fi
   else
     echo "  client CA store: ${client_pki_store} <no CA, CRL refresh timer skipped>"
   fi
@@ -1335,6 +1358,10 @@ main() {
 
   if client_pki_store_has_ca; then
     client_pki_crl_enabled=1
+    if client_pki_key_is_encrypted && [[ ! -f "${client_pki_key_secret}" ]]; then
+      echo "WARNING: the client CA key is encrypted but ${client_pki_key_secret} does not exist —" \
+        "the CRL refresh timer cannot sign until it does (see docs/client-pki.md, #184)" >&2
+    fi
   else
     echo "no client CA in ${client_pki_store} — skipping the CRL refresh timer (see docs/client-pki.md, #160)"
   fi
