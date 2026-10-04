@@ -46,8 +46,56 @@ def test_a_systemd_credential_unlocks_the_key_for_the_crl_refresh(tmp_path: Path
     credentials.mkdir(mode=0o700)
     (credentials / "tiny-pki-key").write_text("k" * 40 + "\n")
     (credentials / "tiny-pki-key").chmod(0o600)
-    result = _client_pki(tmp_path, store, "crl", extra_env={"CREDENTIALS_DIRECTORY": str(credentials)})
+    result = _client_pki(
+        tmp_path, store, "crl", extra_env={"TINY_PKI_KEY_SECRET_FILE": None, "CREDENTIALS_DIRECTORY": str(credentials)}
+    )
     _ok(result)
+
+
+def test_restore_checks_an_encrypted_key_against_its_certificate(tmp_path: Path) -> None:
+    store = _init_store(tmp_path)
+    other = tmp_path / "other"
+    other.mkdir()
+    other_store = _init_store(other)
+    passphrase = _passphrase(tmp_path)
+    good = tmp_path / "good.gpg"
+    _ok(_client_pki(tmp_path, store, "backup", "--out", str(good), "--passphrase-file", str(passphrase)))
+
+    no_secret: dict[str, str | None] = {"TINY_PKI_KEY_SECRET_FILE": None}
+    missing = _client_pki(
+        tmp_path,
+        tmp_path / "t1",
+        "restore",
+        "--in",
+        str(good),
+        "--passphrase-file",
+        str(passphrase),
+        extra_env=no_secret,
+    )
+    assert missing.returncode == 1
+    assert "--key-secret-file" in missing.stderr
+    assert not (tmp_path / "t1").exists()
+
+    wrong = tmp_path / "wrong-secret"
+    wrong.write_text("w" * 40 + "\n")
+    wrong.chmod(0o600)
+    unlock = _client_pki(
+        tmp_path, tmp_path / "t2", "restore", "--in", str(good), "--passphrase-file", str(passphrase),
+        "--key-secret-file", str(wrong), extra_env=no_secret,
+    )  # fmt: skip
+    assert unlock.returncode == 1
+    assert "could not unlock" in unlock.stderr
+    assert not (tmp_path / "t2").exists()
+
+    (store / "ca" / "ca.key").write_bytes((other_store / "ca" / "ca.key").read_bytes())
+    swapped = tmp_path / "swapped.gpg"
+    _ok(_client_pki(tmp_path, store, "backup", "--out", str(swapped), "--passphrase-file", str(passphrase)))
+    mismatch = _client_pki(
+        tmp_path, tmp_path / "t3", "restore", "--in", str(swapped), "--passphrase-file", str(passphrase)
+    )
+    assert mismatch.returncode == 1
+    assert "does not match" in mismatch.stderr
+    assert not (tmp_path / "t3").exists()
 
 
 def test_backup_of_an_encrypted_store_restores_it_still_encrypted(tmp_path: Path) -> None:

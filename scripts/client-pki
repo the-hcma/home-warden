@@ -36,7 +36,7 @@
 #   ./scripts/client-pki list clients
 #   ./scripts/client-pki check --quiet
 #   ./scripts/client-pki backup --out PATH --passphrase-file PATH
-#   ./scripts/client-pki restore --in PATH --passphrase-file PATH
+#   ./scripts/client-pki restore --in PATH --passphrase-file PATH [--key-secret-file PATH]
 
 set -euo pipefail
 
@@ -65,14 +65,14 @@ is_read_only_verb() {
 
 usage_backup_restore() {
   echo "usage: client-pki backup --out PATH --passphrase-file PATH" >&2
-  echo "       client-pki restore --in PATH --passphrase-file PATH" >&2
+  echo "       client-pki restore --in PATH --passphrase-file PATH [--key-secret-file PATH]" >&2
 }
 
 run_backup_or_restore() {
   local -r verb="$1"
   shift
   local archive_flag="--in"
-  local archive="" passphrase_file=""
+  local archive="" passphrase_file="" key_secret_file=""
 
   if [[ "${verb}" == backup ]]; then
     archive_flag="--out"
@@ -81,6 +81,7 @@ run_backup_or_restore() {
     case "$1" in
       "${archive_flag}") archive="$2" ;;
       --passphrase-file) passphrase_file="$2" ;;
+      --key-secret-file) key_secret_file="$2" ;;
       *) break ;;
     esac
     shift 2
@@ -98,7 +99,7 @@ run_backup_or_restore() {
     client_pki_check_store_permissions "${store}" || return 1
     client_pki_backup "${store}" "${archive}" "${passphrase_file}"
   else
-    client_pki_restore "${store}" "${archive}" "${passphrase_file}"
+    client_pki_restore "${store}" "${archive}" "${passphrase_file}" "${key_secret_file}"
   fi
 }
 

@@ -118,7 +118,7 @@ To restore, onto the same host or a replacement:
 ./scripts/client-pki restore --in client-pki-2026-09-28.tar.gpg --passphrase-file ~/.config/home-warden/pki-backup-passphrase
 ```
 
-Restore refuses to write over a store that isn't empty (move it aside first), unpacks into a private staging directory, checks that the CA key matches the CA certificate (skipped for an encrypted key, which needs the secret to read; run `./scripts/client-pki crl` afterwards to prove it), and only then moves it into place. Certificates issued before the backup keep working, revocations in it stay revoked, and new certificates continue the serial sequence. Rerun `./scripts/setup-service` afterwards so the sandbox binds and reload watch point at the restored `public/`.
+Restore refuses to write over a store that isn't empty (move it aside first), unpacks into a private staging directory, checks that the CA key matches the CA certificate (for an encrypted key it decrypts it with `--key-secret-file`, `TINY_PKI_KEY_SECRET_FILE` or the `tiny-pki-key` credential, and refuses without a secret that unlocks it), and only then moves it into place. Certificates issued before the backup keep working, revocations in it stay revoked, and new certificates continue the serial sequence. Rerun `./scripts/setup-service` afterwards so the sandbox binds and reload watch point at the restored `public/`.
 
 ### CA expiry and rotation
 
