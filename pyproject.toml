@@ -26,8 +26,8 @@ classifiers = [
 ]
 dependencies = [
     "crossplane>=0.5.8",
-    "cryptography>=50.0.1",
-    "fastapi>=0.142.1",
+    "cryptography>=50.0.2",
+    "fastapi>=0.142.2",
     "itsdangerous>=2.2.0",
     "python-pam>=2.1.0",
     "pyyaml>=6.0.3",
