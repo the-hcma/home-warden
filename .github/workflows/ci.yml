@@ -137,7 +137,7 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: latest
       - name: Python lint & format checks
@@ -151,7 +151,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: latest
       - name: Pytest
@@ -165,7 +165,7 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: latest
       - name: Gixy-Next nginx security lint
@@ -180,7 +180,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: latest
       - name: Install nginx
@@ -212,7 +212,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: latest
       - name: Install PowerDNS + GeoIP backend + dig
@@ -236,7 +236,7 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: latest
       - name: scripts/pdns-test-and-reload fail-closed ordering
