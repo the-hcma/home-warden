@@ -25,6 +25,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
+    "certifi==2026.10.19",
     "crossplane>=0.5.8",
     "cryptography>=50.0.2",
     "fastapi>=0.143.0",
