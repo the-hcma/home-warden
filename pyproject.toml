@@ -28,7 +28,7 @@ dependencies = [
     "certifi==2026.10.19",
     "crossplane>=0.5.8",
     "cryptography>=50.0.2",
-    "fastapi>=0.143.2",
+    "fastapi>=0.143.3",
     "filelock==4.2.1",
     "itsdangerous>=2.2.0",
     "python-pam>=2.1.0",
