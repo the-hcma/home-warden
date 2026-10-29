@@ -63,7 +63,7 @@ systemctl list-timers home-warden-certbot.timer home-warden-healthcheck.timer
 ~/work/ai/repository-helpers/scripts/dev/start-development --worktree <stack> --no-interactive
 ```
 
-Stacking is **`gh-stack`**; merges land via **GitHub’s merge queue** (`gh pr merge --auto --squash`). See [AGENTS.md](./AGENTS.md).
+Stacking is **`gh-stack`**; merges land via **GitHub’s merge queue** (`scripts/dev/merge-stack --pr <n>`). See [AGENTS.md](./AGENTS.md).
 
 CI validates tracked files and runs `nginx -t`.
 

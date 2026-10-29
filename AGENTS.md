@@ -251,7 +251,7 @@ nginx -t -c "$PWD/nginx/nginx.conf"
 - Never work directly on `main`. Prefer `~/work/ai/repository-helpers/scripts/dev/submit-stack` (dispatches via the stacking marker), or `gh stack init` / `gh stack add` / `gh stack submit`.
 - Keep each branch focused on one logical change.
 - **Do not** use Graphite (`gt`) or the `merge-it` label in this repo.
-- Merge path: **GitHub native merge queue** on `main` (squash). Stacked PRs must be landed via the GitHub UI stack merge (CLI `--auto` is blocked for stacks).
+- Merge only after the user explicitly confirms, and only with `${REPOSITORY_HELPERS_DIR:-$HOME/work/ai/repository-helpers}/scripts/dev/merge-stack --pr <n>` from the PR's worktree: it picks the right command for the repository's merge setup (`gh stack merge` for a stacked PR, the merge queue or auto-merge otherwise) and confirms the enqueue. For a PR in a gh stack it lands the top PR and every open PR below it, so name those PRs and get confirmation for the whole stack first. Do not call `gh pr merge` or `gh stack merge` by hand, do not add the `merge-it` label, and do not pipe the command through `tail` or `head`: read its exit status and output.
 - Follow **Conventional Commits**: `feat:`, `fix:`, `chore:`, `docs:`, `test:`, `refactor:`.
 - PR descriptions must include **Summary** and **Test plan** at minimum.
 
