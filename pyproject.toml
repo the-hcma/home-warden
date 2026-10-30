@@ -28,7 +28,7 @@ dependencies = [
     "certifi==2026.10.19",
     "crossplane>=0.5.8",
     "cryptography>=50.0.2",
-    "fastapi>=0.146.0",
+    "fastapi>=0.156.4",
     "filelock>=4.2.4",
     "itsdangerous>=2.2.0",
     "python-pam>=2.1.0",
@@ -88,7 +88,7 @@ known-first-party = ["app", "config"]
 
 [dependency-groups]
 dev = [
-    "httpx2>=2.14.0",
+    "httpx2>=2.15.1",
     "pyright>=1.1.414",
     "pytest>=9.1.1",
     "ruff>=0.17.1",
