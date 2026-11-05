@@ -91,7 +91,7 @@ dev = [
     "httpx2>=2.16.0",
     "pyright>=1.1.414",
     "pytest>=9.1.1",
-    "ruff>=0.17.2",
+    "ruff>=0.17.3",
 ]
 lint = [
     "gixy-next>=0.7.1",
