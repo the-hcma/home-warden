@@ -31,7 +31,7 @@ dependencies = [
     "fastapi>=0.162.0",
     "filelock>=4.2.4",
     "itsdangerous>=2.2.0",
-    "python-pam>=2.1.0",
+    "python-pam>=2.1.1",
     "pyyaml>=6.0.3",
     "six>=1.17.0",
     "tiny-pki[cli]==1.0.0",
@@ -90,7 +90,7 @@ known-first-party = ["app", "config"]
 dev = [
     "httpx2>=2.16.0",
     "pyright>=1.1.414",
-    "pytest>=9.1.1",
+    "pytest>=9.2.0",
     "ruff>=0.17.3",
 ]
 lint = [
