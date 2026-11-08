@@ -140,6 +140,7 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: latest
+      - uses: the-hcma/repository-helpers/actions/setup-tmp-layout@bfee0e1f2d682e83c6207a0d6a0f7feefa576fd8
       - name: Python lint & format checks
         run: bash .github/ci/python-static
 
@@ -154,6 +155,7 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: latest
+      - uses: the-hcma/repository-helpers/actions/setup-tmp-layout@bfee0e1f2d682e83c6207a0d6a0f7feefa576fd8
       - name: Pytest
         run: bash .github/ci/pytest
 
@@ -168,6 +170,7 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: latest
+      - uses: the-hcma/repository-helpers/actions/setup-tmp-layout@bfee0e1f2d682e83c6207a0d6a0f7feefa576fd8
       - name: Gixy-Next nginx security lint
         run: bash .github/ci/nginx-security-lint
 
@@ -183,6 +186,7 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: latest
+      - uses: the-hcma/repository-helpers/actions/setup-tmp-layout@bfee0e1f2d682e83c6207a0d6a0f7feefa576fd8
       - name: Install nginx
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -200,7 +204,9 @@ jobs:
       - name: tiny-pki client-cert mTLS end to end (real nginx)
         env:
           HOME_WARDEN_REQUIRE_NGINX: "1"
-        run: uv run pytest tests/python/test_client_pki.py -v
+        run: |
+          layout="$REPOSITORY_HELPERS_DIR/scripts/dev/with-tmp-layout"
+          "$layout" uv -- "$layout" pytest -- uv run pytest tests/python/test_client_pki.py -v
 
   dns-catalog-validate:
     name: DNS catalog validate
@@ -215,6 +221,7 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: latest
+      - uses: the-hcma/repository-helpers/actions/setup-tmp-layout@bfee0e1f2d682e83c6207a0d6a0f7feefa576fd8
       - name: Install PowerDNS + GeoIP backend + dig
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -239,6 +246,7 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: latest
+      - uses: the-hcma/repository-helpers/actions/setup-tmp-layout@bfee0e1f2d682e83c6207a0d6a0f7feefa576fd8
       - name: scripts/pdns-test-and-reload fail-closed ordering
         run: bash .github/ci/pdns-reload-gate-test
 
@@ -261,6 +269,8 @@ jobs:
       - uses: the-hcma/repository-helpers/actions/setup-pnpm-corepack@999844287d1b2684baa91c3e8a5b62eda9f4915e
         with:
           working-directory: web
+
+      - uses: the-hcma/repository-helpers/actions/setup-tmp-layout@bfee0e1f2d682e83c6207a0d6a0f7feefa576fd8
 
       - name: Web (typecheck + build)
         run: bash .github/ci/web-build
