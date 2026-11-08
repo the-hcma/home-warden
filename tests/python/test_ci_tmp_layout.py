@@ -7,6 +7,7 @@ unchanged on a host that has no clone. A fake helper stands in for the real one.
 
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -40,8 +41,20 @@ def _fake_helpers(tmp_path: Path) -> Path:
     helpers = tmp_path / "helpers"
     (helpers / "scripts" / "dev").mkdir(parents=True)
     fake = helpers / "scripts" / "dev" / "with-tmp-layout"
-    # Record the tool, then run the rest of the command with CI_TMP_LAYOUT already set, as the real helper does.
-    fake.write_text('#!/usr/bin/env bash\nprintf \'%s\\n\' "$1" >> "$TMPDIR/layout-tools"\nshift 2\nexit 0\n')
+    # Like the real helper: take `<tool> -- <command...>`, refuse a missing separator, and run the command. The
+    # innermost command is the wrapper re-entering itself; record the recursion guard it would see instead of
+    # running the real work.
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf \'%s\\n\' "tool=$1" >> "$TMPDIR/layout-calls"\n'
+        '[[ "$2" == -- ]] || { echo "missing -- separator" >&2; exit 64; }\n'
+        "shift 2\n"
+        'if [[ "$1" == bash ]]; then\n'
+        '  printf \'%s\\n\' "guard=${CI_TMP_LAYOUT:-}" >> "$TMPDIR/layout-calls"\n'
+        "  exit 0\n"
+        "fi\n"
+        'exec "$@"\n'
+    )
     fake.chmod(0o755)
     return helpers
 
@@ -64,7 +77,9 @@ def test_ci_without_the_layout_helper_fails_with_a_pointer_to_the_action(tmp_pat
 
 
 @pytest.mark.parametrize("wrapper", sorted(WRAPPERS))
-def test_the_wrapper_hands_its_run_to_the_layout_helper_for_its_outer_tool(tmp_path: Path, wrapper: str) -> None:
+def test_the_wrapper_runs_itself_again_through_each_tool_layout_with_the_guard_set(
+    tmp_path: Path, wrapper: str
+) -> None:
     helpers = _fake_helpers(tmp_path)
     result = subprocess.run(
         ["bash", str(CI_DIR / wrapper)],
@@ -75,8 +90,30 @@ def test_the_wrapper_hands_its_run_to_the_layout_helper_for_its_outer_tool(tmp_p
         timeout=60,
         check=False,
     )
-    assert result.returncode == 0
-    assert (tmp_path / "layout-tools").read_text().split()[:1] == [WRAPPERS[wrapper][0]]
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "layout-calls").read_text().split()
+    assert calls == [f"tool={tool}" for tool in WRAPPERS[wrapper]] + ["guard=1"]
+
+
+@pytest.mark.parametrize("wrapper", sorted(WRAPPERS))
+def test_a_wrapper_already_inside_the_layout_does_not_enter_it_again(tmp_path: Path, wrapper: str) -> None:
+    helpers = _fake_helpers(tmp_path)
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    for tool in ("bash", "uv", "pnpm"):
+        (stubs / tool).write_text("#!/bin/sh\nexit 0\n")
+        (stubs / tool).chmod(0o755)
+    env = _env(tmp_path, helpers, CI_TMP_LAYOUT="1", PATH=f"{stubs}:{os.environ['PATH']}")
+    subprocess.run(
+        [shutil.which("bash") or "/bin/bash", str(CI_DIR / wrapper)],
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert not (tmp_path / "layout-calls").exists()
 
 
 @pytest.mark.parametrize("wrapper", sorted(WRAPPERS))
