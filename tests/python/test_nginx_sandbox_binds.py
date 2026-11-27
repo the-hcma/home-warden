@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 LIB = Path(__file__).resolve().parents[2] / "scripts" / "lib" / "nginx-sandbox-binds"
-COVERED = ["/home/op/home/nginx/server", "/home/op/work/home-warden/conf", "/home/op/scratch/home-warden"]
+COVERED = ["/home/op/home/nginx/conf", "/home/op/work/home-warden/conf", "/home/op/scratch/home-warden"]
 
 
 def test_ca_bundles_and_crl_bind_their_directory() -> None:
@@ -135,9 +135,9 @@ def test_reload_watch_dirs_find_directives_spanning_lines_or_after_a_brace() -> 
 
 def test_reload_watch_dirs_skip_only_exactly_watched_dirs() -> None:
     dirs, _ = _watch_dirs(
-        "ssl_crl /home/op/home/nginx/server/crl.pem;\nssl_crl /home/op/home/nginx/server/pki/crl.pem;\n"
+        "ssl_crl /home/op/home/nginx/conf/crl.pem;\nssl_crl /home/op/home/nginx/conf/pki/crl.pem;\n"
     )
-    assert dirs == ["/home/op/home/nginx/server/pki"]
+    assert dirs == ["/home/op/home/nginx/conf/pki"]
 
 
 def test_reload_watch_dirs_warn_on_paths_systemd_would_misparse() -> None:
@@ -202,7 +202,7 @@ def _watch_dirs(dump: str) -> tuple[list[str], str]:
             "bash",
             str(LIB),
             dump,
-            "/home/op/home/nginx/server/",
+            "/home/op/home/nginx/conf/",
         ],
         capture_output=True,
         check=True,

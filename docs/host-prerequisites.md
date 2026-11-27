@@ -21,8 +21,8 @@ home-warden only ever acts on the one host it has been explicitly pinned to (see
 3. **Install and start:**
 
    ```bash
-   # Optional: set conf path if not at ~/home/nginx/server/nginx.conf
-   # export HOME_NGINX_CONF=/path/to/nginx/server/nginx.conf
+   # Optional: set conf path if not at ~/home/nginx/conf/nginx.conf
+   # export HOME_NGINX_CONF=/path/to/nginx/conf/nginx.conf
    ./scripts/setup-service --confirm-host   # or omit and answer the interactive prompt
    ```
 
@@ -140,7 +140,7 @@ tail --follow=name --retry ~/scratch/home-warden/healthcheck.log
 | Path | Role |
 | --- | --- |
 | Clone of this repository | Units, scripts, local `conf/` |
-| Nginx config path | Pointed at by `HOME_NGINX_CONF` (default `~/home/nginx/server/nginx.conf`) |
+| Nginx config path | Pointed at by `HOME_NGINX_CONF` (default `~/home/nginx/conf/nginx.conf`) |
 
 ## Service catalog (design in progress — not yet consumed by anything)
 
@@ -290,7 +290,7 @@ nginx rereads a CRL or client CA bundle only on reload, so a revoke has to trigg
 
 ```bash
 systemctl status home-warden-reload.path
-# Edit ~/home/nginx/server/nginx.conf (valid) → expect an entry in:
+# Edit ~/home/nginx/conf/nginx.conf (valid) → expect an entry in:
 tail --follow=name --retry ~/scratch/home-warden/nginx-test-and-reload.log
 # Break syntax on purpose → log shows FAIL; live traffic keeps the last good conf
 # Manual dry-run of the helper (no path unit):

@@ -102,11 +102,13 @@ resolve_home_nginx_conf() {
     printf '%s\n' "${HOME_NGINX_CONF}"
     return 0
   fi
-  local -r candidate="${HOME}/home/nginx/server/nginx.conf"
-  if [[ -f "${candidate}" ]]; then
-    printf '%s\n' "${candidate}"
-    return 0
-  fi
+  local candidate
+  for candidate in "${HOME}/home/nginx/conf/nginx.conf" "${HOME}/home/nginx/server/nginx.conf"; do
+    if [[ -f "${candidate}" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
   return 1
 }
 
@@ -280,7 +282,7 @@ check_modules_enabled() {
 check_home_conf() {
   local conf
   if ! conf="$(resolve_home_nginx_conf)"; then
-    record fail home_conf "thehcma/home nginx/server/nginx.conf not found (set HOME_NGINX_CONF)"
+    record fail home_conf "thehcma/home nginx/conf/nginx.conf not found (set HOME_NGINX_CONF)"
     HOME_NGINX_CONF=""
     return
   fi

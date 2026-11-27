@@ -5,7 +5,7 @@ Usage:
 
 Read-only. `--certbot-dry-run` adds `cert-renewer --dry-run`, which needs a pinned host and talks to Let's
 Encrypt staging (see app.cutover_preflight). Reads the served conf from $HOME_NGINX_CONF
-(default ~/home/nginx/server/nginx.conf), the catalog from $SERVICES_JSON_PATH, and the same conf/ paths the
+(default ~/home/nginx/conf/nginx.conf), the catalog from $SERVICES_JSON_PATH, and the same conf/ paths the
 other tools use. Prints ok/WARN/FAIL per check, each failure with what to fix.
 
 Exit: 0 no failures (warnings allowed), 1 any failure, 2 usage error.

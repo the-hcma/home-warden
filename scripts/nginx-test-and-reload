@@ -52,7 +52,10 @@ log() {
 }
 
 if [[ -z "${home_nginx_conf}" ]]; then
-  if [[ -f "${HOME}/home/nginx/server/nginx.conf" ]]; then
+  if [[ -f "${HOME}/home/nginx/conf/nginx.conf" ]]; then
+    home_nginx_conf="${HOME}/home/nginx/conf/nginx.conf"
+  elif [[ -f "${HOME}/home/nginx/server/nginx.conf" ]]; then
+    # former directory name in thehcma/home, still read so an unrenamed checkout keeps working
     home_nginx_conf="${HOME}/home/nginx/server/nginx.conf"
   else
     log "ERROR: set HOME_NGINX_CONF"

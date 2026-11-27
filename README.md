@@ -35,8 +35,8 @@ The longer-term goal: a one-stop front door for all home services, local and rem
 ## Install (service host)
 
 ```bash
-# Config source of truth: thehcma/home → nginx/server/nginx.conf
-# Optional: HOME_NGINX_CONF=/path/to/nginx/server/nginx.conf
+# Config source of truth: thehcma/home → nginx/conf/nginx.conf
+# Optional: HOME_NGINX_CONF=/path/to/nginx/conf/nginx.conf
 ./scripts/bootstrap                # verify prerequisites
 ./scripts/bootstrap --fix-packages # optional: sudo apt-get install -y missing packages
 ./scripts/bootstrap --fix          # optional: scratch, dhparam, staging certs
