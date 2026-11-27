@@ -24,6 +24,7 @@ Environment=HOME=@@HOME_DIR@@
 # pdns_control as root. @@HOME_DIR@@/.local/bin first: the astral.sh uv
 # installer's default per-user location, as in home-warden-catalog-heal.service.
 Environment=OWNER=@@OWNER@@
+Environment=SCRATCH_DIR=@@SCRATCH_DIR@@
 Environment=PDNS_ZONES_YAML=@@PDNS_ZONES_YAML@@
 Environment=PATH=@@HOME_DIR@@/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 WorkingDirectory=@@REPO_DIR@@

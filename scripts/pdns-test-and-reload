@@ -28,10 +28,24 @@
 #   PDNS_AUTH_FORWARDER    authoritative IPv4-address:port whose SOA answers
 #                    the recursor's must match, also suggested as the
 #                    forwarder in a missing-zone message (default: 127.0.0.1:853)
+#   PDNS_RECURSOR_YAML  the recursor's main config (default:
+#                    /etc/powerdns/recursor.yml). When its content, or that of
+#                    recursor.d/*.yml beside it, changed since the last run,
+#                    the file is validated with `pdns_recursor --config=check`
+#                    and the recursor is restarted (a reload applies forward
+#                    zones only). This step runs whenever the path unit
+#                    fires, which watches the directory of zones.yml: it
+#                    applies a recursor.yml edit only when that file lives in
+#                    (or is a symlink into) that directory
+#   SCRATCH_DIR      where the fingerprint state file
+#                    pdns-recursor-config.sha256 lives (default:
+#                    ~/scratch/home-warden)
 #
 # Exit:
 #   0 — syntax OK and reload succeeded (or service inactive: skip reload)
-#   1 — pdns_control reload/rediscover or rec_control reload-zones failed
+#   1 — pdns_control reload/rediscover or rec_control reload-zones failed, or
+#       the recursor config check rejected recursor.yml, or restarting the
+#       recursor failed or it did not answer its control socket afterwards
 #   2 — usage / missing file / syntax check failed / unknown unit
 #   3 — reloaded, but the recursor does not answer for one or more zones, or
 #       that can't be verified (no dig)
@@ -60,6 +74,9 @@ source "${script_dir}/lib/host-guard"
 if ! hw_host_guard_enforce "pdns-test-and-reload"; then
   exit 1
 fi
+
+# shellcheck source=scripts/lib/config-fingerprint
+source "${script_dir}/lib/config-fingerprint"
 
 pdns_zones_yaml="${PDNS_ZONES_YAML:-}"
 readonly pdns_zones_yaml
@@ -236,6 +253,19 @@ fi
 if ! systemctl is-active --quiet "${recursor_service}"; then
   log "${recursor_service} not active — skip recursor reload"
   exit 0
+fi
+
+# reload-zones applies forward zones only. The rest of recursor.yml (access list, listen addresses, ...) needs a
+# restart, so a changed recursor config is validated with `pdns_recursor --config=check` (fail closed: an invalid
+# file is never restarted into) and then the recursor is restarted. No saved fingerprint means first run: record only.
+recursor_yaml="${PDNS_RECURSOR_YAML:-/etc/powerdns/recursor.yml}"
+readonly recursor_yaml
+recursor_state="${SCRATCH_DIR:-${HOME}/scratch/home-warden}/pdns-recursor-config.sha256"
+readonly recursor_state
+HW_STATE_OWNER="${owner}"
+export HW_STATE_OWNER
+if ! hw_recursor_restart_if_changed "${recursor_yaml}" "${recursor_state}" "${recursor_service}"; then
+  exit 1
 fi
 
 # reload-zones rereads forward_zones from the recursor's config, so a zone the

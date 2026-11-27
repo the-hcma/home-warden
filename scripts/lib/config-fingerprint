@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# Fingerprints of the config that a reload cannot apply, so the reload scripts know when a restart is needed.
+#
+# nginx: a reload (HUP) re-reads the file nginx was started with, but it cannot change the listening sockets or the -c
+# path of the running master. The recursor: `rec_control reload-zones` applies forward zones only, not the rest of
+# recursor.yml (access list, listen addresses, ...).
+#
+# State lives in a file per fingerprint. No state file means "first run": record, do not restart.
+
+# hw_fingerprint_listens -- reads `nginx -T` output (the whole effective config, included files too) on stdin and prints the
+# sha256 of the set of PRIVILEGED listen addresses in it (port below 1024, no unix sockets). Only those matter here:
+# nginx runs unprivileged and gets ports 80 and 443 as inherited fds from home-warden.socket, which only setup-service
+# can change, while any other port nginx opens itself on a reload. It is a set (`sort -u`): every vhost repeats its own
+# `listen 443 ssl;`, and flags such as ssl or default_server are not part of the address. A config without any such
+# listen is valid and hashes the empty set (grep's exit 1 must not abort a caller running under pipefail).
+hw_fingerprint_listens() {
+  { grep -E '^[[:space:]]*listen[[:space:]]' || true; } \
+    | awk '{ spec = $2; sub(/;$/, "", spec); if (spec ~ /^unix:/) next; n = split(spec, parts, ":"); port = parts[n];
+             if (port ~ /^[0-9]+$/ && port + 0 < 1024) print spec }' \
+    | sort -u | sha256sum | cut -d' ' -f1
+}
+
+# hw_fingerprint_files <file>... -- sha256 over the contents of every given file that exists (symlinks followed)
+hw_fingerprint_files() {
+  local f
+  for f in "$@"; do
+    if [[ -f "${f}" ]]; then
+      printf '%s\n' "${f##*/}"
+      cat -- "${f}"
+    fi
+  done | sha256sum | cut -d' ' -f1
+}
+
+# hw_fingerprint_changed <state-file> <fingerprint> -- 0 when a saved fingerprint exists and differs
+hw_fingerprint_changed() {
+  local -r state="$1"
+  local -r now="$2"
+  local saved
+
+  [[ -f "${state}" ]] || return 1
+  saved="$(<"${state}")"
+  [[ "${saved}" != "${now}" ]]
+}
+
+# hw_fingerprint_save <state-file> <fingerprint>
+hw_fingerprint_save() {
+  local dir
+  local created=0
+
+  dir="$(dirname "$1")"
+  if [[ ! -d "${dir}" ]]; then
+    mkdir -p "${dir}" || return 1
+    created=1
+  fi
+  # explicit: inside a caller's `||` list errexit is off, and a failed write must not look like success
+  printf '%s\n' "$2" >"$1" || return 1
+  # a root-run reload script must not leave a root-owned file, or a root-owned scratch directory it just created,
+  # where the operator's own tools (setup-service) have to write
+  if [[ "${EUID}" -eq 0 && -n "${HW_STATE_OWNER:-}" ]]; then
+    chown "${HW_STATE_OWNER}" "$1" 2>/dev/null || true
+    if ((created)); then chown "${HW_STATE_OWNER}" "${dir}" 2>/dev/null || true; fi
+  fi
+}
+
+# hw_nginx_record_listens <scratch-dir> -- reads `nginx -T` output on stdin (the caller runs it with whatever privilege the
+# served config needs, e.g. `sudo nginx -T`) and records its listen fingerprint as applied. setup-service calls this after
+# it restarted the socket and the service, which is what clears the reload script's listen warning. A dump without a
+# "configuration file" header is a failed `nginx -T` (an unreadable cert, no sudo, ...): nothing is recorded, because
+# the hash of an empty listen set would make the warning repeat forever. Returns 1 then.
+hw_nginx_record_listens() {
+  local dump
+
+  dump="$(cat)"
+  if [[ "${dump}" != *"# configuration file "* ]]; then
+    return 1
+  fi
+  hw_fingerprint_save "$1/nginx-listens.sha256" "$(hw_fingerprint_listens <<<"${dump}")"
+}
+
+# hw_nginx_master_conf <main-pid> -- the -c path the running nginx master was started with (empty when unknown)
+hw_nginx_master_conf() {
+  local -r pid="$1"
+
+  [[ -n "${pid}" && "${pid}" != 0 ]] || return 0
+  ps -ww -o args= -p "${pid}" 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "-c") { print $(i + 1); exit } }' || true
+}
+
+# hw_unit_nginx_conf <unit> -- the -c path in the unit's ExecStart (what `systemctl restart` would start nginx with)
+hw_unit_nginx_conf() {
+  # `|| true`: callers run under `set -euo pipefail`, and a failing `systemctl show` must not abort a reload nginx -t passed
+  systemctl show --property=ExecStart --value "$1" 2>/dev/null | sed -nE 's/.* -c ([^ ;]+).*/\1/p' | head -n1 || true
+}
+
+# hw_recursor_restart_if_changed <recursor.yml> <state-file> <unit> -- restart the recursor when its config changed.
+# Needs the caller's `log`. Returns 0 (nothing to do, first run recorded, or restarted) or 1 (invalid config, or the
+# restart failed; nothing is restarted into an invalid file and the saved fingerprint stays, so the next run retries).
+hw_recursor_restart_if_changed() {
+  local -r yaml="$1"
+  local -r state="$2"
+  local -r unit="$3"
+  local conf_dir fp
+
+  [[ -e "${yaml}" ]] || return 0
+  conf_dir="$(dirname "${yaml}")"
+  fp="$(hw_fingerprint_files "$(readlink -f "${yaml}")" "${conf_dir}"/recursor.d/*.yml)"
+  if hw_fingerprint_changed "${state}" "${fp}"; then
+    log "recursor config changed — validating before a restart (a reload cannot apply it)"
+    if ! pdns_recursor --config=check --config-dir="${conf_dir}" >/dev/null 2>&1; then
+      log "FAIL: pdns_recursor --config=check rejected ${yaml} — recursor not restarted"
+      return 1
+    fi
+    log "restarting ${unit}"
+    if ! systemctl restart "${unit}"; then
+      log "FAIL: restart of ${unit} failed"
+      return 1
+    fi
+    hw_fingerprint_save "${state}" "${fp}"
+    # the control socket appears a moment after the restart; reload-zones needs it
+    for _ in $(seq 1 30); do
+      if rec_control ping >/dev/null 2>&1; then
+        log "recursor restart OK"
+        return 0
+      fi
+      sleep "${HW_RECURSOR_PING_WAIT:-0.5}"
+    done
+    log "FAIL: ${unit} was restarted but did not answer its control socket"
+    return 1
+  elif [[ ! -f "${state}" ]]; then
+    hw_fingerprint_save "${state}" "${fp}"
+    log "recorded the recursor config fingerprint (first run, no restart)"
+  fi
+  return 0
+}
