@@ -134,9 +134,7 @@ def test_reload_watch_dirs_find_directives_spanning_lines_or_after_a_brace() -> 
 
 
 def test_reload_watch_dirs_skip_only_exactly_watched_dirs() -> None:
-    dirs, _ = _watch_dirs(
-        "ssl_crl /home/op/home/nginx/conf/crl.pem;\nssl_crl /home/op/home/nginx/conf/pki/crl.pem;\n"
-    )
+    dirs, _ = _watch_dirs("ssl_crl /home/op/home/nginx/conf/crl.pem;\nssl_crl /home/op/home/nginx/conf/pki/crl.pem;\n")
     assert dirs == ["/home/op/home/nginx/conf/pki"]
 
 
