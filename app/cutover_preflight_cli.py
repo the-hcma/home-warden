@@ -5,7 +5,7 @@ Usage:
 
 Read-only. `--certbot-dry-run` adds `cert-renewer --dry-run`, which needs a pinned host and talks to Let's
 Encrypt staging (see app.cutover_preflight). Reads the served conf from $HOME_NGINX_CONF
-(default ~/home/nginx/server/nginx.conf), the catalog from $SERVICES_JSON_PATH, and the same conf/ paths the
+(default ~/home/nginx/conf/nginx.conf), the catalog from $SERVICES_JSON_PATH, and the same conf/ paths the
 other tools use. Prints ok/WARN/FAIL per check, each failure with what to fix.
 
 Exit: 0 no failures (warnings allowed), 1 any failure, 2 usage error.
@@ -43,6 +43,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def default_nginx_conf() -> Path:
+    """HOME_NGINX_CONF, else the config repository's nginx/conf, else its former directory nginx/server."""
+    override = os.environ.get("HOME_NGINX_CONF")
+    if override:
+        return Path(override)
+    current = Path.home() / "home" / "nginx" / "conf" / "nginx.conf"
+    former = Path.home() / "home" / "nginx" / "server" / "nginx.conf"
+    return former if not current.is_file() and former.is_file() else current
+
+
 def main() -> int:
     args = build_arg_parser().parse_args()
     services = services_json_path()
@@ -51,9 +61,7 @@ def main() -> int:
     except (FileNotFoundError, ValueError):
         catalog = {}
     ctx = Context(
-        nginx_conf=Path(
-            os.environ.get("HOME_NGINX_CONF", str(Path.home() / "home" / "nginx" / "server" / "nginx.conf"))
-        ),
+        nginx_conf=default_nginx_conf(),
         repo_dir=REPO_ROOT,
         certbot_domains=certbot_domains_path(),
         cloudflare_credentials=cloudflare_credentials_path(),

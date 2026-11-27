@@ -19,7 +19,7 @@
 #   ./scripts/setup-service [--status] [--dry-run]
 #   ./scripts/setup-service --confirm-host   # first-time pin, non-interactive
 #   ./scripts/setup-service --repin-host     # move the pin to this host
-#   HOME_NGINX_CONF=/path/to/home/nginx/server/nginx.conf ./scripts/setup-service
+#   HOME_NGINX_CONF=/path/to/home/nginx/conf/nginx.conf ./scripts/setup-service
 #   PDNS_ZONES_YAML=/path/to/home/dns/zones.yml ./scripts/setup-service
 #   SERVICES_JSON_PATH=/path/to/services.json ./scripts/setup-service
 #
@@ -134,7 +134,10 @@ preview_helper_dest="/usr/local/sbin/home-warden-nginx-test-candidate"
 readonly preview_helper_dest
 preview_helper_source="${repo_dir}/scripts/nginx-test-candidate"
 readonly preview_helper_source
-readonly default_home_nginx_conf="${HOME}/home/nginx/server/nginx.conf"
+# nginx/conf is the current directory name in thehcma/home; nginx/server is the former one, still read so a
+# checkout that has not been renamed keeps working.
+readonly default_home_nginx_conf="${HOME}/home/nginx/conf/nginx.conf"
+readonly legacy_home_nginx_conf="${HOME}/home/nginx/server/nginx.conf"
 readonly default_pdns_zones_yaml="${HOME}/home/dns/zones.yml"
 readonly default_services_json="${HOME}/.config/home-warden/services.json"
 
@@ -380,6 +383,10 @@ resolve_home_nginx_conf() {
   fi
   if [[ -f "${default_home_nginx_conf}" ]]; then
     printf '%s\n' "${default_home_nginx_conf}"
+    return 0
+  fi
+  if [[ -f "${legacy_home_nginx_conf}" ]]; then
+    printf '%s\n' "${legacy_home_nginx_conf}"
     return 0
   fi
   return 1
@@ -1321,6 +1328,31 @@ nginx_master_ids() {
   ps -o uid=,gid= -p "${main_pid}" 2>/dev/null | awk '{ print $1 ":" $2 }' || true
 }
 
+# The nginx.conf path after "-c" on a command line read from stdin (paths here contain no spaces).
+nginx_conf_from_args() {
+  awk '{ for (i = 1; i < NF; i++) if ($i == "-c") { print $(i + 1); exit } }'
+}
+
+# The nginx.conf path the running nginx master was started with; empty when there is none.
+nginx_master_conf() {
+  local main_pid
+
+  main_pid="$(systemctl show --property=MainPID --value home-warden.service 2>/dev/null || true)"
+  if [[ -z "${main_pid}" || "${main_pid}" == 0 ]]; then
+    return 0
+  fi
+  # -ww: never truncate to COLUMNS, or a cut-off path would look like a changed config and force a restart
+  ps -ww -o args= -p "${main_pid}" 2>/dev/null | nginx_conf_from_args || true
+}
+
+# True when a running nginx master was started with a different -c path than the one now selected.
+nginx_conf_changed() {
+  local running
+
+  running="$(nginx_master_conf)"
+  [[ -n "${running}" && "${running}" != "${home_nginx_conf}" ]]
+}
+
 # uid:gid home-warden.service should run as (SERVICE_USER / SERVICE_GROUP).
 service_account_ids() {
   local gid
@@ -1348,7 +1380,7 @@ main() {
   ensure_host_config
 
   if ! resolved="$(resolve_home_nginx_conf)"; then
-    echo "ERROR: set HOME_NGINX_CONF to thehcma/home nginx/server/nginx.conf" >&2
+    echo "ERROR: set HOME_NGINX_CONF to thehcma/home nginx/conf/nginx.conf" >&2
     exit 1
   fi
   home_nginx_conf="${resolved}"
@@ -1473,6 +1505,11 @@ main() {
     if ((on_deploy_rc == 0)); then
       # restart (not reload): unit Environment=DEPLOYED_COMMIT=… only refreshes on a new process
       echo "Restarting home-warden.service (on-deploy changed)..."
+      run sudo systemctl restart home-warden.service
+    elif nginx_conf_changed; then
+      # a HUP reload re-reads the file nginx was started with, so a changed -c path (and the sandbox binds
+      # derived from it) only takes effect on a restart, even when the deployed commit did not change
+      echo "Restarting home-warden.service (nginx runs ${home_nginx_conf} now, was $(nginx_master_conf))..."
       run sudo systemctl restart home-warden.service
     elif [[ "$(nginx_master_ids)" != "$(service_account_ids)" ]]; then
       echo "Restarting home-warden.service (nginx not yet running as ${service_user}:${service_group})..."

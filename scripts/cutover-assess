@@ -17,7 +17,15 @@ note_fail() { echo "FAIL: $*"; fail=1; }
 ok() { echo "ok:   $*"; }
 warn() { echo "WARN: $*"; }
 
-conf_path() { echo "${HOME_NGINX_CONF:-$HOME/home/nginx/server/nginx.conf}"; }
+conf_path() {
+  if [[ -n "${HOME_NGINX_CONF:-}" ]]; then
+    echo "${HOME_NGINX_CONF}"
+  elif [[ -f "$HOME/home/nginx/conf/nginx.conf" ]]; then
+    echo "$HOME/home/nginx/conf/nginx.conf"
+  else
+    echo "$HOME/home/nginx/server/nginx.conf"
+  fi
+}
 
 preflight() {
   local conf repo_dir cmd url hostport host port path dom
