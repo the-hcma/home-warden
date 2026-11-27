@@ -290,7 +290,8 @@ nginx rereads a CRL or client CA bundle only on reload, so a revoke has to trigg
 
 ```bash
 systemctl status home-warden-reload.path
-# Edit ~/home/nginx/conf/nginx.conf (valid) → expect an entry in:
+# Edit the file HOME_NGINX_CONF selects (~/home/nginx/conf/nginx.conf, or ~/home/nginx/server/nginx.conf on a
+# checkout that has not been renamed) with a valid change → expect an entry in:
 tail --follow=name --retry ~/scratch/home-warden/nginx-test-and-reload.log
 # Break syntax on purpose → log shows FAIL; live traffic keeps the last good conf
 # Manual dry-run of the helper (no path unit):

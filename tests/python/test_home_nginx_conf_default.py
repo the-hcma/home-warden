@@ -73,5 +73,43 @@ def test_each_script_prefers_the_new_directory_in_its_source(name) -> None:
 
 
 def test_the_documentation_names_the_new_directory_only() -> None:
-    for name in ["README.md", "docs/host-prerequisites.md", "docs/architecture-socket-activation.md"]:
+    for name in ["README.md", "docs/architecture-socket-activation.md"]:
         assert "nginx/server" not in (ROOT / name).read_text(), name
+
+
+def _setup_service_function(name: str) -> str:
+    source = (ROOT / "scripts/setup-service").read_text()
+    start = source.index(f"{name}() {{")
+    return source[start : source.index("\n}\n", start) + 3]
+
+
+def test_the_conf_path_is_read_from_the_nginx_command_line() -> None:
+    function = _setup_service_function("nginx_conf_from_args")
+    line = "nginx: master process /usr/sbin/nginx -p /s/ -c /home/u/home/nginx/conf/nginx.conf -g daemon off;"
+    out = subprocess.run(
+        ["bash", "-c", function + f'\necho "{line}" | nginx_conf_from_args'], capture_output=True, text=True
+    )
+    assert out.stdout.strip() == "/home/u/home/nginx/conf/nginx.conf"
+
+
+def _conf_changed(running: str, selected: str) -> bool:
+    function = _setup_service_function("nginx_conf_changed")
+    script = (
+        f'nginx_master_conf() {{ echo "{running}"; }}\nhome_nginx_conf="{selected}"\n{function}\nnginx_conf_changed'
+    )
+    return subprocess.run(["bash", "-c", script]).returncode == 0
+
+
+def test_a_different_running_conf_path_counts_as_changed() -> None:
+    assert _conf_changed("/h/home/nginx/server/nginx.conf", "/h/home/nginx/conf/nginx.conf")
+
+
+def test_the_same_or_an_unknown_running_conf_path_does_not() -> None:
+    assert not _conf_changed("/h/home/nginx/conf/nginx.conf", "/h/home/nginx/conf/nginx.conf")
+    assert not _conf_changed("", "/h/home/nginx/conf/nginx.conf")
+
+
+def test_the_conf_path_check_runs_before_the_account_check_in_the_restart_block() -> None:
+    text = (ROOT / "scripts/setup-service").read_text()
+    block = text[text.index("if systemctl is-active --quiet home-warden.service") :]
+    assert block.index("elif nginx_conf_changed; then") < block.index('elif [[ "$(nginx_master_ids)"')

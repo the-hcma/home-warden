@@ -1328,6 +1328,30 @@ nginx_master_ids() {
   ps -o uid=,gid= -p "${main_pid}" 2>/dev/null | awk '{ print $1 ":" $2 }' || true
 }
 
+# The nginx.conf path after "-c" on a command line read from stdin (paths here contain no spaces).
+nginx_conf_from_args() {
+  awk '{ for (i = 1; i < NF; i++) if ($i == "-c") { print $(i + 1); exit } }'
+}
+
+# The nginx.conf path the running nginx master was started with; empty when there is none.
+nginx_master_conf() {
+  local main_pid
+
+  main_pid="$(systemctl show --property=MainPID --value home-warden.service 2>/dev/null || true)"
+  if [[ -z "${main_pid}" || "${main_pid}" == 0 ]]; then
+    return 0
+  fi
+  ps -o args= -p "${main_pid}" 2>/dev/null | nginx_conf_from_args || true
+}
+
+# True when a running nginx master was started with a different -c path than the one now selected.
+nginx_conf_changed() {
+  local running
+
+  running="$(nginx_master_conf)"
+  [[ -n "${running}" && "${running}" != "${home_nginx_conf}" ]]
+}
+
 # uid:gid home-warden.service should run as (SERVICE_USER / SERVICE_GROUP).
 service_account_ids() {
   local gid
@@ -1480,6 +1504,11 @@ main() {
     if ((on_deploy_rc == 0)); then
       # restart (not reload): unit Environment=DEPLOYED_COMMIT=… only refreshes on a new process
       echo "Restarting home-warden.service (on-deploy changed)..."
+      run sudo systemctl restart home-warden.service
+    elif nginx_conf_changed; then
+      # a HUP reload re-reads the file nginx was started with, so a changed -c path (and the sandbox binds
+      # derived from it) only takes effect on a restart, even when the deployed commit did not change
+      echo "Restarting home-warden.service (nginx runs ${home_nginx_conf} now, was $(nginx_master_conf))..."
       run sudo systemctl restart home-warden.service
     elif [[ "$(nginx_master_ids)" != "$(service_account_ids)" ]]; then
       echo "Restarting home-warden.service (nginx not yet running as ${service_user}:${service_group})..."
