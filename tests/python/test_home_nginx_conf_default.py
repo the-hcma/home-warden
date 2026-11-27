@@ -113,3 +113,8 @@ def test_the_conf_path_check_runs_before_the_account_check_in_the_restart_block(
     text = (ROOT / "scripts/setup-service").read_text()
     block = text[text.index("if systemctl is-active --quiet home-warden.service") :]
     assert block.index("elif nginx_conf_changed; then") < block.index('elif [[ "$(nginx_master_ids)"')
+
+
+def test_the_running_command_line_is_read_without_truncation() -> None:
+    function = _setup_service_function("nginx_master_conf")
+    assert "ps -ww -o args=" in function

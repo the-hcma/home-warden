@@ -1341,7 +1341,8 @@ nginx_master_conf() {
   if [[ -z "${main_pid}" || "${main_pid}" == 0 ]]; then
     return 0
   fi
-  ps -o args= -p "${main_pid}" 2>/dev/null | nginx_conf_from_args || true
+  # -ww: never truncate to COLUMNS, or a cut-off path would look like a changed config and force a restart
+  ps -ww -o args= -p "${main_pid}" 2>/dev/null | nginx_conf_from_args || true
 }
 
 # True when a running nginx master was started with a different -c path than the one now selected.
