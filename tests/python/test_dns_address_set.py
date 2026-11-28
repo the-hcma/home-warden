@@ -74,6 +74,13 @@ def test_a_duplicate_of_a_wanted_address_is_named_as_a_duplicate_and_not_deleted
     assert fake.writes() == []
 
 
+@pytest.mark.parametrize("info", [{"total_pages": None}, {}, None])
+def test_a_full_page_without_a_page_count_is_treated_as_truncated(info) -> None:
+    full = [{"id": f"r{i}"} for i in range(100)]
+    assert dns_address_set._truncated({"result": full, "result_info": info}) is True
+    assert dns_address_set._truncated({"result": full[:99], "result_info": info}) is False
+
+
 def test_a_kept_record_whose_ttl_or_proxy_flag_differs_is_adjusted_with_one_patch(cloudflare) -> None:
     fake = cloudflare([{"type": "A", "content": "192.0.2.10", "proxied": True, "ttl": 60}])
     result = _sync(["192.0.2.10"], ttl=300, verify_resolution=False)
@@ -100,18 +107,6 @@ def test_a_listing_that_grows_a_second_page_after_the_write_is_a_failure(cloudfl
 @pytest.mark.parametrize("info", [{"total_pages": 1}, {"total_pages": None}, {}, None])
 def test_a_missing_or_single_page_count_is_a_complete_listing(info) -> None:
     assert dns_address_set._truncated({"result": [{"id": "r0"}], "result_info": info}) is False
-
-
-@pytest.mark.parametrize("info", [{"total_pages": None}, {}, None])
-def test_a_full_page_without_a_page_count_is_treated_as_truncated(info) -> None:
-    full = [{"id": f"r{i}"} for i in range(100)]
-    assert dns_address_set._truncated({"result": full, "result_info": info}) is True
-    assert dns_address_set._truncated({"result": full[:99], "result_info": info}) is False
-
-
-def test_an_ipv6_scope_identifier_is_refused() -> None:
-    with pytest.raises(ValueError, match="scope identifier"):
-        parse_address_set(["2001:db8::1", "2001:db8::2%eth0"])
 
 
 @pytest.mark.parametrize("info", [{"total_pages": 2}, {"total_pages": "many"}, {"total_pages": [3]}])
@@ -156,6 +151,36 @@ def test_a_read_back_that_still_shows_an_unwanted_record_is_a_failure(cloudflare
     assert result.status == "failed" and "not exactly" in result.detail
 
 
+def test_a_read_back_with_the_old_proxy_flag_or_ttl_is_a_failure(cloudflare, monkeypatch) -> None:
+    fake = cloudflare([{"type": "A", "content": "192.0.2.10", "proxied": True, "ttl": 60}])
+    original = fake.__call__
+
+    def ignore_patch(url, headers, timeout, max_retries, *, method="GET", data=None):
+        if method == "PATCH":
+            return {"result": {}}
+        return original(url, headers, timeout, max_retries, method=method, data=data)
+
+    monkeypatch.setattr(dns_address_set, "_cf_request", ignore_patch)
+    result = _sync(["192.0.2.10"], ttl=300, verify_resolution=False)
+    assert result.status == "failed" and "different proxied flag or TTL on 192.0.2.10" in result.detail
+
+
+def test_a_set_of_99_addresses_is_the_largest_that_can_be_listed_in_full(cloudflare) -> None:
+    fake = cloudflare([])
+    addresses = [f"192.0.2.{i}" for i in range(1, 100)]
+    result = _sync(addresses, verify_resolution=False)
+    assert result.status == "created", result.detail
+    assert len(fake.records) == 99
+
+
+def test_a_set_too_large_to_list_in_full_is_refused_before_any_write(cloudflare) -> None:
+    fake = cloudflare([])
+    addresses = [f"192.0.2.{i}" for i in range(1, 101)]
+    result = _sync(addresses, verify_resolution=False)
+    assert result.status == "failed" and "refusing before writing anything" in result.detail
+    assert fake.writes() == []
+
+
 def test_a_truncated_listing_is_never_reconciled(cloudflare) -> None:
     fake = cloudflare([{"type": "A", "content": "192.0.2.10"}])
     fake.total_pages = 2
@@ -181,6 +206,11 @@ def test_an_authoritative_answer_that_still_includes_an_unwanted_address_is_a_fa
     cloudflare([{"type": "A", "content": "192.0.2.10"}], dig=["192.0.2.30", "192.0.2.9", "192.0.2.10"])
     result = _sync(["192.0.2.30", "192.0.2.9"])
     assert result.status == "failed" and "also answers 192.0.2.10" in result.detail
+
+
+def test_an_ipv6_scope_identifier_is_refused() -> None:
+    with pytest.raises(ValueError, match="scope identifier"):
+        parse_address_set(["2001:db8::1", "2001:db8::2%eth0"])
 
 
 def test_dry_run_reports_the_steps_and_writes_nothing(cloudflare) -> None:

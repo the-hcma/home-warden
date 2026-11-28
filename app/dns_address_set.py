@@ -127,6 +127,14 @@ def sync_dns_address_set(
     moves = list(zip(spare, missing))
     creates = missing[len(moves) :]
     leftover = spare[len(moves) :]
+    final_size = len(existing) + len(creates)
+    if final_size >= _PER_PAGE:
+        return SyncResult(
+            name,
+            "failed",
+            f"{domain} would hold {final_size} records after this sync, more than the {_PER_PAGE - 1} that can be "
+            "listed in full; refusing before writing anything",
+        )
     if leftover and not allow_extra:
         extra = ", ".join(
             f"{r.get('content')} (duplicate)" if r.get("content") in kept else str(r.get("content")) for r in leftover
@@ -204,6 +212,19 @@ def sync_dns_address_set(
             name,
             "failed",
             f"write accepted but read-back shows {record_type} {', '.join(present)}, not exactly {', '.join(wanted)}",
+        )
+    wrong_fields = [
+        str(r.get("content"))
+        for r in (confirm.get("result") or [])
+        if r.get("type") == record_type
+        and r.get("content") in wanted
+        and (bool(r.get("proxied", False)) != proxied or (ttl is not None and r.get("ttl") != ttl))
+    ]
+    if wrong_fields:
+        return SyncResult(
+            name,
+            "failed",
+            f"write accepted but the read-back shows a different proxied flag or TTL on {', '.join(wrong_fields)}",
         )
 
     if verify_resolution and nameservers and not proxied:
