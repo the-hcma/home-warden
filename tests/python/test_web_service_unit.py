@@ -40,6 +40,28 @@ SETUP = REPO / "scripts" / "setup-service"
 UNIT = REPO / "etc" / "systemd" / "home-warden-web.service"
 
 
+def test_a_config_that_exists_but_cannot_be_read_is_an_error_not_an_unset_fqdn(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text('fqdn = "warden.example.com"\n')
+    config.chmod(0)
+    try:
+        if os.access(config, os.R_OK):
+            pytest.skip("running as a user that can read a mode 0 file")
+        result = _run_fqdn(config, f"{_python3_dir(tmp_path)}{os.pathsep}/usr/bin:/bin")
+    finally:
+        config.chmod(0o600)
+    assert result.returncode != 0
+    assert "not a readable file" in result.stderr
+    assert result.stdout == ""
+
+
+def test_a_directory_where_the_config_should_be_is_an_error(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.mkdir()
+    result = _run_fqdn(config, f"{_python3_dir(tmp_path)}{os.pathsep}/usr/bin:/bin")
+    assert result.returncode != 0 and result.stdout == ""
+
+
 def test_a_missing_interpreter_is_an_error_not_an_unset_fqdn(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text('fqdn = "warden.example.com"\n')

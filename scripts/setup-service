@@ -458,13 +458,18 @@ is_valid_fqdn() {
   [[ "${fqdn}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
 }
 
-# web_ui_fqdn — the fqdn set in config.toml, empty when the file is missing, unreadable, unparseable or the UI is
-# disabled. Read with tomllib exactly as app/home_warden_config.load_config does (a top-level string, stripped; anything
-# else counts as unset), so this script and the backend never disagree about whether the web UI is enabled.
+# web_ui_fqdn — the fqdn set in config.toml. A file that does not exist, or one that does not parse, is "unset" (empty
+# output, status 0), as app/home_warden_config.load_config treats them, and the value is read with tomllib exactly as
+# load_config does (a top-level string, stripped; anything else counts as unset), so this script and the backend never
+# disagree about whether the web UI is enabled. What is an error (status 1, nothing changed) is anything that stops this
+# script from knowing: a file that exists but cannot be read, a path that is not a regular file, or no python3 3.11+.
+# Reading any of those as "unset" would disable and stop a web UI that the operator turned on.
 web_ui_fqdn() {
-  [[ -r "${home_warden_config_path}" ]] || return 0
-  # A missing interpreter (or one without tomllib, Python before 3.11) is an error, never "unset": reading it as
-  # unset would disable and stop a web UI that the config enables.
+  [[ -e "${home_warden_config_path}" ]] || return 0
+  if [[ ! -f "${home_warden_config_path}" || ! -r "${home_warden_config_path}" ]]; then
+    echo "ERROR: ${home_warden_config_path} exists but is not a readable file" >&2
+    return 1
+  fi
   python3 - "${home_warden_config_path}" <<'PYEOF'
 import sys
 import tomllib
@@ -472,8 +477,11 @@ import tomllib
 try:
     with open(sys.argv[1], "rb") as handle:
         data = tomllib.load(handle)
-except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+except (tomllib.TOMLDecodeError, UnicodeDecodeError):
     sys.exit(0)
+except OSError as exc:
+    sys.stderr.write(f"cannot read {sys.argv[1]}: {exc}\n")
+    sys.exit(1)
 fqdn = data.get("fqdn", "") if isinstance(data, dict) else ""
 if isinstance(fqdn, str):
     sys.stdout.write(fqdn.strip())
