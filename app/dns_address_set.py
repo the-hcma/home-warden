@@ -20,6 +20,18 @@ from app.catalog_checks import (
     candidate_zone_names,
 )
 
+_PER_PAGE = 100
+
+
+def _truncated(data: dict) -> bool:
+    """True when Cloudflare says the listing has more pages than the one read: a partial view must never be
+    reconciled (a wanted address on a later page would be created twice, an unwanted one never seen)."""
+    info = data.get("result_info") or {}
+    try:
+        return int(info.get("total_pages") or 1) > 1
+    except (TypeError, ValueError):
+        return True
+
 
 def parse_address_set(targets: list[str]) -> tuple[str, list[str]]:
     """(record type, canonical addresses without duplicates, in the order given). Raises ValueError for a
@@ -82,8 +94,14 @@ def sync_dns_address_set(
             zone_id = zone_results[0]["id"]
             zone_name = candidate
             nameservers = zone_results[0].get("name_servers") or []
-            rec_url = f"{CF_API_BASE}/zones/{zone_id}/dns_records?name={urllib.parse.quote(domain)}"
+            rec_url = (
+                f"{CF_API_BASE}/zones/{zone_id}/dns_records?name={urllib.parse.quote(domain)}&per_page={_PER_PAGE}"
+            )
             rec_data = _cf_request(rec_url, cf_headers, timeout, max_retries)
+            if _truncated(rec_data):
+                return SyncResult(
+                    name, "failed", f"{domain} has more than {_PER_PAGE} records; refusing to reconcile a partial list"
+                )
             existing = [r for r in (rec_data.get("result") or []) if r.get("type") in ("A", "AAAA", "CNAME")]
             if existing:
                 break
@@ -175,11 +193,20 @@ def sync_dns_address_set(
         confirm = _cf_request(rec_url, cf_headers, timeout, max_retries)
     except Exception as e:
         return SyncResult(name, "failed", f"write accepted but read-back failed: {e}")
-    present = {r.get("content") for r in (confirm.get("result") or []) if r.get("type") == record_type}
+    if _truncated(confirm):
+        return SyncResult(name, "failed", f"write accepted but {domain} now has more than {_PER_PAGE} records")
+    present = sorted(str(r.get("content")) for r in (confirm.get("result") or []) if r.get("type") == record_type)
     absent = [address for address in wanted if address not in present]
     if absent:
         return SyncResult(
             name, "failed", f"write accepted but {record_type}={', '.join(absent)} not found on read-back"
+        )
+    if not allow_extra and present != sorted(wanted):
+        # An unwanted or duplicate record still published would keep traffic reaching the old host.
+        return SyncResult(
+            name,
+            "failed",
+            f"write accepted but read-back shows {record_type} {', '.join(present)}, not exactly {', '.join(wanted)}",
         )
 
     if verify_resolution and nameservers and not proxied:
@@ -187,12 +214,15 @@ def sync_dns_address_set(
         if answers is not None:
             answered = {a.rstrip(".") for a in answers}
             not_answered = [address for address in wanted if address not in answered]
-            if not_answered:
+            unexpected = sorted(answered - set(wanted)) if not allow_extra else []
+            if not_answered or unexpected:
+                problem = (
+                    f"missing {', '.join(not_answered)}" if not_answered else f"also answers {', '.join(unexpected)}"
+                )
                 return SyncResult(
                     name,
                     "failed",
-                    f"write accepted and read back but {nameservers[0]} answers {answers}, "
-                    f"missing {', '.join(not_answered)}",
+                    f"write accepted and read back but {nameservers[0]} answers {answers}, {problem}",
                 )
 
     verb = "updated" if (moves or retag) else "created"

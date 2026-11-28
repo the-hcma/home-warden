@@ -18,6 +18,7 @@ class FakeCloudflare:
             for i, r in enumerate(records)
         ]
         self.calls: list[tuple[str, str, dict]] = []
+        self.total_pages = 1
 
     def __call__(self, url, headers, timeout, max_retries, *, method="GET", data=None):
         data = data or {}
@@ -29,7 +30,7 @@ class FakeCloudflare:
                 else {"result": []}
             )
         if method == "GET" and "/dns_records?name=" in url:
-            return {"result": [dict(r) for r in self.records]}
+            return {"result": [dict(r) for r in self.records], "result_info": {"total_pages": self.total_pages}}
         if method == "PATCH":
             record = next(r for r in self.records if url.endswith("/" + r["id"]))
             record.update(data)
@@ -206,3 +207,40 @@ def test_restore_mode_puts_back_ttl_and_proxy_on_a_kept_record_and_reports_the_o
     assert result.status == "manual"
     assert fake.writes() == [("PATCH", {"proxied": False, "ttl": 300})]
     assert "192.0.2.9" in result.detail
+
+
+def test_a_truncated_listing_is_never_reconciled(cloudflare) -> None:
+    fake = cloudflare([{"type": "A", "content": "192.0.2.10"}])
+    fake.total_pages = 2
+    result = _sync(["192.0.2.30", "192.0.2.9"])
+    assert result.status == "failed" and "partial list" in result.detail
+    assert fake.writes() == []
+
+
+def test_a_read_back_that_still_shows_an_unwanted_record_is_a_failure(cloudflare, monkeypatch) -> None:
+    fake = cloudflare([{"type": "A", "content": "192.0.2.10"}])
+    original = fake.__call__
+
+    def keep_old(url, headers, timeout, max_retries, *, method="GET", data=None):
+        result = original(url, headers, timeout, max_retries, method=method, data=data)
+        if method == "GET" and "/dns_records?name=" in url and fake.writes():
+            result = {**result, "result": [*result["result"], {"type": "A", "content": "192.0.2.10", "id": "old"}]}
+        return result
+
+    monkeypatch.setattr(dns_address_set, "_cf_request", keep_old)
+    result = _sync(["192.0.2.30", "192.0.2.9"], verify_resolution=False)
+    assert result.status == "failed" and "not exactly" in result.detail
+
+
+def test_an_authoritative_answer_that_still_includes_an_unwanted_address_is_a_failure(cloudflare) -> None:
+    cloudflare([{"type": "A", "content": "192.0.2.10"}], dig=["192.0.2.30", "192.0.2.9", "192.0.2.10"])
+    result = _sync(["192.0.2.30", "192.0.2.9"])
+    assert result.status == "failed" and "also answers 192.0.2.10" in result.detail
+
+
+def test_restore_mode_allows_extra_records_in_the_read_back_and_the_answer(cloudflare) -> None:
+    cloudflare(
+        [{"type": "A", "content": "192.0.2.30"}, {"type": "A", "content": "192.0.2.9"}], dig=["192.0.2.10", "192.0.2.9"]
+    )
+    result = _sync(["192.0.2.10"], allow_extra=True)
+    assert result.status == "manual"
