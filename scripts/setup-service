@@ -463,7 +463,9 @@ is_valid_fqdn() {
 # else counts as unset), so this script and the backend never disagree about whether the web UI is enabled.
 web_ui_fqdn() {
   [[ -r "${home_warden_config_path}" ]] || return 0
-  python3 - "${home_warden_config_path}" <<'PYEOF' 2>/dev/null || true
+  # A missing interpreter (or one without tomllib, Python before 3.11) is an error, never "unset": reading it as
+  # unset would disable and stop a web UI that the config enables.
+  python3 - "${home_warden_config_path}" <<'PYEOF'
 import sys
 import tomllib
 
@@ -676,6 +678,10 @@ check_prerequisites() {
       echo "ERROR: scripts/catalog-health-server missing or not executable" >&2
       missing=1
     fi
+    if [[ ! -x "${HOME}/.local/bin/uv" ]] && ! PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" command -v uv >/dev/null 2>&1; then
+      echo "ERROR: uv not found in ${HOME}/.local/bin or the system PATH; the web UI unit runs scripts/catalog-health-server through uv" >&2
+      missing=1
+    fi
   fi
   if ((client_pki_crl_enabled)); then
     if [[ ! -f "${unit_template_dir}/home-warden-client-pki-crl.service" ||
@@ -818,6 +824,8 @@ expand_unit() {
       -e "s|@@PDNS_ZONES_YAML@@|${pdns_zones_yaml}|g" \
       -e "s|@@PDNS_ZONES_YAML_DIR@@|${pdns_zones_yaml_dir}|g" \
       -e "s|@@SERVICES_JSON_PATH@@|${services_json}|g" \
+      -e "s|@@WEB_SERVICES_JSON_PATH@@|${services_json:-${default_services_json}}|g" \
+      -e "s|@@WEB_PDNS_ZONES_YAML@@|${pdns_zones_yaml:-${default_pdns_zones_yaml}}|g" \
       -e "s|@@CLIENT_PKI_STORE@@|${client_pki_store}|g" \
       -e "s|@@CLIENT_PKI_KEY_CREDENTIAL@@|${key_credential}|g" \
       -e "s|@@REPO_DIR@@|${repo_dir}|g" \
@@ -1448,7 +1456,11 @@ main() {
   fi
 
   maybe_create_web_ui_config
-  web_ui_fqdn_value="$(web_ui_fqdn)"
+  if ! web_ui_fqdn_value="$(web_ui_fqdn)"; then
+    echo "ERROR: cannot read ${home_warden_config_path}: python3 3.11 or newer (tomllib) is required to decide whether the" \
+      "web UI is enabled; nothing was changed" >&2
+    exit 1
+  fi
   if [[ -n "${web_ui_fqdn_value}" ]]; then
     web_ui_enabled=1
     if ! is_valid_fqdn "${web_ui_fqdn_value}"; then
