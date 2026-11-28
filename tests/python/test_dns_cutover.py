@@ -71,7 +71,14 @@ def test_restore_replays_content_proxied_and_ttl(monkeypatch) -> None:
         calls.append((name, service["server_name"], target, kw))
         return SyncResult(name, "updated", "ok")
 
+    sets: list[tuple] = []
+
+    def fake_set(name, service, targets, headers, timeout, retries, **kw):
+        sets.append((name, service["server_name"], targets, kw))
+        return SyncResult(name, "updated", "ok")
+
     monkeypatch.setattr("app.dns_cutover.sync_dns_record", fake_sync)
+    monkeypatch.setattr("app.dns_cutover.sync_dns_address_set", fake_set)
     snap = {
         "version": 1,
         "entries": [
@@ -82,11 +89,16 @@ def test_restore_replays_content_proxied_and_ttl(monkeypatch) -> None:
             },
             {"service": "b", "name": "b.example.com", "records": []},
             {"service": "c", "name": "c.example.com", "records": [{"content": "1.1.1.1"}, {"content": "2.2.2.2"}]},
+            {
+                "service": "d",
+                "name": "d.example.com",
+                "records": [{"content": "1.1.1.1"}, {"content": "cname.example.net"}],
+            },
         ],
     }
     monkeypatch.setattr("app.dns_cutover.list_cloudflare_records", lambda *a: None)
     results = restore_snapshot(snap, HEADERS, 5, 1, dry_run=True)
-    assert [r.status for r in results] == ["updated", "noop", "manual"]
+    assert [r.status for r in results] == ["updated", "noop", "updated", "manual"]
     assert calls == [
         (
             "a",
@@ -96,6 +108,15 @@ def test_restore_replays_content_proxied_and_ttl(monkeypatch) -> None:
         )
     ]
     assert "has none now" in results[1].detail
+    assert sets == [
+        (
+            "c",
+            "c.example.com",
+            ["1.1.1.1", "2.2.2.2"],
+            {"proxied": False, "dry_run": True, "verify_resolution": True, "ttl": None, "allow_extra": True},
+        )
+    ]
+    assert "not all addresses of one family" in results[3].detail
 
 
 def _fake_cf(zone_records: dict[str, list[dict]], pages: int = 1):
@@ -390,3 +411,60 @@ def test_restore_of_a_name_that_gained_records_uses_the_set_sync_and_keeps_the_e
             {"proxied": False, "dry_run": False, "verify_resolution": True, "ttl": 300, "allow_extra": True},
         )
     ]
+
+
+def test_restore_of_several_records_with_different_ttls_or_flags_is_left_to_a_human(monkeypatch) -> None:
+    def must_not_run(*a, **kw):
+        raise AssertionError("a name that cannot be restored whole must not be written")
+
+    monkeypatch.setattr("app.dns_cutover.sync_dns_address_set", must_not_run)
+    monkeypatch.setattr("app.dns_cutover.sync_dns_record", must_not_run)
+    monkeypatch.setattr("app.dns_cutover.list_cloudflare_records", lambda *a: None)
+    snap = {
+        "version": 1,
+        "entries": [
+            {
+                "service": "t",
+                "name": "t.example.com",
+                "records": [{"content": "1.1.1.1", "ttl": 60}, {"content": "2.2.2.2", "ttl": 300}],
+            },
+            {
+                "service": "p",
+                "name": "p.example.com",
+                "records": [{"content": "1.1.1.1", "proxied": True}, {"content": "2.2.2.2"}],
+            },
+            {"service": "m", "name": "m.example.com", "records": [{"content": "1.1.1.1"}, {"content": "2001:db8::1"}]},
+        ],
+    }
+    results = restore_snapshot(snap, HEADERS, 5, 1)
+    assert [r.status for r in results] == ["manual", "manual", "manual"]
+    assert (
+        "different TTLs or proxied flags" in results[0].detail
+        and "different TTLs or proxied flags" in results[1].detail
+    )
+    assert "not all addresses of one family" in results[2].detail
+
+
+def test_restore_of_a_round_robin_name_puts_every_address_back_with_the_snapshotted_ttl_and_flag(monkeypatch) -> None:
+    calls: list[tuple] = []
+
+    def fake_set(name, service, targets, headers, timeout, retries, **kw):
+        calls.append((targets, kw["ttl"], kw["proxied"]))
+        return SyncResult(name, "updated", "ok")
+
+    monkeypatch.setattr("app.dns_cutover.sync_dns_address_set", fake_set)
+    snap = {
+        "version": 1,
+        "entries": [
+            {
+                "service": "r",
+                "name": "r.example.com",
+                "records": [
+                    {"content": "192.0.2.1", "ttl": 300, "proxied": False},
+                    {"content": "192.0.2.2", "ttl": 300},
+                ],
+            }
+        ],
+    }
+    assert [r.status for r in restore_snapshot(snap, HEADERS, 5, 1)] == ["updated"]
+    assert calls == [(["192.0.2.1", "192.0.2.2"], 300, False)]

@@ -26,169 +26,9 @@ from app.catalog_checks import (
     list_cloudflare_records,
     sync_dns_record,
 )
-from app.dns_address_set import sync_dns_address_set
+from app.dns_address_set import parse_address_set, sync_dns_address_set
 
 SNAPSHOT_VERSION = 1
-# Hard bound on zone-listing pages, so a huge zone can't turn a report into an unbounded loop.
-_MAX_PAGES = 20
-_PER_PAGE = 100
-
-
-def take_snapshot(services: list[dict], cf_headers: dict[str, str], timeout: float, max_retries: int) -> dict:
-    """Read every catalog service's current A/AAAA/CNAME records. Raises on a Cloudflare error: a
-    snapshot that silently missed a record would make the rollback look safe when it isn't."""
-    entries: list[dict] = []
-    for service in services:
-        domain = service.get("server_name")
-        if not domain:
-            continue
-        records = list_cloudflare_records(domain, cf_headers, timeout, max_retries)
-        entries.append({"service": service.get("name", "<unnamed>"), "name": domain, "records": records or []})
-    return {
-        "version": SNAPSHOT_VERSION,
-        "taken_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "entries": entries,
-    }
-
-
-def write_snapshot(path: Path, snapshot: dict) -> None:
-    """Write `snapshot` as JSON, mode 0600, refusing to overwrite an existing file. The file appears
-    complete or not at all: it is written under a temporary name and linked into place."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(snapshot, f, indent=2)
-            f.write("\n")
-        os.link(tmp, path)  # fails with FileExistsError rather than replacing an existing snapshot
-    finally:
-        tmp.unlink(missing_ok=True)
-
-
-def load_snapshot(path: Path) -> dict:
-    """Read and shape-check a snapshot file. Raises ValueError (or FileNotFoundError) when unusable."""
-    try:
-        data = json.loads(path.read_text())
-    except json.JSONDecodeError as e:
-        raise ValueError(f"{path}: not valid JSON: {e}") from e
-    if not isinstance(data, dict) or data.get("version") != SNAPSHOT_VERSION:
-        raise ValueError(f"{path}: not a version {SNAPSHOT_VERSION} dns-sync snapshot")
-    entries = data.get("entries")
-    if not isinstance(entries, list) or not all(
-        isinstance(e, dict) and isinstance(e.get("name"), str) and isinstance(e.get("records"), list) for e in entries
-    ):
-        raise ValueError(f"{path}: malformed snapshot entries")
-    for entry in entries:
-        for rec in entry["records"]:
-            ttl = rec.get("ttl") if isinstance(rec, dict) else None
-            if (
-                not isinstance(rec, dict)
-                or not isinstance(rec.get("content"), str)
-                or not rec["content"]
-                or isinstance(ttl, bool)
-                or not (ttl is None or isinstance(ttl, int))
-            ):
-                raise ValueError(f"{path}: malformed record for {entry['name']}: {rec!r}")
-    return data
-
-
-def restore_snapshot(
-    snapshot: dict,
-    cf_headers: dict[str, str],
-    timeout: float,
-    max_retries: int,
-    *,
-    dry_run: bool = False,
-    verify_resolution: bool = True,
-) -> list[SyncResult]:
-    """Put each record back to its snapshotted content, proxied flag and TTL, via `sync_dns_record`
-    (same read-back and resolution checks as the original write). A name that held several records when
-    the snapshot was taken, or none, is left to a human: status "manual". A name that held one record but
-    has several now (a sync to several addresses) goes back through `sync_dns_address_set(allow_extra=True)`:
-    the original is written onto one of the live records and the rest, which a restore never deletes, are
-    reported as "manual". Any "manual" means the rollback is not complete, so the CLI exits non-zero."""
-    results: list[SyncResult] = []
-    for entry in snapshot["entries"]:
-        service = str(entry.get("service") or entry["name"])
-        records = entry["records"]
-        if not records:
-            results.append(_restore_absent(service, entry["name"], cf_headers, timeout, max_retries))
-            continue
-        if len(records) > 1:
-            results.append(
-                SyncResult(service, "manual", f"{entry['name']} had {len(records)} records; restore them by hand")
-            )
-            continue
-        rec = records[0]
-        if _live_count(entry["name"], rec, cf_headers, timeout, max_retries) > 1:
-            # The name gained records since the snapshot (a sync to several addresses): put the original back on one
-            # of them and report the rest, which a restore never deletes.
-            results.append(
-                sync_dns_address_set(
-                    service,
-                    {"server_name": entry["name"]},
-                    [rec["content"]],
-                    cf_headers,
-                    timeout,
-                    max_retries,
-                    proxied=bool(rec.get("proxied", False)),
-                    dry_run=dry_run,
-                    verify_resolution=verify_resolution,
-                    ttl=rec.get("ttl"),
-                    allow_extra=True,
-                )
-            )
-            continue
-        results.append(
-            sync_dns_record(
-                service,
-                {"server_name": entry["name"]},
-                rec["content"],
-                cf_headers,
-                timeout,
-                max_retries,
-                proxied=bool(rec.get("proxied", False)),
-                dry_run=dry_run,
-                verify_resolution=verify_resolution,
-                ttl=rec.get("ttl"),
-            )
-        )
-    return results
-
-
-def _live_count(name: str, snapshot_record: dict, cf_headers: dict[str, str], timeout: float, max_retries: int) -> int:
-    """How many records of the snapshotted record's type the name has now (0 when it can't be read, so the
-    ordinary single-record restore, which reports that problem itself, runs)."""
-    try:
-        live = list_cloudflare_records(name, cf_headers, timeout, max_retries) or []
-    except Exception:
-        return 0
-    kind = "AAAA" if ":" in str(snapshot_record.get("content", "")) else "A"
-    return len([r for r in live if r.get("type") == kind])
-
-
-def _normalize_target(target: str) -> str:
-    """Same canonical form `sync_dns_record` compares with: compressed IPv6, bare lower-case hostname."""
-    try:
-        return str(ipaddress.ip_address(target))
-    except ValueError:
-        return target.rstrip(".").lower()
-
-
-def _restore_absent(
-    service: str, name: str, cf_headers: dict[str, str], timeout: float, max_retries: int
-) -> SyncResult:
-    """The name had no record when the snapshot was taken. If it still has none, the sync never created one
-    (it failed or was skipped) and the rollback is already complete; if it has one now, say exactly what to delete."""
-    try:
-        current = list_cloudflare_records(name, cf_headers, timeout, max_retries)
-    except Exception as e:
-        return SyncResult(service, "manual", f"{name} had no record before the sync; couldn't check it now ({e})")
-    if not current:
-        return SyncResult(service, "noop", f"{name} had no record before the sync and has none now")
-    now = ", ".join(f"{r.get('type')} {r.get('content')}" for r in current)
-    return SyncResult(service, "manual", f"{name} had no record before the sync, but has {now} now: delete it by hand")
 
 
 def find_stragglers(
@@ -236,3 +76,213 @@ def find_stragglers(
                     "the leftover list would be incomplete"
                 )
     return stragglers
+
+
+def load_snapshot(path: Path) -> dict:
+    """Read and shape-check a snapshot file. Raises ValueError (or FileNotFoundError) when unusable."""
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        raise ValueError(f"{path}: not valid JSON: {e}") from e
+    if not isinstance(data, dict) or data.get("version") != SNAPSHOT_VERSION:
+        raise ValueError(f"{path}: not a version {SNAPSHOT_VERSION} dns-sync snapshot")
+    entries = data.get("entries")
+    if not isinstance(entries, list) or not all(
+        isinstance(e, dict) and isinstance(e.get("name"), str) and isinstance(e.get("records"), list) for e in entries
+    ):
+        raise ValueError(f"{path}: malformed snapshot entries")
+    for entry in entries:
+        for rec in entry["records"]:
+            ttl = rec.get("ttl") if isinstance(rec, dict) else None
+            if (
+                not isinstance(rec, dict)
+                or not isinstance(rec.get("content"), str)
+                or not rec["content"]
+                or isinstance(ttl, bool)
+                or not (ttl is None or isinstance(ttl, int))
+            ):
+                raise ValueError(f"{path}: malformed record for {entry['name']}: {rec!r}")
+    return data
+
+
+def restore_snapshot(
+    snapshot: dict,
+    cf_headers: dict[str, str],
+    timeout: float,
+    max_retries: int,
+    *,
+    dry_run: bool = False,
+    verify_resolution: bool = True,
+) -> list[SyncResult]:
+    """Put each record back to its snapshotted content, proxied flag and TTL, via `sync_dns_record`
+    (same read-back and resolution checks as the original write). A name that held none is left to a human
+    (status "manual"); one that held several (a round-robin name) is put back whole from the snapshot when they are
+    addresses of one family with one TTL and proxied flag, else it is "manual" too. A name that held one record but
+    has several now (a sync to several addresses) goes back through `sync_dns_address_set(allow_extra=True)`:
+    the original is written onto one of the live records and the rest, which a restore never deletes, are
+    reported as "manual". Any "manual" means the rollback is not complete, so the CLI exits non-zero."""
+    results: list[SyncResult] = []
+    for entry in snapshot["entries"]:
+        service = str(entry.get("service") or entry["name"])
+        records = entry["records"]
+        if not records:
+            results.append(_restore_absent(service, entry["name"], cf_headers, timeout, max_retries))
+            continue
+        if len(records) > 1:
+            results.append(
+                _restore_several(entry, service, cf_headers, timeout, max_retries, dry_run, verify_resolution)
+            )
+            continue
+        rec = records[0]
+        if _live_count(entry["name"], rec, cf_headers, timeout, max_retries) > 1:
+            # The name gained records since the snapshot (a sync to several addresses): put the original back on one
+            # of them and report the rest, which a restore never deletes.
+            results.append(
+                sync_dns_address_set(
+                    service,
+                    {"server_name": entry["name"]},
+                    [rec["content"]],
+                    cf_headers,
+                    timeout,
+                    max_retries,
+                    proxied=bool(rec.get("proxied", False)),
+                    dry_run=dry_run,
+                    verify_resolution=verify_resolution,
+                    ttl=rec.get("ttl"),
+                    allow_extra=True,
+                )
+            )
+            continue
+        results.append(
+            sync_dns_record(
+                service,
+                {"server_name": entry["name"]},
+                rec["content"],
+                cf_headers,
+                timeout,
+                max_retries,
+                proxied=bool(rec.get("proxied", False)),
+                dry_run=dry_run,
+                verify_resolution=verify_resolution,
+                ttl=rec.get("ttl"),
+            )
+        )
+    return results
+
+
+def take_snapshot(services: list[dict], cf_headers: dict[str, str], timeout: float, max_retries: int) -> dict:
+    """Read every catalog service's current A/AAAA/CNAME records. Raises on a Cloudflare error: a
+    snapshot that silently missed a record would make the rollback look safe when it isn't."""
+    entries: list[dict] = []
+    for service in services:
+        domain = service.get("server_name")
+        if not domain:
+            continue
+        records = list_cloudflare_records(domain, cf_headers, timeout, max_retries)
+        entries.append({"service": service.get("name", "<unnamed>"), "name": domain, "records": records or []})
+    return {
+        "version": SNAPSHOT_VERSION,
+        "taken_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "entries": entries,
+    }
+
+
+def write_snapshot(path: Path, snapshot: dict) -> None:
+    """Write `snapshot` as JSON, mode 0600, refusing to overwrite an existing file. The file appears
+    complete or not at all: it is written under a temporary name and linked into place."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(snapshot, f, indent=2)
+            f.write("\n")
+        os.link(tmp, path)  # fails with FileExistsError rather than replacing an existing snapshot
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+# Hard bound on zone-listing pages, so a huge zone can't turn a report into an unbounded loop.
+_MAX_PAGES = 20
+
+
+_PER_PAGE = 100
+
+
+def _live_count(name: str, snapshot_record: dict, cf_headers: dict[str, str], timeout: float, max_retries: int) -> int:
+    """How many records of the snapshotted record's type the name has now (0 when it can't be read, so the
+    ordinary single-record restore, which reports that problem itself, runs)."""
+    try:
+        live = list_cloudflare_records(name, cf_headers, timeout, max_retries) or []
+    except Exception:
+        return 0
+    kind = "AAAA" if ":" in str(snapshot_record.get("content", "")) else "A"
+    return len([r for r in live if r.get("type") == kind])
+
+
+def _normalize_target(target: str) -> str:
+    """Same canonical form `sync_dns_record` compares with: compressed IPv6, bare lower-case hostname."""
+    try:
+        return str(ipaddress.ip_address(target))
+    except ValueError:
+        return target.rstrip(".").lower()
+
+
+def _restore_absent(
+    service: str, name: str, cf_headers: dict[str, str], timeout: float, max_retries: int
+) -> SyncResult:
+    """The name had no record when the snapshot was taken. If it still has none, the sync never created one
+    (it failed or was skipped) and the rollback is already complete; if it has one now, say exactly what to delete."""
+    try:
+        current = list_cloudflare_records(name, cf_headers, timeout, max_retries)
+    except Exception as e:
+        return SyncResult(service, "manual", f"{name} had no record before the sync; couldn't check it now ({e})")
+    if not current:
+        return SyncResult(service, "noop", f"{name} had no record before the sync and has none now")
+    now = ", ".join(f"{r.get('type')} {r.get('content')}" for r in current)
+    return SyncResult(service, "manual", f"{name} had no record before the sync, but has {now} now: delete it by hand")
+
+
+def _restore_several(
+    entry: dict,
+    service: str,
+    cf_headers: dict[str, str],
+    timeout: float,
+    max_retries: int,
+    dry_run: bool,
+    verify_resolution: bool,
+) -> SyncResult:
+    """The name held several records when the snapshot was taken (a round-robin name): put every one back from the
+    snapshot, through `sync_dns_address_set`. Only addresses of one family that share one TTL and proxied flag can be
+    put back that way; anything else (a CNAME, a mix of A and AAAA, differing TTLs) is left to a human."""
+    name = entry["name"]
+    records = entry["records"]
+    try:
+        _, addresses = parse_address_set([str(r["content"]) for r in records])
+    except ValueError:
+        return SyncResult(
+            service,
+            "manual",
+            f"{name} had {len(records)} records that are not all addresses of one family; restore by hand",
+        )
+    ttls = {r.get("ttl") for r in records}
+    flags = {bool(r.get("proxied", False)) for r in records}
+    if len(ttls) > 1 or len(flags) > 1:
+        return SyncResult(
+            service,
+            "manual",
+            f"{name} had {len(records)} records with different TTLs or proxied flags; restore by hand",
+        )
+    return sync_dns_address_set(
+        service,
+        {"server_name": name},
+        addresses,
+        cf_headers,
+        timeout,
+        max_retries,
+        proxied=flags.pop(),
+        dry_run=dry_run,
+        verify_resolution=verify_resolution,
+        ttl=ttls.pop(),
+        allow_extra=True,
+    )
