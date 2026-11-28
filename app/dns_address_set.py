@@ -1,0 +1,277 @@
+"""Sync one Cloudflare name to a set of addresses (#277): round-robin A or AAAA records.
+
+`sync_dns_record` writes one address per name and refuses a name that already has several. This reconciles
+the name's records to a set of addresses of one family, and never deletes: a record that is not wanted is
+moved (PATCH) onto a wanted address that is missing, and any address still missing is created. A name with
+more unwanted records than missing addresses fails and names them, for a human to remove -- or, for a
+restore (`allow_extra`), is reported as "manual" after everything else was put back.
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import urllib.parse
+
+from app.catalog_checks import (
+    CF_API_BASE,
+    SyncResult,
+    _cf_request,
+    _resolve_via_authoritative_ns,
+    candidate_zone_names,
+)
+
+
+def parse_address_set(targets: list[str]) -> tuple[str, list[str]]:
+    """(record type, canonical addresses without duplicates, in the order given). Raises ValueError for a
+    name or CNAME target, an empty list, or a mix of IPv4 and IPv6: a set is all A or all AAAA."""
+    if not targets:
+        raise ValueError("no addresses given")
+    addresses: list[str] = []
+    versions: set[int] = set()
+    for target in targets:
+        try:
+            parsed = ipaddress.ip_address(target.strip())
+        except ValueError:
+            raise ValueError(f"{target!r} is not an IP address (a set of addresses cannot hold a host name)") from None
+        if parsed.version == 6 and getattr(parsed, "scope_id", None):
+            raise ValueError(f"{target!r}: an IPv6 scope identifier is node-local and cannot be published")
+        versions.add(parsed.version)
+        if str(parsed) not in addresses:
+            addresses.append(str(parsed))
+    if len(versions) > 1:
+        raise ValueError(f"{', '.join(addresses)}: IPv4 and IPv6 addresses cannot be mixed in one set")
+    return ("AAAA" if versions == {6} else "A"), addresses
+
+
+def sync_dns_address_set(
+    name: str,
+    service: dict,
+    targets: list[str],
+    cf_headers: dict[str, str] | None,
+    timeout: float,
+    max_retries: int,
+    *,
+    proxied: bool = False,
+    dry_run: bool = False,
+    verify_resolution: bool = True,
+    ttl: int | None = None,
+    allow_extra: bool = False,
+) -> SyncResult:
+    """Reconcile the A/AAAA records of `service["server_name"]` to exactly `targets` (see the module doc).
+
+    Statuses are the ones `sync_dns_record` uses, plus "manual" when `allow_extra` left unwanted records."""
+    domain = service.get("server_name")
+    if not domain:
+        return SyncResult(name, "skip", "no server_name on this catalog entry")
+    if cf_headers is None:
+        return SyncResult(name, "skip", "no Cloudflare credentials configured")
+    try:
+        record_type, wanted = parse_address_set(targets)
+    except ValueError as e:
+        return SyncResult(name, "failed", str(e))
+
+    zone_id: str | None = None
+    zone_name = ""
+    nameservers: list[str] = []
+    rec_url = ""
+    existing: list[dict] = []
+    listed_total = 0
+    try:
+        for candidate in candidate_zone_names(domain):
+            zone_url = f"{CF_API_BASE}/zones?name={urllib.parse.quote(candidate)}"
+            zone_results = _cf_request(zone_url, cf_headers, timeout, max_retries).get("result") or []
+            if not zone_results:
+                continue
+            zone_id = zone_results[0]["id"]
+            zone_name = candidate
+            nameservers = zone_results[0].get("name_servers") or []
+            rec_url = (
+                f"{CF_API_BASE}/zones/{zone_id}/dns_records?name={urllib.parse.quote(domain)}&per_page={_PER_PAGE}"
+            )
+            rec_data = _cf_request(rec_url, cf_headers, timeout, max_retries)
+            if _truncated(rec_data):
+                return SyncResult(
+                    name,
+                    "failed",
+                    f"the listing for {domain} may be incomplete (it is paged or holds {_PER_PAGE} records or more); "
+                    "refusing to reconcile a partial list",
+                )
+            listed = rec_data.get("result") or []
+            existing = [r for r in listed if r.get("type") in ("A", "AAAA", "CNAME")]
+            listed_total = len(listed)  # every type at the name (TXT, MX, ...): they share the one page
+            if existing:
+                break
+    except Exception as e:
+        return SyncResult(name, "failed", f"Cloudflare lookup error: {e}")
+    if zone_id is None:
+        return SyncResult(name, "failed", f"no Cloudflare zone found for {domain}")
+
+    other_type = [r for r in existing if r.get("type") != record_type]
+    if other_type:
+        kinds = ", ".join(f"{r['type']}={r.get('content')}" for r in other_type)
+        return SyncResult(
+            name,
+            "failed",
+            f"existing {kinds} record for {domain} has a different type than {record_type} -- "
+            "refusing to replace it automatically",
+        )
+    have = [r for r in existing if r.get("type") == record_type]
+
+    # The first record holding each wanted address stays; every other record is spare (a duplicate or unwanted).
+    kept: dict[str, dict] = {}
+    spare: list[dict] = []
+    for record in have:
+        content = record.get("content")
+        if content in wanted and content not in kept:
+            kept[str(content)] = record
+        else:
+            spare.append(record)
+    missing = [address for address in wanted if address not in kept]
+    moves = list(zip(spare, missing))
+    creates = missing[len(moves) :]
+    leftover = spare[len(moves) :]
+    # The confirming read lists every record at the name, of any type, so all of them count.
+    final_size = listed_total + len(creates)
+    if final_size >= _PER_PAGE:
+        return SyncResult(
+            name,
+            "failed",
+            f"{domain} would hold {final_size} records of all types after this sync, "
+            f"more than the {_PER_PAGE - 1} that can be listed in full; refusing before writing anything",
+        )
+    if leftover and not allow_extra:
+        extra = ", ".join(
+            f"{r.get('content')} (duplicate)" if r.get("content") in kept else str(r.get("content")) for r in leftover
+        )
+        return SyncResult(
+            name,
+            "failed",
+            f"{len(leftover)} existing {record_type} record(s) for {domain} are duplicates or not wanted ({extra}) "
+            "and there is no address to move them to -- refusing to delete; remove them by hand",
+        )
+    retag = [
+        r
+        for r in kept.values()
+        if bool(r.get("proxied", False)) != proxied or (ttl is not None and r.get("ttl") != ttl)
+    ]
+
+    steps = (
+        [f"move {r.get('content')} -> {address}" for r, address in moves]
+        + [f"create {address}" for address in creates]
+        + [f"adjust {r.get('content')}" for r in retag]
+    )
+    left_note = ""
+    if leftover:
+        left_note = f"; {len(leftover)} other record(s) remain: " + ", ".join(str(r.get("content")) for r in leftover)
+    if not steps:
+        if leftover:
+            return SyncResult(
+                name, "manual", f"{record_type}={', '.join(wanted)} present for {domain}{left_note}: delete by hand"
+            )
+        return SyncResult(name, "noop", f"{record_type}={', '.join(wanted)} already correct in zone {zone_name}")
+    if dry_run:
+        verb = "would-update" if (moves or retag) else "would-create"
+        detail = f"{record_type} {domain} -> {', '.join(wanted)} in zone {zone_name}: {'; '.join(steps)}"
+        if leftover:
+            # Same outcome class as the real run: a restore that leaves records for a human is not clean.
+            return SyncResult(name, "manual", f"{verb}: {detail}{left_note}: they would have to be deleted by hand")
+        return SyncResult(name, verb, detail)
+
+    body_extra: dict[str, object] = {"proxied": proxied}
+    if ttl is not None:
+        body_extra["ttl"] = ttl
+    try:
+        for record, address in moves:
+            url = f"{CF_API_BASE}/zones/{zone_id}/dns_records/{record['id']}"
+            _cf_request(url, cf_headers, timeout, max_retries, method="PATCH", data={"content": address, **body_extra})
+        for record in retag:
+            url = f"{CF_API_BASE}/zones/{zone_id}/dns_records/{record['id']}"
+            _cf_request(url, cf_headers, timeout, max_retries, method="PATCH", data=body_extra)
+        for address in creates:
+            url = f"{CF_API_BASE}/zones/{zone_id}/dns_records"
+            data = {"type": record_type, "name": domain, "content": address, **body_extra}
+            _cf_request(url, cf_headers, timeout, 1, method="POST", data=data)  # one attempt: a POST is not idempotent
+    except Exception as e:
+        return SyncResult(name, "failed", f"Cloudflare write failed part way ({'; '.join(steps)}): {e}")
+
+    try:
+        confirm = _cf_request(rec_url, cf_headers, timeout, max_retries)
+    except Exception as e:
+        return SyncResult(name, "failed", f"write accepted but read-back failed: {e}")
+    if _truncated(confirm):
+        return SyncResult(
+            name,
+            "failed",
+            f"write accepted but the listing for {domain} may now be incomplete ({_PER_PAGE} records or more)",
+        )
+    present = sorted(str(r.get("content")) for r in (confirm.get("result") or []) if r.get("type") == record_type)
+    absent = [address for address in wanted if address not in present]
+    if absent:
+        return SyncResult(
+            name, "failed", f"write accepted but {record_type}={', '.join(absent)} not found on read-back"
+        )
+    if not allow_extra and present != sorted(wanted):
+        # An unwanted or duplicate record still published would keep traffic reaching the old host.
+        return SyncResult(
+            name,
+            "failed",
+            f"write accepted but read-back shows {record_type} {', '.join(present)}, not exactly {', '.join(wanted)}",
+        )
+    wrong_fields = [
+        str(r.get("content"))
+        for r in (confirm.get("result") or [])
+        if r.get("type") == record_type
+        and r.get("content") in wanted
+        and (bool(r.get("proxied", False)) != proxied or (ttl is not None and r.get("ttl") != ttl))
+    ]
+    if wrong_fields:
+        return SyncResult(
+            name,
+            "failed",
+            f"write accepted but the read-back shows a different proxied flag or TTL on {', '.join(wrong_fields)}",
+        )
+
+    # A record left in place for a human (restore mode) that is still proxied makes Cloudflare answer with its own
+    # edge addresses, so the authoritative answer cannot show the restored origin: the API read-back above is the
+    # check, and the result below is "manual" naming the retained record, not a failure.
+    retained_proxied = allow_extra and any(bool(r.get("proxied", False)) for r in leftover)
+    if verify_resolution and nameservers and not proxied and not retained_proxied:
+        answers = _resolve_via_authoritative_ns(domain, record_type, nameservers[0], timeout)
+        if answers is not None:
+            answered = {a.rstrip(".") for a in answers}
+            not_answered = [address for address in wanted if address not in answered]
+            unexpected = sorted(answered - set(wanted)) if not allow_extra else []
+            if not_answered or unexpected:
+                problem = (
+                    f"missing {', '.join(not_answered)}" if not_answered else f"also answers {', '.join(unexpected)}"
+                )
+                return SyncResult(
+                    name,
+                    "failed",
+                    f"write accepted and read back but {nameservers[0]} answers {answers}, {problem}",
+                )
+
+    verb = "updated" if (moves or retag) else "created"
+    if leftover:
+        return SyncResult(
+            name, "manual", f"{verb} {record_type} {domain} -> {', '.join(wanted)}{left_note}: delete by hand"
+        )
+    return SyncResult(name, verb, f"{verb} {record_type} {domain} -> {', '.join(wanted)} in zone {zone_name}")
+
+
+_PER_PAGE = 100
+
+
+def _truncated(data: dict) -> bool:
+    """True when the listing may be only part of the name's records, so it must never be reconciled (a wanted
+    address on a later page would be created twice, an unwanted one never seen): Cloudflare reports more than one
+    page, the page count is unreadable, or the page is full and the count is absent (a full page cannot prove
+    it is the last one)."""
+    info = data.get("result_info") or {}
+    pages = info.get("total_pages")
+    if pages is None:
+        return len(data.get("result") or []) >= _PER_PAGE
+    try:
+        return int(pages) > 1
+    except (TypeError, ValueError):
+        return True
