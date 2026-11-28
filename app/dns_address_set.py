@@ -259,7 +259,8 @@ def sync_dns_address_set(
                     name,
                     "failed",
                     f"write accepted and read back but {nameservers[0]} answers {answers}, {problem} "
-                    f"(checked {attempts} time(s)); the write is likely fine, re-check with --dry-run",
+                    f"(checked {attempts} time(s)); the API has the records, so the nameserver may only be slow: "
+                    f"ask it again with `dig +short {domain} {record_type} @{nameservers[0]}`",
                 )
 
     verb = "updated" if (moves or retag) else "created"

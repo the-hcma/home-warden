@@ -78,7 +78,9 @@ def test_sync_dns_record_fails_only_after_the_tries_and_says_so(monkeypatch) -> 
     monkeypatch.setattr(catalog_checks, "_resolve_via_authoritative_ns", resolver)
     result = sync_dns_record("app", {"server_name": "app.example.com"}, "192.0.2.30", {"x": "y"}, 5.0, 1)
     assert result.status == "failed"
-    assert "checked 3 time(s)" in result.detail and "re-check with --dry-run" in result.detail
+    assert "checked 3 time(s)" in result.detail
+    assert "dig +short app.example.com A @ns1.example.net" in result.detail
+    assert "--dry-run" not in result.detail
     assert resolver.calls == 3
 
 
@@ -98,3 +100,4 @@ def test_sync_dns_address_set_fails_only_after_the_tries_and_says_so(monkeypatch
     monkeypatch.setattr(dns_address_set, "_resolve_via_authoritative_ns", resolver)
     result = sync_dns_address_set("app", {"server_name": "app.example.com"}, ["192.0.2.30"], {"x": "y"}, 5.0, 1)
     assert result.status == "failed" and "checked 2 time(s)" in result.detail
+    assert "dig +short app.example.com A @ns1.example.net" in result.detail and "--dry-run" not in result.detail

@@ -897,7 +897,8 @@ def sync_dns_record(
                 name,
                 "failed",
                 f"write accepted and read back but {nameservers[0]} answers {answers}, not {target} "
-                f"(checked {attempts} time(s)); the write is likely fine, re-check with --dry-run",
+                f"(checked {attempts} time(s)); the API has the record, so the nameserver may only be slow: "
+                f"ask it again with `dig +short {domain} {record_type} @{nameservers[0]}`",
             )
 
     verb = "updated" if action == "update" else "created"
