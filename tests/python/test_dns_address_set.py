@@ -244,3 +244,28 @@ def test_restore_mode_allows_extra_records_in_the_read_back_and_the_answer(cloud
     )
     result = _sync(["192.0.2.10"], allow_extra=True)
     assert result.status == "manual"
+
+
+def test_a_listing_that_grows_a_second_page_after_the_write_is_a_failure(cloudflare, monkeypatch) -> None:
+    fake = cloudflare([{"type": "A", "content": "192.0.2.10"}])
+    original = fake.__call__
+
+    def second_page_after_write(url, headers, timeout, max_retries, *, method="GET", data=None):
+        result = original(url, headers, timeout, max_retries, method=method, data=data)
+        if method == "GET" and "/dns_records?name=" in url and fake.writes():
+            result = {**result, "result_info": {"total_pages": 2}}
+        return result
+
+    monkeypatch.setattr(dns_address_set, "_cf_request", second_page_after_write)
+    result = _sync(["192.0.2.30", "192.0.2.9"], verify_resolution=False)
+    assert result.status == "failed" and "now has more than 100 records" in result.detail
+
+
+@pytest.mark.parametrize("info", [{"total_pages": 1}, {"total_pages": None}, {}, None])
+def test_a_missing_or_single_page_count_is_a_complete_listing(info) -> None:
+    assert dns_address_set._truncated({"result": [], "result_info": info}) is False
+
+
+@pytest.mark.parametrize("info", [{"total_pages": 2}, {"total_pages": "many"}, {"total_pages": [3]}])
+def test_a_multi_page_or_unreadable_page_count_counts_as_truncated(info) -> None:
+    assert dns_address_set._truncated({"result": [], "result_info": info}) is True
