@@ -422,7 +422,11 @@ def test_an_unreadable_unit_execstart_never_restarts_for_a_changed_config_path(t
     scratch.mkdir()
     calls = tmp_path / "calls"
     calls.write_text("")
-    stub(bin_dir, "nginx", f'case "$*" in *-T*) echo "# configuration file {conf_path}:"; cat "{conf_path}";; esac\nexit 0\n')
+    stub(
+        bin_dir,
+        "nginx",
+        f'case "$*" in *-T*) echo "# configuration file {conf_path}:"; cat "{conf_path}";; esac\nexit 0\n',
+    )
     stub(bin_dir, "ps", 'echo "nginx: master process /usr/sbin/nginx -c /old/nginx.conf -g daemon off;"\n')
     # ExecStart cannot be read: the show prints nothing
     stub(bin_dir, "systemctl", f'echo "$*" >> "{calls}"\ncase "$*" in *MainPID*) echo 4242;; esac\nexit 0\n')
