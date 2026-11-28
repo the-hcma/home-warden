@@ -11,7 +11,13 @@
 #   HEALTHCHECK_OK_STATUSES  default: 200,204,301,302,303,307,308
 #   HEALTHCHECK_RESEND_SEC   default: 1800 (re-alert while still failing)
 #   HEALTHCHECK_SERVICE      default: home-warden.service
+#   HEALTHCHECK_SOCKET       default: home-warden.socket
 #   SCRATCH_DIR              default: ~/scratch/home-warden
+#
+# The service is socket-activated: after a boot (or when idle) home-warden.service can be inactive while
+# home-warden.socket listens, and the first connection starts it. That is not a failure; the probe below is
+# that first connection. Unhealthy means: the socket is not listening, the service failed or is restarting,
+# curl is missing, or HTTPS does not answer with an accepted status.
 #
 # Exit: always 0 when run from the timer (email is the alarm). Use --check-only
 # to exit 1 on unhealthy for manual / CI probing (no mail, no state writes).
@@ -42,6 +48,7 @@ connect_timeout_sec="${HEALTHCHECK_CONNECT_TIMEOUT_SEC:-3}"
 ok_statuses="${HEALTHCHECK_OK_STATUSES:-200,204,301,302,303,307,308}"
 resend_sec="${HEALTHCHECK_RESEND_SEC:-1800}"
 service_name="${HEALTHCHECK_SERVICE:-home-warden.service}"
+socket_name="${HEALTHCHECK_SOCKET:-home-warden.socket}"
 state_file="${scratch_dir}/healthcheck.state"
 log_file="${scratch_dir}/healthcheck.log"
 
@@ -97,13 +104,34 @@ mkdir -p "${scratch_dir}"
 log_out() {
   local msg=$1
   local ts
-  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ) ($(date '+%-I:%M:%S %p %Z'))"
   if [[ -n "${INVOCATION_ID:-}" ]]; then
     printf '%s %s\n' "${ts}" "${msg}"
   elif ((verbose)); then
     printf '%s %s\n' "${ts}" "${msg}" | tee -a "${log_file}"
   else
     printf '%s %s\n' "${ts}" "${msg}" >>"${log_file}"
+  fi
+}
+
+# "7:12 AM EST, Nov 28 (12:12 UTC Nov 28)": local time first, UTC in parentheses.
+fmt_time() {
+  local epoch=$1
+  local local_fmt='+%-I:%M %p %Z, %b %-d'
+  local utc_fmt='+%H:%M UTC %b %-d'
+  printf '%s (%s)' \
+    "$(date -d "@${epoch}" "${local_fmt}" 2>/dev/null || date -r "${epoch}" "${local_fmt}")" \
+    "$(date -u -d "@${epoch}" "${utc_fmt}" 2>/dev/null || date -u -r "${epoch}" "${utc_fmt}")"
+}
+
+fmt_duration() {
+  local sec=$1
+  if ((sec < 90)); then
+    printf '%ss' "${sec}"
+  elif ((sec < 5400)); then
+    printf '%s min' "$(((sec + 30) / 60))"
+  else
+    printf '%sh %smin' "$((sec / 3600))" "$(((sec % 3600) / 60))"
   fi
 }
 
@@ -119,17 +147,41 @@ status_ok() {
   return 1
 }
 
+idle_start=0
+
 probe() {
-  # Sets nameref: ok (0/1), detail (string)
+  # Sets nameref: ok (0/1), detail (string); idle_start=1 when the socket was up and the service idle
   local -n _ok=$1
   local -n _detail=$2
   _ok=1
   _detail=""
 
-  if ! systemctl is-active --quiet "${service_name}" 2>/dev/null; then
-    _ok=0
-    _detail="${service_name} is not active ($(systemctl is-active "${service_name}" 2>/dev/null || echo unknown))"
-    return 0
+  idle_start=0
+  # One reading of each state: a request that starts the idle service between two readings must not make
+  # the check report "not active (active)".
+  local svc_state sock_state svc_rc=0 sock_rc=0
+  svc_state="$(systemctl is-active "${service_name}" 2>/dev/null)" || svc_rc=$?
+  sock_state="$(systemctl is-active "${socket_name}" 2>/dev/null)" || sock_rc=$?
+  if ((svc_rc != 0)); then
+    if [[ "${svc_state}" == "failed" ]]; then
+      _ok=0
+      _detail="${service_name} has failed (check: journalctl -u ${service_name} -n 50)"
+      return 0
+    fi
+    if [[ "${svc_state}" != "inactive" ]]; then
+      _ok=0
+      _detail="${service_name} is not active (${svc_state:-unknown}); a restart loop shows as activating"
+      return 0
+    fi
+    if ((sock_rc != 0)); then
+      _ok=0
+      _detail="${service_name} is inactive and ${socket_name} is ${sock_state:-unknown}: "
+      _detail+="nothing is listening on ports 80 and 443 (check: systemctl status ${socket_name})"
+      return 0
+    fi
+    # Inactive service, listening socket: normal after a boot (the first connection starts it).
+    # The probe below is that connection.
+    idle_start=1
   fi
 
   if ! command -v curl >/dev/null 2>&1; then
@@ -160,6 +212,9 @@ probe() {
     return 0
   fi
   _detail="ok service=${service_name} https=${url} status=${code}"
+  if ((idle_start)); then
+    _detail="${_detail} (the service was idle, waiting for its first connection; this probe started it)"
+  fi
   return 0
 }
 
@@ -167,9 +222,13 @@ probe() {
 read_state() {
   local -n _ps=$1
   local -n _la=$2
+  local -n _ff=$3
+  local -n _fd=$4
   local line key val
   _ps="unknown"
   _la=0
+  _ff=0
+  _fd=""
   [[ -f "${state_file}" ]] || return 0
   while IFS= read -r line || [[ -n "${line}" ]]; do
     [[ "${line}" =~ ^[[:space:]]*# ]] && continue
@@ -188,6 +247,14 @@ read_state() {
           _la="${val}"
         fi
         ;;
+      first_fail_epoch)
+        if [[ "${val}" =~ ^[0-9]+$ ]]; then
+          _ff="${val}"
+        fi
+        ;;
+      fail_detail)
+        _fd="${val}"
+        ;;
     esac
   done <"${state_file}"
 }
@@ -196,6 +263,8 @@ write_state() {
   local st=$1
   local la=$2
   local detail=$3
+  local ff=${4:-0}
+  local fd=${5:-}
   local tmp
   umask 077
   tmp="$(mktemp "${scratch_dir}/healthcheck.state.XXXXXX")"
@@ -203,6 +272,8 @@ write_state() {
   {
     printf 'status=%s\n' "${st}"
     printf 'last_alert_epoch=%s\n' "${la}"
+    printf 'first_fail_epoch=%s\n' "${ff}"
+    printf 'fail_detail=%s\n' "$(printf '%s' "${fd}" | tr '\n\r' '  ')"
     printf '# last_detail=%s\n' "${detail}"
   } >"${tmp}"
   mv -f "${tmp}" "${state_file}"
@@ -216,7 +287,7 @@ send_mail() {
     return 0
   fi
   if command -v sendmail >/dev/null 2>&1; then
-    sendmail -t <<EOF
+    if sendmail -t <<EOF
 From: ${email_from}
 To: ${email_to}
 Subject: ${subject}
@@ -224,11 +295,16 @@ Content-Type: text/plain; charset=UTF-8
 
 ${body}
 EOF
-    return 0
+    then
+      return 0
+    fi
+    return 1
   fi
   if command -v mail >/dev/null 2>&1; then
-    printf '%s\n' "${body}" | mail -s "${subject}" -r "${email_from}" "${email_to}"
-    return 0
+    if printf '%s\n' "${body}" | mail -s "${subject}" -r "${email_from}" "${email_to}"; then
+      return 0
+    fi
+    return 1
   fi
   log_out "ERROR: neither sendmail nor mail found — cannot send: ${subject}"
   return 1
@@ -241,9 +317,14 @@ probe healthy detail
 
 prev_status="unknown"
 last_alert=0
-read_state prev_status last_alert
+first_fail=0
+first_fail_detail=""
+read_state prev_status last_alert first_fail first_fail_detail
 if [[ ! "${last_alert}" =~ ^[0-9]+$ ]]; then
   last_alert=0
+fi
+if [[ ! "${first_fail}" =~ ^[0-9]+$ ]]; then
+  first_fail=0
 fi
 
 host_short="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo host)"
@@ -255,11 +336,22 @@ if ((healthy)); then
     exit 0
   fi
   if [[ "${prev_status}" == "fail" ]]; then
-    send_mail "${subject_prefix} RECOVERED" \
-      "home-warden healthcheck recovered at $(date -u +%Y-%m-%dT%H:%M:%SZ).
+    down_for=""
+    since_line="It was unhealthy since an earlier check; the start time was not recorded."
+    if ((first_fail > 0)); then
+      down_for="$((now_epoch - first_fail))"
+      since_line="Unhealthy from $(fmt_time "${first_fail}") to $(fmt_time "${now_epoch}"),"
+      since_line+=" about $(fmt_duration "${down_for}")."
+    fi
+    if ! send_mail "${subject_prefix} RECOVERED" \
+      "home-warden on ${host_short} is healthy again.
 
-${detail}
-"
+${since_line}
+What was wrong: ${first_fail_detail:-not recorded}
+Now: ${detail}
+"; then
+      log_out "WARN: the RECOVERED mail could not be sent; the outage is closed anyway"
+    fi
     write_state "ok" "${now_epoch}" "${detail}"
   else
     write_state "ok" "${last_alert}" "${detail}"
@@ -272,6 +364,12 @@ if ((check_only)); then
   exit 1
 fi
 
+# The first failure of an outage starts the clock; later failures keep it and the first reason.
+if [[ "${prev_status}" != "fail" || "${first_fail}" -le 0 ]]; then
+  first_fail="${now_epoch}"
+  first_fail_detail="${detail}"
+fi
+
 should_alert=0
 if [[ "${prev_status}" != "fail" ]]; then
   should_alert=1
@@ -280,17 +378,35 @@ elif ((now_epoch - last_alert >= resend_sec)); then
 fi
 
 if ((should_alert)); then
-  send_mail "${subject_prefix} UNHEALTHY" \
-    "home-warden healthcheck FAILED at $(date -u +%Y-%m-%dT%H:%M:%SZ).
+  failing_line="First failed check: $(fmt_time "${first_fail}")."
+  if ((now_epoch - first_fail >= 60)); then
+    failing_line="Failing since $(fmt_time "${first_fail}"), for $(fmt_duration "$((now_epoch - first_fail))")."
+  fi
+  # Save the outage start before trying to mail it, so a failed delivery cannot restart the clock; last_alert stays
+  # old (0 for a new outage), so the next run tries the mail again.
+  pre_alert="${last_alert}"
+  if [[ "${prev_status}" != "fail" ]]; then
+    pre_alert=0
+  fi
+  write_state "fail" "${pre_alert}" "${detail}" "${first_fail}" "${first_fail_detail}"
+  if send_mail "${subject_prefix} UNHEALTHY" \
+    "home-warden on ${host_short} failed its health check at $(fmt_time "${now_epoch}").
 
-${detail}
+${failing_line}
 
-Host: ${host_short}
-Service: ${service_name}
-Resend interval: ${resend_sec}s
-"
-  write_state "fail" "${now_epoch}" "${detail}"
+Why: ${detail}
+
+Check: systemctl status ${service_name} ${socket_name}
+       journalctl -u ${service_name} -n 50
+       ${script_dir}/healthcheck --verbose --check-only
+
+You get a mail when this changes, and another every ${resend_sec}s while it keeps failing.
+"; then
+    write_state "fail" "${now_epoch}" "${detail}" "${first_fail}" "${first_fail_detail}"
+  else
+    log_out "WARN: the UNHEALTHY mail could not be sent; it will be tried again on the next check"
+  fi
 else
-  write_state "fail" "${last_alert}" "${detail}"
+  write_state "fail" "${last_alert}" "${detail}" "${first_fail}" "${first_fail_detail}"
 fi
 exit 0

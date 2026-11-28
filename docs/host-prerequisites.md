@@ -217,6 +217,8 @@ sudo systemctl start home-warden-certbot.service   # oneshot trial
 
 Minute timer probes `home-warden.service` and a local HTTPS request (`curl` to `127.0.0.1:443` with `HEALTHCHECK_HOST` as SNI/Host). Emails on first failure, re-alerts at most every `HEALTHCHECK_RESEND_SEC` (default 1800) while still down, and sends a recovery message when healthy again.
 
+The service is socket-activated, so right after a boot it can be inactive while `home-warden.socket` listens: that is not a failure, and the probe is the first connection that starts it (the log says so). `setup-service` also enables `home-warden.service`, so nginx normally starts with the host instead of at the first connection. An alert says why it failed, when the failure began (local time with UTC in parentheses) and for how long, and names the commands to run; the recovery message says when the outage started and how long it lasted. Log lines carry the local time after the UTC stamp.
+
 Copy [`etc/home-warden-healthcheck.env.example`](../etc/home-warden-healthcheck.env.example) to `~/.config/home-warden-healthcheck.env` (`chmod 600`). Set a real `HEALTHCHECK_EMAIL_TO` and `HEALTHCHECK_HOST` **only in that local file** (never in the repo). Without `HEALTHCHECK_EMAIL_TO`, the probe still runs and logs; mail is skipped.
 
 ```bash
