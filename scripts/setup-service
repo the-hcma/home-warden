@@ -470,9 +470,18 @@ web_ui_fqdn() {
     echo "ERROR: ${home_warden_config_path} exists but is not a readable file" >&2
     return 1
   fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "ERROR: python3 not found; it is needed to read ${home_warden_config_path}" >&2
+    return 1
+  fi
   python3 - "${home_warden_config_path}" <<'PYEOF'
 import sys
-import tomllib
+
+try:
+    import tomllib
+except ImportError:
+    sys.stderr.write("ERROR: python3 3.11 or newer (tomllib) is needed to read the web UI config\n")
+    sys.exit(1)
 
 try:
     with open(sys.argv[1], "rb") as handle:
@@ -480,7 +489,7 @@ try:
 except (tomllib.TOMLDecodeError, UnicodeDecodeError):
     sys.exit(0)
 except OSError as exc:
-    sys.stderr.write(f"cannot read {sys.argv[1]}: {exc}\n")
+    sys.stderr.write(f"ERROR: cannot read {sys.argv[1]}: {exc}\n")
     sys.exit(1)
 fqdn = data.get("fqdn", "") if isinstance(data, dict) else ""
 if isinstance(fqdn, str):
@@ -1465,8 +1474,7 @@ main() {
 
   maybe_create_web_ui_config
   if ! web_ui_fqdn_value="$(web_ui_fqdn)"; then
-    echo "ERROR: cannot read ${home_warden_config_path}: python3 3.11 or newer (tomllib) is required to decide whether the" \
-      "web UI is enabled; nothing was changed" >&2
+    echo "ERROR: cannot tell whether the web UI is enabled (the reason is above); nothing was changed" >&2
     exit 1
   fi
   if [[ -n "${web_ui_fqdn_value}" ]]; then

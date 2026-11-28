@@ -70,6 +70,22 @@ def test_a_missing_interpreter_is_an_error_not_an_unset_fqdn(tmp_path: Path) -> 
     result = _run_fqdn(config, str(empty_bin))
     assert result.returncode != 0
     assert result.stdout == ""
+    assert "python3 not found" in result.stderr and "3.11" not in result.stderr
+
+
+def test_a_python_without_tomllib_names_that_cause(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text('fqdn = "warden.example.com"\n')
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "tomllib.py").write_text('raise ImportError("no tomllib here")\n')
+    script = f'home_warden_config_path="{config}"\n{_bash_function("web_ui_fqdn")}\nweb_ui_fqdn\n'
+    bash = shutil.which("bash")
+    assert bash
+    env = {"PATH": f"{_python3_dir(tmp_path)}{os.pathsep}/usr/bin:/bin", "HOME": str(tmp_path), "PYTHONPATH": str(shim)}
+    result = subprocess.run([bash, "-c", script], capture_output=True, text=True, timeout=20, env=env, check=False)
+    assert result.returncode != 0 and result.stdout == ""
+    assert "3.11 or newer (tomllib)" in result.stderr
 
 
 def test_setup_service_checks_for_uv_before_installing_the_web_unit() -> None:
@@ -100,7 +116,7 @@ def test_setup_service_reads_the_fqdn_exactly_as_the_backend_does(text: str, tmp
 
 def test_setup_service_stops_instead_of_disabling_the_web_ui_when_it_cannot_read_the_config() -> None:
     text = SETUP.read_text()
-    assert re.search(r"if ! web_ui_fqdn_value=\"\$\(web_ui_fqdn\)\"; then\n.*\n.*\n\s+exit 1", text)
+    assert re.search(r"if ! web_ui_fqdn_value=\"\$\(web_ui_fqdn\)\"; then\n\s+echo .*\n\s+exit 1", text)
 
 
 def test_the_unit_and_setup_service_pass_the_resolved_paths_to_the_backend() -> None:
