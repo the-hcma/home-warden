@@ -136,8 +136,8 @@ def sync_dns_address_set(
         return SyncResult(
             name,
             "failed",
-            f"{domain} would hold {final_size} records of all types after this sync, more than the {_PER_PAGE - 1} that can be "
-            "listed in full; refusing before writing anything",
+            f"{domain} would hold {final_size} records of all types after this sync, "
+            f"more than the {_PER_PAGE - 1} that can be listed in full; refusing before writing anything",
         )
     if leftover and not allow_extra:
         extra = ", ".join(
