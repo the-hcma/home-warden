@@ -91,14 +91,6 @@ def test_sync_dns_record_succeeds_when_the_nameserver_catches_up(monkeypatch) ->
 
 
 @pytest.mark.parametrize(
-    ("value", "expected"), [("0", 1), ("x", 5), ("-3", 1), ("7", 7), ("20", 20), ("21", 20), ("100000", 20), ("2.5", 5)]
-)
-def test_the_tries_setting_is_bounded_both_ways_and_forgiving(monkeypatch, value: str, expected: int) -> None:
-    monkeypatch.setenv("DNS_SYNC_ANSWER_TRIES", value)
-    assert catalog_checks._answer_tries() == expected
-
-
-@pytest.mark.parametrize(
     ("value", "expected"),
     [
         ("0", 0.0),
@@ -120,17 +112,25 @@ def test_the_delay_setting_is_bounded_both_ways_and_ignores_non_finite_values(
     assert catalog_checks._answer_delay() == expected
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"), [("0", 1), ("x", 5), ("-3", 1), ("7", 7), ("20", 20), ("21", 20), ("100000", 20), ("2.5", 5)]
+)
+def test_the_tries_setting_is_bounded_both_ways_and_forgiving(monkeypatch, value: str, expected: int) -> None:
+    monkeypatch.setenv("DNS_SYNC_ANSWER_TRIES", value)
+    assert catalog_checks._answer_tries() == expected
+
+
 class _Resolver:
     """Answers each call from `script`, repeating the last entry."""
-
-    def __init__(self, script: list[list[str] | None]) -> None:
-        self.script = script
-        self.calls = 0
 
     def __call__(self, *args, **kwargs):
         answer = self.script[min(self.calls, len(self.script) - 1)]
         self.calls += 1
         return answer
+
+    def __init__(self, script: list[list[str] | None]) -> None:
+        self.script = script
+        self.calls = 0
 
 
 def _cloudflare(record_ip: str):
