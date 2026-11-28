@@ -156,15 +156,13 @@ probe() {
   _ok=1
   _detail=""
 
-  local svc_state sock_state
   idle_start=0
-  if ! systemctl is-active --quiet "${service_name}" 2>/dev/null; then
-    svc_state="$(systemctl is-active "${service_name}" 2>/dev/null || true)"
-    if systemctl is-active --quiet "${socket_name}" 2>/dev/null; then
-      sock_state="active"
-    else
-      sock_state="$(systemctl is-active "${socket_name}" 2>/dev/null || true)"
-    fi
+  # One reading of each state: a request that starts the idle service between two readings must not make
+  # the check report "not active (active)".
+  local svc_state sock_state svc_rc=0 sock_rc=0
+  svc_state="$(systemctl is-active "${service_name}" 2>/dev/null)" || svc_rc=$?
+  sock_state="$(systemctl is-active "${socket_name}" 2>/dev/null)" || sock_rc=$?
+  if ((svc_rc != 0)); then
     if [[ "${svc_state}" == "failed" ]]; then
       _ok=0
       _detail="${service_name} has failed (check: journalctl -u ${service_name} -n 50)"
@@ -175,7 +173,7 @@ probe() {
       _detail="${service_name} is not active (${svc_state:-unknown}); a restart loop shows as activating"
       return 0
     fi
-    if [[ "${sock_state}" != "active" ]]; then
+    if ((sock_rc != 0)); then
       _ok=0
       _detail="${service_name} is inactive and ${socket_name} is ${sock_state:-unknown}: "
       _detail+="nothing is listening on ports 80 and 443 (check: systemctl status ${socket_name})"
@@ -345,13 +343,15 @@ if ((healthy)); then
       since_line="Unhealthy from $(fmt_time "${first_fail}") to $(fmt_time "${now_epoch}"),"
       since_line+=" about $(fmt_duration "${down_for}")."
     fi
-    send_mail "${subject_prefix} RECOVERED" \
+    if ! send_mail "${subject_prefix} RECOVERED" \
       "home-warden on ${host_short} is healthy again.
 
 ${since_line}
 What was wrong: ${first_fail_detail:-not recorded}
 Now: ${detail}
-"
+"; then
+      log_out "WARN: the RECOVERED mail could not be sent; the outage is closed anyway"
+    fi
     write_state "ok" "${now_epoch}" "${detail}"
   else
     write_state "ok" "${last_alert}" "${detail}"

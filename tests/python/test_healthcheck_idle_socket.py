@@ -165,3 +165,37 @@ def test_a_failed_mail_keeps_the_outage_start_and_is_retried(tmp_path: Path) -> 
     assert "UNHEALTHY" in mail
     assert "for 5 min" in mail
     assert earlier in state.read_text().splitlines()
+
+
+def test_a_service_started_between_readings_is_not_reported_as_not_active(tmp_path: Path) -> None:
+    env = _stubs(tmp_path, service="inactive", socket="active")
+    flag = tmp_path / "first-call-done"
+    (tmp_path / "bin" / "systemctl").write_text(
+        "#!/usr/bin/env bash\n"
+        'if [[ "$1" == is-active ]]; then\n'
+        '  case "${@: -1}" in\n'
+        "    home-warden.service)\n"
+        f'      if [[ -e "{flag}" ]]; then echo active; exit 0; fi\n'
+        f'      touch "{flag}"; echo inactive; exit 3 ;;\n'
+        "    home-warden.socket) echo active; exit 0 ;;\n"
+        "  esac\n"
+        "fi\nexit 0\n"
+    )
+    result = _run(env, "--check-only")
+    assert result.returncode == 0, result.stdout + result.stderr
+    _run(env)
+    assert "is not active (active)" not in (tmp_path / "scratch" / "healthcheck.log").read_text()
+    assert _mail(tmp_path) == ""
+
+
+def test_a_failed_recovery_mail_still_closes_the_outage(tmp_path: Path) -> None:
+    env = _stubs(tmp_path, service="inactive", socket="inactive")
+    _run(env)
+    (tmp_path / "bin" / "sendmail").write_text("#!/usr/bin/env bash\ncat >/dev/null\nexit 75\n")
+    _stubs(tmp_path, service="active", socket="active")
+    (tmp_path / "bin" / "sendmail").write_text("#!/usr/bin/env bash\ncat >/dev/null\nexit 75\n")
+    _run(env)
+    lines = (tmp_path / "scratch" / "healthcheck.state").read_text().splitlines()
+    assert "status=ok" in lines
+    assert "first_fail_epoch=0" in lines
+    assert "RECOVERED mail could not be sent" in (tmp_path / "scratch" / "healthcheck.log").read_text()
