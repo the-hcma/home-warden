@@ -276,8 +276,9 @@ def _resolve_via_authoritative_ns(
 ) -> list[str] | None:
     """Query `nameserver` directly for `domain`'s `record_type` records via
     `dig`, bypassing any resolver cache -- a zone's own authoritative
-    nameservers answer a just-written record immediately, with none of a
-    public resolver's propagation/TTL-caching delay to account for.
+    nameservers skip a public resolver's TTL caching, but they can still
+    serve the old record for a moment after a write was accepted (see
+    `wait_for_authoritative_answer`, which asks again).
 
     `port` targets a non-standard port (e.g. the local PowerDNS
     authoritative server's loopback:853, per #108) -- omitted (the
@@ -910,17 +911,26 @@ def wait_for_authoritative_answer(
 ) -> tuple[list[str] | None, int]:
     """Ask `resolve` (one authoritative query) until `accepts` its answer, up to DNS_SYNC_ANSWER_TRIES times
     DNS_SYNC_ANSWER_DELAY_S apart. A zone's nameserver can still serve the old record for a moment after the API
-    accepted a write, so one disagreeing answer right after a write is not a failure yet. Returns (the last answer,
-    how many queries were made); an answer of None (no dig, no reply) ends the wait at once: nothing to wait for."""
+    accepted a write, so one disagreeing answer right after a write is not a failure yet.
+
+    Returns (the last real answer, how many queries were made). An answer of None (no dig, no reply) before any real
+    answer ends the wait at once: there is nothing to wait for. A None after a real answer is one query that could not
+    be answered, not a pass: the wait goes on, and if no later query is accepted the last real answer is returned, so
+    a disagreement seen earlier is still reported as one."""
     tries = _answer_tries()
     delay = _answer_delay()
-    answers: list[str] | None = None
+    last_real: list[str] | None = None
     attempts = 0
     for attempt in range(tries):
         if attempt:
             time.sleep(delay)
         answers = resolve()
         attempts += 1
-        if answers is None or accepts(answers):
+        if answers is None:
+            if last_real is None:
+                return None, attempts
+            continue
+        last_real = answers
+        if accepts(answers):
             break
-    return answers, attempts
+    return last_real, attempts
