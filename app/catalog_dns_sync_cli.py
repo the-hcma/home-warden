@@ -45,39 +45,6 @@ from app.catalog_health_settings import (
 )
 from app.dns_cutover import find_stragglers, load_snapshot, restore_snapshot, take_snapshot, write_snapshot
 
-_DNS_ONLY_NAME = re.compile(
-    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{0,58}[a-z0-9])$"
-)
-
-
-def _normalize_name(name: str) -> str:
-    """Lower-case and drop at most one trailing root dot (two dots stay malformed)."""
-    name = name.strip().lower()
-    return name[:-1] if name.endswith(".") else name
-
-
-def parse_dns_only(specs: list[str], catalog_names: set[str]) -> list[tuple[dict, str | None]]:
-    """`--dns-only NAME[=TARGET]` -> [(service-like dict, target or None)]. A name with a Cloudflare record but no
-    vhost (no cert, no upstream) is synced like a catalog service. Raises ValueError for a malformed or repeated name,
-    or one that is already a catalog server_name (give that one to --service instead)."""
-    parsed: list[tuple[dict, str | None]] = []
-    seen: set[str] = set()
-    for spec in specs:
-        name, _, target = spec.partition("=")
-        name = _normalize_name(name)
-        target = target.strip()
-        if not _DNS_ONLY_NAME.match(name):
-            raise ValueError(f"--dns-only {spec!r}: {name!r} is not a fully qualified host name")
-        if "=" in spec and not target:
-            raise ValueError(f"--dns-only {spec!r}: nothing after '='")
-        if name in catalog_names:
-            raise ValueError(f"--dns-only {name}: already a catalog server_name; it is synced as a catalog service")
-        if name in seen:
-            raise ValueError(f"--dns-only {name}: given twice")
-        seen.add(name)
-        parsed.append(({"name": name, "server_name": name}, target or None))
-    return parsed
-
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Create/update Cloudflare DNS records for catalog services.")
@@ -241,6 +208,40 @@ def main() -> int:
         if leftovers:
             return 1
     return 1 if any(r.status == "failed" for r in results) else 0
+
+
+def parse_dns_only(specs: list[str], catalog_names: set[str]) -> list[tuple[dict, str | None]]:
+    """`--dns-only NAME[=TARGET]` -> [(service-like dict, target or None)]. A name with a Cloudflare record but no
+    vhost (no cert, no upstream) is synced like a catalog service. Raises ValueError for a malformed or repeated name,
+    or one that is already a catalog server_name (give that one to --service instead)."""
+    parsed: list[tuple[dict, str | None]] = []
+    seen: set[str] = set()
+    for spec in specs:
+        name, _, target = spec.partition("=")
+        name = _normalize_name(name)
+        target = target.strip()
+        if not _DNS_ONLY_NAME.match(name):
+            raise ValueError(f"--dns-only {spec!r}: {name!r} is not a fully qualified host name")
+        if "=" in spec and not target:
+            raise ValueError(f"--dns-only {spec!r}: nothing after '='")
+        if name in catalog_names:
+            raise ValueError(f"--dns-only {name}: already a catalog server_name; it is synced as a catalog service")
+        if name in seen:
+            raise ValueError(f"--dns-only {name}: given twice")
+        seen.add(name)
+        parsed.append(({"name": name, "server_name": name}, target or None))
+    return parsed
+
+
+_DNS_ONLY_NAME = re.compile(
+    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{0,58}[a-z0-9])$"
+)
+
+
+def _normalize_name(name: str) -> str:
+    """Lower-case and drop at most one trailing root dot (two dots stay malformed)."""
+    name = name.strip().lower()
+    return name[:-1] if name.endswith(".") else name
 
 
 def _restore(args: argparse.Namespace) -> int:
