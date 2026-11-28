@@ -337,3 +337,106 @@ def test_a_failing_systemctl_show_does_not_abort_the_reload(tmp_path) -> None:
         "hw_unit_nginx_conf home-warden.service\necho survived", env={"PATH": f"{bin_dir}:{os.environ['PATH']}"}
     )
     assert result.returncode == 0 and result.stdout.strip() == "survived"
+
+
+# ---- review round: parsing, coverage, save ordering, manifest --------------------------------------------------------
+
+
+def test_a_listen_inside_a_one_line_server_block_counts() -> None:
+    assert listens("server { listen 80; }\n") != listens("server { listen 80; }\nserver { listen [::]:443 ssl; }\n")
+    assert listens("server {\n  listen\n    [::]:443\n    ssl;\n}\n") == listens("server { listen [::]:443 ssl; }\n")
+
+
+def test_a_listen_with_an_address_and_no_port_is_port_80() -> None:
+    assert listens("listen [::];\n") == listens("listen [::]:80;\n")
+    assert listens("listen [::];\n") != listens("")
+    # a bare high port stays out, like any unprivileged port
+    assert listens("listen 8080;\n") == listens("")
+
+
+def test_a_privileged_listen_the_sockets_cannot_supply_is_not_recorded(tmp_path) -> None:
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "nginx-listens.sha256").write_text("old\n")
+    result = bash(f'hw_nginx_record_listens "{scratch}"', stdin=dump_of("server { listen 127.0.0.1:443 ssl; }\n"))
+    assert result.returncode == 2
+    assert "127.0.0.1:443" in result.stderr
+    assert (scratch / "nginx-listens.sha256").read_text() == "old\n"
+
+
+def test_the_listens_setup_can_supply_are_recorded(tmp_path) -> None:
+    scratch = tmp_path / "scratch"
+    conf = "server { listen 80; listen [::]:80; listen 443 ssl; listen [::]:443 ssl; listen 8443 ssl; }\n"
+    assert bash(f'hw_nginx_record_listens "{scratch}"', stdin=dump_of(conf)).returncode == 0
+
+
+def test_the_files_manifest_cannot_be_forged_by_a_file_whose_content_looks_like_another_record(tmp_path) -> None:
+    (tmp_path / "a.yml").write_text('"x"')
+    (tmp_path / "b.yml").write_text('"y"')
+    both = bash(f'hw_fingerprint_files "{tmp_path}/a.yml" "{tmp_path}/b.yml"').stdout
+    (tmp_path / "forged").mkdir()
+    (tmp_path / "forged" / "a.yml").write_text('"x"' + "\n" + "b.yml" + "\n" + '"y"')
+    forged = bash(f'hw_fingerprint_files "{tmp_path}/forged/a.yml"').stdout
+    assert both != forged
+
+
+def test_the_recursor_fingerprint_is_saved_only_after_it_answers_so_a_dead_restart_is_retried(tmp_path) -> None:
+    bin_dir = tmp_path / "rbin"
+    stub(bin_dir, "pdns_recursor", "exit 0\n")
+    stub(bin_dir, "systemctl", "exit 0\n")
+    stub(bin_dir, "rec_control", "exit 1\n")
+    yaml = tmp_path / "recursor.yml"
+    yaml.write_text("recursor:\n  threads: 4\n")
+    state = tmp_path / "state"
+    state.write_text("oldfingerprint\n")
+    script = f'log() {{ echo "$*"; }}\nhw_recursor_restart_if_changed "{yaml}" "{state}" pdns-recursor.service'
+    result = bash(script, env={"PATH": f"{bin_dir}:{os.environ['PATH']}", "HW_RECURSOR_PING_WAIT": "0"})
+    assert result.returncode == 1
+    assert state.read_text().strip() == "oldfingerprint"
+
+
+def test_an_unwritable_state_file_fails_the_first_run_and_the_restart_instead_of_logging_success(tmp_path) -> None:
+    bin_dir = tmp_path / "rbin"
+    stub(bin_dir, "pdns_recursor", "exit 0\n")
+    stub(bin_dir, "systemctl", "exit 0\n")
+    stub(bin_dir, "rec_control", "exit 0\n")
+    yaml = tmp_path / "recursor.yml"
+    yaml.write_text("recursor:\n  threads: 4\n")
+    blocked = tmp_path / "blocked"
+    blocked.write_text("a file, so the state path below it cannot be created")
+    state = blocked / "state"
+    script = (
+        f'log() {{ echo "$*"; }}\nif ! hw_recursor_restart_if_changed "{yaml}" "{state}" pdns-recursor.service;'
+        " then echo failed; fi"
+    )
+    result = bash(script, env={"PATH": f"{bin_dir}:{os.environ['PATH']}", "HW_RECURSOR_PING_WAIT": "0"})
+    assert "failed" in result.stdout
+    assert "recorded the recursor config fingerprint" not in result.stdout
+
+
+def test_an_unreadable_unit_execstart_never_restarts_for_a_changed_config_path(tmp_path) -> None:
+    bin_dir = tmp_path / "bin"
+    conf_path = tmp_path / "nginx.conf"
+    conf_path.write_text(CONF)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    calls = tmp_path / "calls"
+    calls.write_text("")
+    stub(bin_dir, "nginx", f'case "$*" in *-T*) echo "# configuration file {conf_path}:"; cat "{conf_path}";; esac\nexit 0\n')
+    stub(bin_dir, "ps", 'echo "nginx: master process /usr/sbin/nginx -c /old/nginx.conf -g daemon off;"\n')
+    # ExecStart cannot be read: the show prints nothing
+    stub(bin_dir, "systemctl", f'echo "$*" >> "{calls}"\ncase "$*" in *MainPID*) echo 4242;; esac\nexit 0\n')
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "HOME_WARDEN_SKIP_HOST_GUARD": "1",
+        "SCRATCH_DIR": str(scratch),
+        "HOME_NGINX_CONF": str(conf_path),
+        "OWNER": "",
+    }
+    (scratch / "nginx-listens.sha256").write_text(listens(CONF) + "\n")
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "nginx-test-and-reload")], capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "reload home-warden.service" in calls.read_text() and "restart" not in calls.read_text()

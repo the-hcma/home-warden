@@ -7,26 +7,60 @@
 #
 # State lives in a file per fingerprint. No state file means "first run": record, do not restart.
 
-# hw_fingerprint_listens -- reads `nginx -T` output (the whole effective config, included files too) on stdin and prints the
-# sha256 of the set of PRIVILEGED listen addresses in it (port below 1024, no unix sockets). Only those matter here:
-# nginx runs unprivileged and gets ports 80 and 443 as inherited fds from home-warden.socket, which only setup-service
-# can change, while any other port nginx opens itself on a reload. It is a set (`sort -u`): every vhost repeats its own
-# `listen 443 ssl;`, and flags such as ssl or default_server are not part of the address. A config without any such
-# listen is valid and hashes the empty set (grep's exit 1 must not abort a caller running under pipefail).
-hw_fingerprint_listens() {
-  { grep -E '^[[:space:]]*listen[[:space:]]' || true; } \
-    | awk '{ spec = $2; sub(/;$/, "", spec); if (spec ~ /^unix:/) next; n = split(spec, parts, ":"); port = parts[n];
-             if (port ~ /^[0-9]+$/ && port + 0 < 1024) print spec }' \
-    | sort -u | sha256sum | cut -d' ' -f1
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=nginx-conf-statements
+source "$(dirname "${BASH_SOURCE[0]}")/nginx-conf-statements"
+
+# hw_fingerprint_listen_specs -- reads `nginx -T` output (the whole effective config, included files too) on stdin and prints
+# the PRIVILEGED listen addresses in it (port below 1024, no unix sockets), one per line, sorted and unique, as `address:port`
+# (a bare `listen 443` stays `443`; an address with no port, as in `listen [::];`, is port 80 as nginx reads it). The
+# config is split into statements the way nginx's lexer does (lib/nginx-conf-statements), so `server { listen [::]:443
+# ssl; }` on one line, or a directive spread over several lines, counts. Only privileged ports matter here: nginx runs
+# unprivileged and gets ports 80 and 443 as inherited fds from home-warden.socket, which only setup-service can change,
+# while any other port nginx opens itself on a reload. It is a set: every vhost repeats its own `listen 443 ssl;`, and
+# flags such as ssl or default_server are not part of the address.
+hw_fingerprint_listen_specs() {
+  local dump
+
+  dump="$(cat)"
+  nginx_conf_statements "${dump}" |
+    awk '$1 == "listen" && NF >= 2 {
+      spec = $2
+      if (spec ~ /^unix:/) next
+      if (spec ~ /^[0-9]+$/) { port = spec }
+      else if (spec ~ /^\[.*\]:[0-9]+$/) { port = spec; sub(/^.*\]:/, "", port) }
+      else if (spec ~ /^\[.*\]$/) { port = 80; spec = spec ":80" }
+      else if (spec ~ /:[0-9]+$/) { port = spec; sub(/^.*:/, "", port) }
+      else { port = 80; spec = spec ":80" }
+      if (port + 0 < 1024) print spec
+    }' |
+    sort -u
 }
 
-# hw_fingerprint_files <file>... -- sha256 over the contents of every given file that exists (symlinks followed)
+# hw_fingerprint_listens -- sha256 of the set printed by hw_fingerprint_listen_specs (stdin: `nginx -T` output). A config
+# without any such listen is valid and hashes the empty set.
+hw_fingerprint_listens() {
+  hw_fingerprint_listen_specs | sha256sum | cut -d' ' -f1
+}
+
+# hw_listen_specs_unsupported -- reads the specs on stdin and prints those home-warden.socket cannot supply: it binds
+# 0.0.0.0:80 and 0.0.0.0:443, and setup-service adds [::]:80 and [::]:443 for matching listens, so any other privileged
+# address (127.0.0.1:443, a second port, ...) would be bound by nginx itself, which the unprivileged account cannot.
+hw_listen_specs_unsupported() {
+  { grep -Evx '80|443|\*:80|\*:443|0\.0\.0\.0:80|0\.0\.0\.0:443|\[::\]:80|\[::\]:443' || true; }
+}
+
+# hw_fingerprint_files <file>... -- sha256 over a manifest of every given file that exists (symlinks followed): one
+# `<sha256 of the contents>  <name>` record each
 hw_fingerprint_files() {
   local f
+  local digest
+  # one record per file: the digest of its contents, then its name. Hashing the content first keeps the record
+  # boundaries unambiguous (a file whose content looks like another file's record cannot mimic it).
   for f in "$@"; do
     if [[ -f "${f}" ]]; then
-      printf '%s\n' "${f##*/}"
-      cat -- "${f}"
+      digest="$(sha256sum <"${f}" | cut -d' ' -f1)"
+      printf '%s  %s\n' "${digest}" "${f##*/}"
     fi
   done | sha256sum | cut -d' ' -f1
 }
@@ -66,13 +100,20 @@ hw_fingerprint_save() {
 # served config needs, e.g. `sudo nginx -T`) and records its listen fingerprint as applied. setup-service calls this after
 # it restarted the socket and the service, which is what clears the reload script's listen warning. A dump without a
 # "configuration file" header is a failed `nginx -T` (an unreadable cert, no sudo, ...): nothing is recorded, because
-# the hash of an empty listen set would make the warning repeat forever. Returns 1 then.
+# the hash of an empty listen set would make the warning repeat forever. Returns 1 then. A privileged listen the sockets
+# cannot supply (hw_listen_specs_unsupported) is not recorded either, so the saved fingerprint stays and the warning
+# keeps naming the problem; that returns 2.
 hw_nginx_record_listens() {
-  local dump
+  local dump unsupported
 
   dump="$(cat)"
   if [[ "${dump}" != *"# configuration file "* ]]; then
     return 1
+  fi
+  unsupported="$(hw_fingerprint_listen_specs <<<"${dump}" | hw_listen_specs_unsupported)"
+  if [[ -n "${unsupported}" ]]; then
+    echo "ERROR: home-warden.socket cannot supply these privileged listen addresses (it binds 80 and 443 on IPv4, and [::]:80, [::]:443 for matching listens): ${unsupported//$'\n'/ }" >&2
+    return 2
   fi
   hw_fingerprint_save "$1/nginx-listens.sha256" "$(hw_fingerprint_listens <<<"${dump}")"
 }
@@ -114,10 +155,14 @@ hw_recursor_restart_if_changed() {
       log "FAIL: restart of ${unit} failed"
       return 1
     fi
-    hw_fingerprint_save "${state}" "${fp}"
-    # the control socket appears a moment after the restart; reload-zones needs it
+    # the control socket appears a moment after the restart; reload-zones needs it. Saved only once it answers: a
+    # restart that never comes up must be retried on the next run, not recorded as applied
     for _ in $(seq 1 30); do
       if rec_control ping >/dev/null 2>&1; then
+        if ! hw_fingerprint_save "${state}" "${fp}"; then
+          log "FAIL: ${unit} restarted, but the config fingerprint could not be saved to ${state}; the next run will restart it again"
+          return 1
+        fi
         log "recursor restart OK"
         return 0
       fi
@@ -126,7 +171,10 @@ hw_recursor_restart_if_changed() {
     log "FAIL: ${unit} was restarted but did not answer its control socket"
     return 1
   elif [[ ! -f "${state}" ]]; then
-    hw_fingerprint_save "${state}" "${fp}"
+    if ! hw_fingerprint_save "${state}" "${fp}"; then
+      log "FAIL: could not record the recursor config fingerprint in ${state}; config changes would never trigger a restart"
+      return 1
+    fi
     log "recorded the recursor config fingerprint (first run, no restart)"
   fi
   return 0
