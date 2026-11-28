@@ -33,6 +33,8 @@ def parse_address_set(targets: list[str]) -> tuple[str, list[str]]:
             parsed = ipaddress.ip_address(target.strip())
         except ValueError:
             raise ValueError(f"{target!r} is not an IP address (a set of addresses cannot hold a host name)") from None
+        if parsed.version == 6 and getattr(parsed, "scope_id", None):
+            raise ValueError(f"{target!r}: an IPv6 scope identifier is node-local and cannot be published")
         versions.add(parsed.version)
         if str(parsed) not in addresses:
             addresses.append(str(parsed))
@@ -225,10 +227,15 @@ _PER_PAGE = 100
 
 
 def _truncated(data: dict) -> bool:
-    """True when Cloudflare says the listing has more pages than the one read: a partial view must never be
-    reconciled (a wanted address on a later page would be created twice, an unwanted one never seen)."""
+    """True when the listing may be only part of the name's records, so it must never be reconciled (a wanted
+    address on a later page would be created twice, an unwanted one never seen): Cloudflare reports more than one
+    page, the page count is unreadable, or the page is full and the count is absent (a full page cannot prove
+    it is the last one)."""
     info = data.get("result_info") or {}
+    pages = info.get("total_pages")
+    if pages is None:
+        return len(data.get("result") or []) >= _PER_PAGE
     try:
-        return int(info.get("total_pages") or 1) > 1
+        return int(pages) > 1
     except (TypeError, ValueError):
         return True

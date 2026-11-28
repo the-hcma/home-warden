@@ -99,7 +99,19 @@ def test_a_listing_that_grows_a_second_page_after_the_write_is_a_failure(cloudfl
 
 @pytest.mark.parametrize("info", [{"total_pages": 1}, {"total_pages": None}, {}, None])
 def test_a_missing_or_single_page_count_is_a_complete_listing(info) -> None:
-    assert dns_address_set._truncated({"result": [], "result_info": info}) is False
+    assert dns_address_set._truncated({"result": [{"id": "r0"}], "result_info": info}) is False
+
+
+@pytest.mark.parametrize("info", [{"total_pages": None}, {}, None])
+def test_a_full_page_without_a_page_count_is_treated_as_truncated(info) -> None:
+    full = [{"id": f"r{i}"} for i in range(100)]
+    assert dns_address_set._truncated({"result": full, "result_info": info}) is True
+    assert dns_address_set._truncated({"result": full[:99], "result_info": info}) is False
+
+
+def test_an_ipv6_scope_identifier_is_refused() -> None:
+    with pytest.raises(ValueError, match="scope identifier"):
+        parse_address_set(["2001:db8::1", "2001:db8::2%eth0"])
 
 
 @pytest.mark.parametrize("info", [{"total_pages": 2}, {"total_pages": "many"}, {"total_pages": [3]}])

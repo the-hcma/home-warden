@@ -14,7 +14,11 @@ from app.catalog_dns_sync_cli import main
 
 
 def test_cli_a_bad_address_set_is_a_usage_error_before_any_write(monkeypatch, tmp_path: Path, capsys) -> None:
-    for bad in ("mail.example.com=203.0.113.11,2001:db8::1", "mail.example.com=203.0.113.11,host.example.net"):
+    for bad in (
+        "mail.example.com=203.0.113.11,2001:db8::1",
+        "mail.example.com=203.0.113.11,host.example.net",
+        "mail.example.com=2001:db8::1,2001:db8::2%eth0",
+    ):
         sets = _address_set_setup(monkeypatch, tmp_path, ["--dns-only", bad])
         assert main() == 2, bad
         assert "catalog-dns-sync:" in capsys.readouterr().err
