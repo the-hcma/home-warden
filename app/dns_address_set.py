@@ -146,9 +146,11 @@ def sync_dns_address_set(
         return SyncResult(name, "noop", f"{record_type}={', '.join(wanted)} already correct in zone {zone_name}")
     if dry_run:
         verb = "would-update" if (moves or retag) else "would-create"
-        return SyncResult(
-            name, verb, f"{record_type} {domain} -> {', '.join(wanted)} in zone {zone_name}: {'; '.join(steps)}"
-        )
+        detail = f"{record_type} {domain} -> {', '.join(wanted)} in zone {zone_name}: {'; '.join(steps)}"
+        if leftover:
+            # Same outcome class as the real run: a restore that leaves records for a human is not clean.
+            return SyncResult(name, "manual", f"{verb}: {detail}{left_note}: they would have to be deleted by hand")
+        return SyncResult(name, verb, detail)
 
     body_extra: dict[str, object] = {"proxied": proxied}
     if ttl is not None:

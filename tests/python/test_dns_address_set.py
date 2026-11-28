@@ -17,9 +17,10 @@ class FakeCloudflare:
             {"id": f"r{i}", "name": "mail.example.com", "proxied": False, "ttl": 300, **r}
             for i, r in enumerate(records)
         ]
-        self.calls: list[tuple[str, str, object]] = []
+        self.calls: list[tuple[str, str, dict]] = []
 
     def __call__(self, url, headers, timeout, max_retries, *, method="GET", data=None):
+        data = data or {}
         self.calls.append((method, url, data))
         if "/zones?name=" in url:
             return (
@@ -39,7 +40,7 @@ class FakeCloudflare:
             return {"result": record}
         raise AssertionError(f"unexpected call {method} {url}")
 
-    def writes(self) -> list[tuple[str, object]]:
+    def writes(self) -> list[tuple[str, dict]]:
         return [(m, d) for m, _, d in self.calls if m in ("PATCH", "POST")]
 
     def contents(self) -> list[str]:
@@ -168,3 +169,11 @@ def test_mixed_families_in_the_request_fail_before_any_call(cloudflare) -> None:
     result = _sync(["192.0.2.1", "2001:db8::1"])
     assert result.status == "failed" and "cannot be mixed" in result.detail
     assert fake.calls == []
+
+
+def test_restore_mode_dry_run_reports_the_records_it_would_leave(cloudflare) -> None:
+    fake = cloudflare([{"type": "A", "content": "192.0.2.30"}, {"type": "A", "content": "192.0.2.9"}])
+    result = _sync(["192.0.2.10"], allow_extra=True, dry_run=True)
+    assert result.status == "manual"
+    assert "would-update" in result.detail and "would have to be deleted by hand" in result.detail
+    assert fake.writes() == []
