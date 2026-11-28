@@ -90,10 +90,34 @@ def test_sync_dns_record_succeeds_when_the_nameserver_catches_up(monkeypatch) ->
     assert resolver.calls == 3
 
 
-@pytest.mark.parametrize(("value", "expected"), [("0", 1), ("x", 5), ("-3", 1), ("7", 7)])
-def test_the_tries_setting_is_bounded_and_forgiving(monkeypatch, value: str, expected: int) -> None:
+@pytest.mark.parametrize(
+    ("value", "expected"), [("0", 1), ("x", 5), ("-3", 1), ("7", 7), ("20", 20), ("21", 20), ("100000", 20), ("2.5", 5)]
+)
+def test_the_tries_setting_is_bounded_both_ways_and_forgiving(monkeypatch, value: str, expected: int) -> None:
     monkeypatch.setenv("DNS_SYNC_ANSWER_TRIES", value)
     assert catalog_checks._answer_tries() == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("0", 0.0),
+        ("1.5", 1.5),
+        ("-4", 0.0),
+        ("30", 30.0),
+        ("31", 30.0),
+        ("99999", 30.0),
+        ("inf", 2.0),
+        ("nan", 2.0),
+        ("-inf", 2.0),
+        ("x", 2.0),
+    ],
+)
+def test_the_delay_setting_is_bounded_both_ways_and_ignores_non_finite_values(
+    monkeypatch, value: str, expected: float
+) -> None:
+    monkeypatch.setenv("DNS_SYNC_ANSWER_DELAY_S", value)
+    assert catalog_checks._answer_delay() == expected
 
 
 class _Resolver:

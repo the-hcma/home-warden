@@ -31,6 +31,7 @@ from __future__ import annotations
 import datetime
 import ipaddress
 import json
+import math
 import os
 import random
 import re
@@ -141,20 +142,30 @@ def parse_cloudflare_credentials(path: Path) -> dict[str, str] | None:
     )
 
 
+_ANSWER_DELAY_MAX_S = 30.0
+_ANSWER_TRIES_MAX = 20
+
+
 def _answer_delay() -> float:
-    """Seconds between authoritative-answer checks after a write (DNS_SYNC_ANSWER_DELAY_S, default 2)."""
+    """Seconds between authoritative-answer checks after a write (DNS_SYNC_ANSWER_DELAY_S, default 2, at most 30;
+    anything that is not a finite number falls back to the default)."""
     try:
-        return max(0.0, float(os.environ.get("DNS_SYNC_ANSWER_DELAY_S", "2")))
+        value = float(os.environ.get("DNS_SYNC_ANSWER_DELAY_S", "2"))
     except ValueError:
         return 2.0
+    if not math.isfinite(value):
+        return 2.0
+    return min(max(0.0, value), _ANSWER_DELAY_MAX_S)
 
 
 def _answer_tries() -> int:
-    """How many times the authoritative answer is checked after a write (DNS_SYNC_ANSWER_TRIES, default 5)."""
+    """How many times the authoritative answer is checked after a write (DNS_SYNC_ANSWER_TRIES, default 5, from 1 to
+    20; anything that is not an integer falls back to the default)."""
     try:
-        return max(1, int(os.environ.get("DNS_SYNC_ANSWER_TRIES", "5")))
+        value = int(os.environ.get("DNS_SYNC_ANSWER_TRIES", "5"))
     except ValueError:
         return 5
+    return min(max(1, value), _ANSWER_TRIES_MAX)
 
 
 def _cf_request(
