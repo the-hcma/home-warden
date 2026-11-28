@@ -45,7 +45,9 @@ from app.catalog_health_settings import (
 )
 from app.dns_cutover import find_stragglers, load_snapshot, restore_snapshot, take_snapshot, write_snapshot
 
-_DNS_ONLY_NAME = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+_DNS_ONLY_NAME = re.compile(
+    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59}[a-z0-9])$"
+)
 
 
 def _normalize_name(name: str) -> str:

@@ -391,3 +391,13 @@ def test_cli_dns_only_conflict_check_normalizes_the_catalog_name_too(monkeypatch
     assert main() == 2
     assert "already a catalog server_name" in capsys.readouterr().err
     assert synced == []
+
+
+def test_cli_dns_only_accepts_punycode_labels_and_still_rejects_bad_final_labels(monkeypatch, tmp_path: Path) -> None:
+    synced = _dns_only_setup(monkeypatch, tmp_path, ["--dns-only", "mail.example.xn--p1ai"])
+    assert main() == 0
+    assert ("mail.example.xn--p1ai", "203.0.113.10") in synced
+    for bad in ("mail.example.xn--", "mail.example.x", "mail.example.-com", "mail.example.123"):
+        synced = _dns_only_setup(monkeypatch, tmp_path, ["--dns-only", bad])
+        assert main() == 2, bad
+        assert synced == []
