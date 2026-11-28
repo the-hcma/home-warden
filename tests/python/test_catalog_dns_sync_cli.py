@@ -401,3 +401,15 @@ def test_cli_dns_only_accepts_punycode_labels_and_still_rejects_bad_final_labels
         synced = _dns_only_setup(monkeypatch, tmp_path, ["--dns-only", bad])
         assert main() == 2, bad
         assert synced == []
+
+
+def test_cli_dns_only_final_label_length_limit_is_63(monkeypatch, tmp_path: Path) -> None:
+    longest = "xn--" + "a" * 59  # 63 characters
+    synced = _dns_only_setup(monkeypatch, tmp_path, ["--dns-only", f"mail.example.{longest}"])
+    assert main() == 0
+    assert (f"mail.example.{longest}", "203.0.113.10") in synced
+    synced = _dns_only_setup(monkeypatch, tmp_path, ["--dns-only", f"mail.example.{longest}a"])
+    assert main() == 2
+    assert synced == []
+    synced = _dns_only_setup(monkeypatch, tmp_path, ["--dns-only", "mail.example.xn--a"])
+    assert main() == 0
