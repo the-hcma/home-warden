@@ -123,7 +123,7 @@ def test_a_unit_that_is_disabled_but_still_running_is_stopped_when_the_web_ui_is
 
 def test_setup_service_checks_for_uv_before_installing_the_web_unit() -> None:
     text = SETUP.read_text()
-    assert re.search(r"if \(\(web_ui_enabled\)\); then\n(?:.*\n){1,10}?.*\.local/bin/uv", text)
+    assert re.search(r"if \(\(web_ui_enabled\)\); then\n(?:.*\n){1,20}?.*\.local/bin/uv", text)
     assert "ERROR: uv not found" in text
 
 
@@ -145,6 +145,15 @@ def test_setup_service_reads_the_fqdn_exactly_as_the_backend_does(text: str, tmp
     config = tmp_path / "config.toml"
     config.write_text(text)
     assert _script_fqdn(config) == load_config(config).fqdn
+
+
+def test_setup_service_refuses_to_enable_the_unit_until_the_ui_bundle_is_built() -> None:
+    text = SETUP.read_text()
+    assert re.search(
+        r'if \[\[ ! -s "\$\{repo_dir\}/app/api/static/dist/main\.js" \]\]; then\n(?:.*\n){1,4}?\s+missing=1\n',
+        text,
+    )
+    assert "cd ${repo_dir}/web && pnpm install --frozen-lockfile && pnpm run build" in text
 
 
 def test_setup_service_stops_instead_of_disabling_the_web_ui_when_it_cannot_read_the_config() -> None:

@@ -704,6 +704,13 @@ check_prerequisites() {
       echo "ERROR: scripts/catalog-health-server missing or not executable" >&2
       missing=1
     fi
+    if [[ ! -s "${repo_dir}/app/api/static/dist/main.js" ]]; then
+      # gitignored and built, not checked in: without it the UI is a blank page behind a working login
+      echo "ERROR: the web UI bundle ${repo_dir}/app/api/static/dist/main.js is missing;" \
+        "build it, then rerun this script:" >&2
+      echo "  cd ${repo_dir}/web && pnpm install --frozen-lockfile && pnpm run build" >&2
+      missing=1
+    fi
     if [[ ! -x "${HOME}/.local/bin/uv" ]] && ! PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" command -v uv >/dev/null 2>&1; then
       echo "ERROR: uv not found in ${HOME}/.local/bin or the system PATH; the web UI unit runs scripts/catalog-health-server through uv" >&2
       missing=1
