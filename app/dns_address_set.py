@@ -90,7 +90,10 @@ def sync_dns_address_set(
             rec_data = _cf_request(rec_url, cf_headers, timeout, max_retries)
             if _truncated(rec_data):
                 return SyncResult(
-                    name, "failed", f"{domain} has more than {_PER_PAGE} records; refusing to reconcile a partial list"
+                    name,
+                    "failed",
+                    f"the listing for {domain} may be incomplete (it is paged or holds {_PER_PAGE} records or more); "
+                    "refusing to reconcile a partial list",
                 )
             existing = [r for r in (rec_data.get("result") or []) if r.get("type") in ("A", "AAAA", "CNAME")]
             if existing:
@@ -184,7 +187,11 @@ def sync_dns_address_set(
     except Exception as e:
         return SyncResult(name, "failed", f"write accepted but read-back failed: {e}")
     if _truncated(confirm):
-        return SyncResult(name, "failed", f"write accepted but {domain} now has more than {_PER_PAGE} records")
+        return SyncResult(
+            name,
+            "failed",
+            f"write accepted but the listing for {domain} may now be incomplete ({_PER_PAGE} records or more)",
+        )
     present = sorted(str(r.get("content")) for r in (confirm.get("result") or []) if r.get("type") == record_type)
     absent = [address for address in wanted if address not in present]
     if absent:

@@ -94,7 +94,7 @@ def test_a_listing_that_grows_a_second_page_after_the_write_is_a_failure(cloudfl
 
     monkeypatch.setattr(dns_address_set, "_cf_request", second_page_after_write)
     result = _sync(["192.0.2.30", "192.0.2.9"], verify_resolution=False)
-    assert result.status == "failed" and "now has more than 100 records" in result.detail
+    assert result.status == "failed" and "may now be incomplete" in result.detail
 
 
 @pytest.mark.parametrize("info", [{"total_pages": 1}, {"total_pages": None}, {}, None])
