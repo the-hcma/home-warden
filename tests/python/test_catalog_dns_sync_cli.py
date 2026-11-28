@@ -426,3 +426,25 @@ def test_cli_a_bad_address_set_is_a_usage_error_before_any_write(monkeypatch, tm
         assert main() == 2, bad
         assert "catalog-dns-sync:" in capsys.readouterr().err
         assert sets == []
+
+
+def test_cli_dns_only_accepts_punycode_labels_and_still_rejects_bad_final_labels(monkeypatch, tmp_path: Path) -> None:
+    synced = _dns_only_setup(monkeypatch, tmp_path, ["--dns-only", "mail.example.xn--p1ai"])
+    assert main() == 0
+    assert ("mail.example.xn--p1ai", "203.0.113.10") in synced
+    for bad in ("mail.example.xn--", "mail.example.x", "mail.example.-com", "mail.example.123"):
+        synced = _dns_only_setup(monkeypatch, tmp_path, ["--dns-only", bad])
+        assert main() == 2, bad
+        assert synced == []
+
+
+def test_cli_dns_only_final_label_length_limit_is_63(monkeypatch, tmp_path: Path) -> None:
+    longest = "xn--" + "a" * 59  # 63 characters
+    synced = _dns_only_setup(monkeypatch, tmp_path, ["--dns-only", f"mail.example.{longest}"])
+    assert main() == 0
+    assert (f"mail.example.{longest}", "203.0.113.10") in synced
+    synced = _dns_only_setup(monkeypatch, tmp_path, ["--dns-only", f"mail.example.{longest}a"])
+    assert main() == 2
+    assert synced == []
+    synced = _dns_only_setup(monkeypatch, tmp_path, ["--dns-only", "mail.example.xn--a"])
+    assert main() == 0
