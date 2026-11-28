@@ -289,7 +289,7 @@ send_mail() {
     return 0
   fi
   if command -v sendmail >/dev/null 2>&1; then
-    sendmail -t <<EOF
+    if sendmail -t <<EOF
 From: ${email_from}
 To: ${email_to}
 Subject: ${subject}
@@ -297,11 +297,16 @@ Content-Type: text/plain; charset=UTF-8
 
 ${body}
 EOF
-    return 0
+    then
+      return 0
+    fi
+    return 1
   fi
   if command -v mail >/dev/null 2>&1; then
-    printf '%s\n' "${body}" | mail -s "${subject}" -r "${email_from}" "${email_to}"
-    return 0
+    if printf '%s\n' "${body}" | mail -s "${subject}" -r "${email_from}" "${email_to}"; then
+      return 0
+    fi
+    return 1
   fi
   log_out "ERROR: neither sendmail nor mail found — cannot send: ${subject}"
   return 1
@@ -377,7 +382,14 @@ if ((should_alert)); then
   if ((now_epoch - first_fail >= 60)); then
     failing_line="Failing since $(fmt_time "${first_fail}"), for $(fmt_duration "$((now_epoch - first_fail))")."
   fi
-  send_mail "${subject_prefix} UNHEALTHY" \
+  # Save the outage start before trying to mail it, so a failed delivery cannot restart the clock; last_alert stays
+  # old (0 for a new outage), so the next run tries the mail again.
+  pre_alert="${last_alert}"
+  if [[ "${prev_status}" != "fail" ]]; then
+    pre_alert=0
+  fi
+  write_state "fail" "${pre_alert}" "${detail}" "${first_fail}" "${first_fail_detail}"
+  if send_mail "${subject_prefix} UNHEALTHY" \
     "home-warden on ${host_short} failed its health check at $(fmt_time "${now_epoch}").
 
 ${failing_line}
@@ -389,8 +401,11 @@ Check: systemctl status ${service_name} ${socket_name}
        ${script_dir}/healthcheck --verbose --check-only
 
 You get a mail when this changes, and another every ${resend_sec}s while it keeps failing.
-"
-  write_state "fail" "${now_epoch}" "${detail}" "${first_fail}" "${first_fail_detail}"
+"; then
+    write_state "fail" "${now_epoch}" "${detail}" "${first_fail}" "${first_fail_detail}"
+  else
+    log_out "WARN: the UNHEALTHY mail could not be sent; it will be tried again on the next check"
+  fi
 else
   write_state "fail" "${last_alert}" "${detail}" "${first_fail}" "${first_fail_detail}"
 fi

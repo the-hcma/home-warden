@@ -144,3 +144,24 @@ def test_a_later_failure_keeps_the_first_failure_time_and_reason(tmp_path: Path)
 
 def _first(lines: list[str], prefix: str) -> str:
     return next(line for line in lines if line.startswith(prefix))
+
+
+def test_a_failed_mail_keeps_the_outage_start_and_is_retried(tmp_path: Path) -> None:
+    env = _stubs(tmp_path, service="inactive", socket="inactive")
+    sendmail = tmp_path / "bin" / "sendmail"
+    sendmail.write_text("#!/usr/bin/env bash\ncat >/dev/null\nexit 75\n")
+    _run(env)
+    state = tmp_path / "scratch" / "healthcheck.state"
+    lines = state.read_text().splitlines()
+    first_line = _first(lines, "first_fail_epoch=")
+    assert first_line != "first_fail_epoch=0"
+    assert "status=fail" in lines
+    assert "last_alert_epoch=0" in lines
+    earlier = f"first_fail_epoch={int(time.time()) - 300}"
+    state.write_text(state.read_text().replace(first_line, earlier))
+    _stubs(tmp_path, service="inactive", socket="inactive")
+    _run(env)
+    mail = _mail(tmp_path)
+    assert "UNHEALTHY" in mail
+    assert "for 5 min" in mail
+    assert earlier in state.read_text().splitlines()
