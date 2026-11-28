@@ -281,10 +281,12 @@ if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
 
 
-def _dns_only_setup(monkeypatch, tmp_path: Path, extra_args: list[str]) -> list[tuple[str, str]]:
+def _dns_only_setup(
+    monkeypatch, tmp_path: Path, extra_args: list[str], catalog_name: str = "app.example.com"
+) -> list[tuple[str, str]]:
     """Run main() with one catalog service and `extra_args`; returns the (server_name, target) pairs synced."""
     catalog_path = tmp_path / "services.json"
-    catalog_path.write_text(json.dumps({"services": [{"name": "svc", "server_name": "app.example.com"}]}))
+    catalog_path.write_text(json.dumps({"services": [{"name": "svc", "server_name": catalog_name}]}))
     creds = _write_credentials(tmp_path)
     monkeypatch.setattr(
         sys,
@@ -340,7 +342,9 @@ def test_cli_dns_only_rejects_bad_names_duplicates_and_catalog_names(monkeypatch
         (["--dns-only", "localhost"], "not a fully qualified host name"),
         (["--dns-only", "mail.example.com="], "nothing after '='"),
         (["--dns-only", "mail.example.com", "--dns-only", "MAIL.example.com"], "given twice"),
+        (["--dns-only", "mail.example.com.."], "not a fully qualified host name"),
         (["--dns-only", "app.example.com"], "already a catalog server_name"),
+        (["--dns-only", "APP.example.com."], "already a catalog server_name"),
     ):
         synced = _dns_only_setup(monkeypatch, tmp_path, args)
         assert main() == 2, args
@@ -380,3 +384,10 @@ def test_cli_restore_cannot_be_combined_with_dns_only(monkeypatch, capsys) -> No
     monkeypatch.setattr("app.catalog_dns_sync_cli.enforce_host_guard", lambda caller: True)
     assert main() == 2
     assert "--dns-only" in capsys.readouterr().err
+
+
+def test_cli_dns_only_conflict_check_normalizes_the_catalog_name_too(monkeypatch, tmp_path: Path, capsys) -> None:
+    synced = _dns_only_setup(monkeypatch, tmp_path, ["--dns-only", "app.example.com"], catalog_name="App.Example.com.")
+    assert main() == 2
+    assert "already a catalog server_name" in capsys.readouterr().err
+    assert synced == []
