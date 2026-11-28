@@ -319,6 +319,25 @@ def test_restore_mode_puts_the_original_back_and_reports_the_extra_record(cloudf
     assert [m for m, _ in fake.writes()] == ["PATCH"]
 
 
+def test_restore_with_a_retained_proxied_record_is_manual_not_a_failed_answer_check(cloudflare) -> None:
+    cloudflare(
+        [
+            {"type": "A", "content": "192.0.2.30", "proxied": True},
+            {"type": "A", "content": "192.0.2.9", "proxied": True},
+        ],
+        dig=["104.16.0.1", "104.16.0.2"],
+    )
+    result = _sync(["192.0.2.10"], allow_extra=True, ttl=300)
+    assert result.status == "manual", result.detail
+    assert "delete by hand" in result.detail and ("192.0.2.9" in result.detail or "192.0.2.30" in result.detail)
+
+
+def test_the_answer_check_stays_strict_when_no_retained_record_is_proxied(cloudflare) -> None:
+    cloudflare([{"type": "A", "content": "192.0.2.30"}, {"type": "A", "content": "192.0.2.9"}], dig=["104.16.0.1"])
+    result = _sync(["192.0.2.10"], allow_extra=True, ttl=300)
+    assert result.status == "failed" and "missing 192.0.2.10" in result.detail
+
+
 def _sync(targets, **kwargs):
     return sync_dns_address_set(
         "mail", {"server_name": "mail.example.com"}, targets, {"Authorization": "x"}, 5.0, 1, **kwargs

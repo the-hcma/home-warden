@@ -231,7 +231,11 @@ def sync_dns_address_set(
             f"write accepted but the read-back shows a different proxied flag or TTL on {', '.join(wrong_fields)}",
         )
 
-    if verify_resolution and nameservers and not proxied:
+    # A record left in place for a human (restore mode) that is still proxied makes Cloudflare answer with its own
+    # edge addresses, so the authoritative answer cannot show the restored origin: the API read-back above is the
+    # check, and the result below is "manual" naming the retained record, not a failure.
+    retained_proxied = allow_extra and any(bool(r.get("proxied", False)) for r in leftover)
+    if verify_resolution and nameservers and not proxied and not retained_proxied:
         answers = _resolve_via_authoritative_ns(domain, record_type, nameservers[0], timeout)
         if answers is not None:
             answered = {a.rstrip(".") for a in answers}
