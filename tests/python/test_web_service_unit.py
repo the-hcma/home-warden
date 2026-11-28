@@ -97,21 +97,6 @@ def test_a_missing_interpreter_is_an_error_not_an_unset_fqdn(tmp_path: Path) -> 
     assert "python3 not found" in result.stderr and "3.11" not in result.stderr
 
 
-@pytest.mark.parametrize(
-    "path", ["/home/a&b/.config", "/home/a|b/.config", "/home/a\\b/.config", "/home/plain/.config", "/h/a b/c"]
-)
-def test_a_path_with_sed_metacharacters_survives_the_unit_template_substitution(path: str) -> None:
-    template = 'Environment="XDG_CONFIG_HOME=@@XDG_CONFIG_HOME@@"\n'
-    bash = shutil.which("bash")
-    assert bash
-    escape = _setup_function("sed_escape_replacement")
-    script = f'{escape}\ne="$(sed_escape_replacement "$1")"\nsed -e "s|@@XDG_CONFIG_HOME@@|${{e}}|g"\n'
-    result = subprocess.run(
-        [bash, "-c", script, "x", path], input=template, capture_output=True, text=True, timeout=20, check=True
-    )
-    assert result.stdout == f'Environment="XDG_CONFIG_HOME={path}"\n'
-
-
 def test_a_python_without_tomllib_names_that_cause(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text('fqdn = "warden.example.com"\n')
@@ -144,9 +129,25 @@ def test_every_path_valued_environment_assignment_in_the_unit_is_quoted() -> Non
         assert re.fullmatch(r'Environment="[A-Z_]+=[^"]*"', line), line
 
 
+@pytest.mark.parametrize(
+    "path",
+    ["/home/me/.config", "/home/me/my files/conf", "/srv/home-warden/conf/pki", "/home/a.b_c/d@e:f+g,h=i~j-k"],
+)
+def test_ordinary_paths_are_accepted_for_the_unit(path: str) -> None:
+    assert _problem(path)[0] == 1
+
+
+@pytest.mark.parametrize(
+    "path", ["/home/a&b", "/home/a|b", "/home/a\\b", "/home/a%b", '/home/a"b', "/home/a$b", "/home/a\nb", ""]
+)
+def test_paths_that_sed_and_systemd_would_read_differently_are_refused(path: str) -> None:
+    code, message = _problem(path)
+    assert code == 0 and message
+
+
 def test_setup_service_checks_for_uv_before_installing_the_web_unit() -> None:
     text = SETUP.read_text()
-    assert re.search(r"if \(\(web_ui_enabled\)\); then\n(?:.*\n){1,20}?.*\.local/bin/uv", text)
+    assert re.search(r"if \(\(web_ui_enabled\)\); then\n(?:.*\n){1,40}?.*\.local/bin/uv", text)
     assert "ERROR: uv not found" in text
 
 
@@ -179,6 +180,24 @@ def test_setup_service_refuses_to_enable_the_unit_until_the_ui_bundle_is_built()
     assert "cd ${repo_dir}/web && pnpm install --frozen-lockfile && pnpm run build" in text
 
 
+def test_setup_service_refuses_to_install_the_web_unit_with_an_unsafe_path_before_changing_anything() -> None:
+    text = SETUP.read_text()
+    block = text[text.index("local path_label path_value problem") :]
+    block = block[: block.index("scripts/catalog-health-server")]
+    for name in (
+        "repo_dir",
+        "HOME",
+        "scratch_dir",
+        "conf_dir",
+        "home_warden_config_dir",
+        "services_json",
+        "pdns_zones_yaml",
+        "client_pki_store",
+    ):
+        assert name in block
+    assert "missing=1" in block
+
+
 def test_setup_service_stops_instead_of_disabling_the_web_ui_when_it_cannot_read_the_config() -> None:
     text = SETUP.read_text()
     assert re.search(r"if ! web_ui_fqdn_value=\"\$\(web_ui_fqdn\)\"; then\n\s+echo .*\n\s+exit 1", text)
@@ -193,8 +212,8 @@ def test_the_unit_and_setup_service_pass_the_resolved_paths_to_the_backend() -> 
     ):
         assert line in unit
     setup = SETUP.read_text()
-    assert "@@WEB_SERVICES_JSON_PATH@@|${web_services_json}|g" in setup
-    assert "@@WEB_PDNS_ZONES_YAML@@|${web_pdns_zones_yaml}|g" in setup
+    assert "@@WEB_SERVICES_JSON_PATH@@|${services_json:-${default_services_json}}|g" in setup
+    assert "@@WEB_PDNS_ZONES_YAML@@|${pdns_zones_yaml:-${default_pdns_zones_yaml}}|g" in setup
 
 
 def test_the_unit_does_not_set_no_new_privileges_because_the_pam_login_needs_the_setgid_helper() -> None:
@@ -204,7 +223,7 @@ def test_the_unit_does_not_set_no_new_privileges_because_the_pam_login_needs_the
 
 def test_the_unit_reads_the_same_config_directory_as_setup_service() -> None:
     assert 'Environment="XDG_CONFIG_HOME=@@XDG_CONFIG_HOME@@"' in UNIT.read_text()
-    assert "@@XDG_CONFIG_HOME@@|${web_xdg_config_home}|g" in SETUP.read_text()
+    assert "@@XDG_CONFIG_HOME@@|${XDG_CONFIG_HOME:-${HOME}/.config}|g" in SETUP.read_text()
 
 
 def test_the_unit_runs_the_loopback_backend_as_the_owner() -> None:
@@ -223,13 +242,12 @@ def _bash_function(name: str) -> str:
     return match.group(0)
 
 
-def _escape(text: str) -> str:
-    script = f'{_setup_function("sed_escape_replacement")}\nsed_escape_replacement "$1"\n'
+def _problem(path: str) -> tuple[int, str]:
+    script = f'{_setup_function("unit_path_problem")}\nunit_path_problem "$1"\n'
     bash = shutil.which("bash")
     assert bash
-    return subprocess.run(
-        [bash, "-c", script, "x", text], capture_output=True, text=True, timeout=20, check=True
-    ).stdout
+    result = subprocess.run([bash, "-c", script, "x", path], capture_output=True, text=True, timeout=20, check=False)
+    return result.returncode, result.stdout.strip()
 
 
 def _python3_dir(tmp_path: Path) -> Path:

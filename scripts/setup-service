@@ -623,6 +623,24 @@ package_installed() {
   dpkg-query -W -f='${Status}' "${pkg}" 2>/dev/null | grep -q 'install ok installed'
 }
 
+# unit_path_problem <path> — prints why a path cannot be written into a systemd unit through sed and returns 0;
+# prints nothing and returns 1 when it is fine. Refused, not escaped: sed and systemd read `&`, `|`, a backslash,
+# `%`, `$`, a double quote and a newline differently, so a path with one would reach the unit as a different path.
+unit_path_problem() {
+  local -r path="${1:-}"
+  local -r unsafe='[^A-Za-z0-9._/@:+,=~ -]'
+  if [[ -z "${path}" ]]; then
+    echo "is empty"
+    return 0
+  fi
+  if [[ "${path}" =~ ${unsafe} ]]; then
+    echo "contains a character that cannot be installed into a unit" \
+      "(allowed: letters, digits, space and . _ / @ : + , = ~ -)"
+    return 0
+  fi
+  return 1
+}
+
 check_prerequisites() {
   local missing=0
   local pkg
@@ -700,6 +718,20 @@ check_prerequisites() {
       echo "ERROR: missing web UI unit template under ${unit_template_dir}" >&2
       missing=1
     fi
+    local path_label path_value problem
+    for path_label in repo_dir HOME scratch_dir conf_dir home_warden_config_dir \
+      services_json pdns_zones_yaml client_pki_store; do
+      case "${path_label}" in
+        HOME) path_value="${HOME}" ;;
+        services_json) path_value="${services_json:-${default_services_json}}" ;;
+        pdns_zones_yaml) path_value="${pdns_zones_yaml:-${default_pdns_zones_yaml}}" ;;
+        *) path_value="${!path_label}" ;;
+      esac
+      if problem="$(unit_path_problem "${path_value}")"; then
+        echo "ERROR: ${path_label} (${path_value@Q}) ${problem}; the web UI unit cannot be installed with it" >&2
+        missing=1
+      fi
+    done
     if [[ ! -x "${repo_dir}/scripts/catalog-health-server" ]]; then
       echo "ERROR: scripts/catalog-health-server missing or not executable" >&2
       missing=1
@@ -828,12 +860,6 @@ validate_nginx_config() {
   echo "nginx -t OK"
 }
 
-# sed_escape_replacement <text> — text made safe to use as the replacement of a sed `s|...|...|` command: a backslash,
-# `&` (the whole match) and `|` (the delimiter) are escaped.
-sed_escape_replacement() {
-  printf '%s' "${1:-}" | sed -e 's/[\\&|]/\\&/g'
-}
-
 expand_unit() {
   local -r src="$1"
   local -r dest="$2"
@@ -852,12 +878,6 @@ expand_unit() {
 
   local key_credential
   key_credential="$(client_pki_key_credential_line)"
-  # Values that come from the operator's environment or config are escaped for sed's replacement text and `|` delimiter,
-  # so a path containing `&`, `|` or a backslash is installed unchanged.
-  local web_services_json web_pdns_zones_yaml web_xdg_config_home
-  web_services_json="$(sed_escape_replacement "${services_json:-${default_services_json}}")"
-  web_pdns_zones_yaml="$(sed_escape_replacement "${pdns_zones_yaml:-${default_pdns_zones_yaml}}")"
-  web_xdg_config_home="$(sed_escape_replacement "${XDG_CONFIG_HOME:-${HOME}/.config}")"
 
   generated="$(
     sed \
@@ -869,13 +889,13 @@ expand_unit() {
       -e "s|@@PDNS_ZONES_YAML@@|${pdns_zones_yaml}|g" \
       -e "s|@@PDNS_ZONES_YAML_DIR@@|${pdns_zones_yaml_dir}|g" \
       -e "s|@@SERVICES_JSON_PATH@@|${services_json}|g" \
-      -e "s|@@WEB_SERVICES_JSON_PATH@@|${web_services_json}|g" \
-      -e "s|@@WEB_PDNS_ZONES_YAML@@|${web_pdns_zones_yaml}|g" \
+      -e "s|@@WEB_SERVICES_JSON_PATH@@|${services_json:-${default_services_json}}|g" \
+      -e "s|@@WEB_PDNS_ZONES_YAML@@|${pdns_zones_yaml:-${default_pdns_zones_yaml}}|g" \
       -e "s|@@CLIENT_PKI_STORE@@|${client_pki_store}|g" \
       -e "s|@@CLIENT_PKI_KEY_CREDENTIAL@@|${key_credential}|g" \
       -e "s|@@REPO_DIR@@|${repo_dir}|g" \
       -e "s|@@HOME_DIR@@|${HOME}|g" \
-      -e "s|@@XDG_CONFIG_HOME@@|${web_xdg_config_home}|g" \
+      -e "s|@@XDG_CONFIG_HOME@@|${XDG_CONFIG_HOME:-${HOME}/.config}|g" \
       -e "s|@@DEPLOYED_COMMIT@@|${deployed_commit}|g" \
       -e "s|@@NGINX_EXTRA_READ_PATHS@@|${nginx_extra_read_paths}|g" \
       -e "s|@@SERVICE_USER@@|${service_user}|g" \
