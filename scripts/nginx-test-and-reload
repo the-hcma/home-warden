@@ -115,7 +115,10 @@ if systemctl is-active --quiet home-warden.service 2>/dev/null; then
   if [[ -n "${unit_conf}" && "${unit_conf}" != "${home_nginx_conf}" ]]; then
     # a restart would start nginx with the unit's own -c path, so it cannot help; rewriting the unit can
     log "WARN: home-warden.service starts nginx with -c ${unit_conf} but the config is ${home_nginx_conf}; run scripts/setup-service to rewrite the unit — reloading what is running"
-  elif [[ -n "${unit_conf}" && -n "${running_conf}" && "${running_conf}" != "${home_nginx_conf}" ]]; then
+  elif ((listens_known && listens_changed == 0)) && [[ -n "${unit_conf}" && -n "${running_conf}" && "${running_conf}" != "${home_nginx_conf}" ]]; then
+    # only with the privileged listen set known and unchanged: a replacement master could not bind a new 80/443 listen
+    # (the socket unit supplies none, the service has no capabilities), so a path change that comes with one is left to
+    # setup-service, which rewrites the sockets and the unit together; the running nginx keeps serving meanwhile.
     # unit_conf equals the config here (the branch above took any other value), so a restart starts nginx on it;
     # when the unit's ExecStart could not be read it is empty and the reload fallback below is all that is safe
     log "restarting home-warden.service (nginx runs ${running_conf}, the config is now ${home_nginx_conf}; a reload cannot change that)"

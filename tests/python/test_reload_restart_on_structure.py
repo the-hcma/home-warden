@@ -268,10 +268,12 @@ def test_a_failed_nginx_dump_is_never_recorded_as_an_empty_listen_set(tmp_path) 
         assert not (scratch / "nginx-listens.sha256").exists()
 
 
-def test_the_listen_warning_also_shows_when_the_config_path_changed_too(tmp_path) -> None:
+def test_a_path_change_that_comes_with_a_new_privileged_listen_is_only_reloaded_and_left_to_setup_service(
+    tmp_path,
+) -> None:
     changed = CONF + "server {\n    listen [::]:443 ssl;\n}\n"
     calls, out, saved = run_nginx(tmp_path, changed, "/old/place/nginx.conf", listens(CONF))
-    assert "restart home-warden.service" in calls
+    assert "restart" not in calls and "reload home-warden.service" in calls
     assert "WARN: the privileged listen directives" in out
     assert saved == listens(CONF)
 
