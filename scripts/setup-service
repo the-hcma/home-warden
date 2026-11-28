@@ -465,7 +465,16 @@ is_valid_fqdn() {
 # script from knowing: a file that exists but cannot be read, a path that is not a regular file, or no python3 3.11+.
 # Reading any of those as "unset" would disable and stop a web UI that the operator turned on.
 web_ui_fqdn() {
-  [[ -e "${home_warden_config_path}" ]] || return 0
+  # Only a path that is genuinely absent is "unset". Any other failure to look at it (a directory this user cannot
+  # search, say) is an error: reading it as unset would disable a web UI that the operator turned on.
+  local stat_err
+  if ! stat_err="$(LC_ALL=C stat -L -- "${home_warden_config_path}" 2>&1 >/dev/null)"; then
+    if [[ "${stat_err}" == *"No such file or directory"* ]]; then
+      return 0
+    fi
+    echo "ERROR: cannot look at ${home_warden_config_path}: ${stat_err}" >&2
+    return 1
+  fi
   if [[ ! -f "${home_warden_config_path}" || ! -r "${home_warden_config_path}" ]]; then
     echo "ERROR: ${home_warden_config_path} exists but is not a readable file" >&2
     return 1
@@ -1582,7 +1591,9 @@ main() {
     # restart, not just enable --now: a unit already running keeps the code and environment it started with
     run sudo systemctl enable home-warden-web.service
     run sudo systemctl restart home-warden-web.service
-  elif systemctl is-enabled --quiet home-warden-web.service 2>/dev/null; then
+  elif systemctl is-enabled --quiet home-warden-web.service 2>/dev/null ||
+    systemctl is-active --quiet home-warden-web.service 2>/dev/null; then
+    # enabled and active are independent: a unit disabled without --now can still be running
     echo "no web UI fqdn set in ${home_warden_config_path}: stopping home-warden-web.service"
     run sudo systemctl disable --now home-warden-web.service
   fi

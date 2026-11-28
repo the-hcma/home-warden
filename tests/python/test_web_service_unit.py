@@ -40,6 +40,22 @@ SETUP = REPO / "scripts" / "setup-service"
 UNIT = REPO / "etc" / "systemd" / "home-warden-web.service"
 
 
+def test_a_config_in_a_directory_that_cannot_be_searched_is_an_error_not_an_unset_fqdn(tmp_path: Path) -> None:
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    config = locked / "config.toml"
+    config.write_text('fqdn = "warden.example.com"\n')
+    locked.chmod(0)
+    try:
+        if os.access(locked, os.X_OK):
+            pytest.skip("running as a user that can search a mode 0 directory")
+        result = _run_fqdn(config, f"{_python3_dir(tmp_path)}{os.pathsep}/usr/bin:/bin")
+    finally:
+        locked.chmod(0o700)
+    assert result.returncode != 0 and result.stdout == ""
+    assert "cannot look at" in result.stderr
+
+
 def test_a_config_that_exists_but_cannot_be_read_is_an_error_not_an_unset_fqdn(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text('fqdn = "warden.example.com"\n')
@@ -55,6 +71,11 @@ def test_a_config_that_exists_but_cannot_be_read_is_an_error_not_an_unset_fqdn(t
     assert result.stdout == ""
 
 
+def test_a_config_that_is_genuinely_absent_is_unset_not_an_error(tmp_path: Path) -> None:
+    result = _run_fqdn(tmp_path / "nowhere" / "config.toml", f"{_python3_dir(tmp_path)}{os.pathsep}/usr/bin:/bin")
+    assert result.returncode == 0 and result.stdout == ""
+
+
 def test_a_directory_where_the_config_should_be_is_an_error(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.mkdir()
@@ -65,9 +86,12 @@ def test_a_directory_where_the_config_should_be_is_an_error(tmp_path: Path) -> N
 def test_a_missing_interpreter_is_an_error_not_an_unset_fqdn(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text('fqdn = "warden.example.com"\n')
-    empty_bin = tmp_path / "nobin"
-    empty_bin.mkdir()
-    result = _run_fqdn(config, str(empty_bin))
+    only_stat = tmp_path / "nobin"
+    only_stat.mkdir()
+    stat = shutil.which("stat")
+    assert stat
+    (only_stat / "stat").symlink_to(stat)  # the script looks at the file first; python3 is the one thing missing
+    result = _run_fqdn(config, str(only_stat))
     assert result.returncode != 0
     assert result.stdout == ""
     assert "python3 not found" in result.stderr and "3.11" not in result.stderr
@@ -86,6 +110,15 @@ def test_a_python_without_tomllib_names_that_cause(tmp_path: Path) -> None:
     result = subprocess.run([bash, "-c", script], capture_output=True, text=True, timeout=20, env=env, check=False)
     assert result.returncode != 0 and result.stdout == ""
     assert "3.11 or newer (tomllib)" in result.stderr
+
+
+def test_a_unit_that_is_disabled_but_still_running_is_stopped_when_the_web_ui_is_turned_off() -> None:
+    text = SETUP.read_text()
+    pattern = (
+        r"elif systemctl is-enabled --quiet home-warden-web\.service 2>/dev/null \|\|\n"
+        r"\s+systemctl is-active --quiet home-warden-web\.service"
+    )
+    assert re.search(pattern, text)
 
 
 def test_setup_service_checks_for_uv_before_installing_the_web_unit() -> None:
