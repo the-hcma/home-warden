@@ -8,6 +8,7 @@ Usage:
   catalog-dns-sync --target 203.0.113.10 --old-target 198.51.100.7   # also list leftovers
   catalog-dns-sync --target 203.0.113.10 --dns-only mail.example.com   # a name with no catalog vhost
   catalog-dns-sync --target 203.0.113.10 --dns-only mail.example.com=203.0.113.11
+  catalog-dns-sync --target 203.0.113.10 --dns-only mail.example.com=203.0.113.11,203.0.113.12   # two A records
   catalog-dns-sync --restore ~/scratch/home-warden/dns-sync-snapshots/<file>.json [--dry-run]
 
 Before writing anything (unless --dry-run or --no-snapshot), the current records are saved to a
@@ -43,6 +44,7 @@ from app.catalog_health_settings import (
     services_json_path,
     timeout_seconds,
 )
+from app.dns_address_set import parse_address_set, sync_dns_address_set
 from app.dns_cutover import find_stragglers, load_snapshot, restore_snapshot, take_snapshot, write_snapshot
 
 _DNS_ONLY_NAME = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
@@ -107,7 +109,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="NAME[=TARGET]",
         help=(
-            "Also sync this name, which has a Cloudflare record but no catalog vhost, to TARGET (default: --target). "
+            "Also sync this name, which has a Cloudflare record but no catalog vhost, to TARGET (default: --target); "
+            "TARGET may be several comma-separated addresses of one family (round-robin A or AAAA). "
             "Repeatable. --service limits catalog services only; names given here are always synced, "
             "snapshotted and, with --old-target, not reported as leftovers"
         ),
@@ -183,6 +186,13 @@ def main() -> int:
         return 2
     # (service, target) pairs: the catalog services at --target, then the --dns-only names at theirs.
     jobs = [(s, args.target) for s in services] + [(svc, target or args.target) for svc, target in extras]
+    try:
+        for _, job_target in jobs:
+            if "," in job_target:
+                parse_address_set(job_target.split(","))
+    except ValueError as e:
+        print(f"catalog-dns-sync: {e}", file=sys.stderr)
+        return 2
 
     if not args.dry_run and not args.no_snapshot:
         try:
@@ -195,20 +205,7 @@ def main() -> int:
             return 1
         print(f"catalog-dns-sync: snapshot written to {snapshot_path}", file=sys.stderr)
 
-    results = [
-        sync_dns_record(
-            s.get("name", "<unnamed>"),
-            s,
-            job_target,
-            cf_headers,
-            args.timeout,
-            args.max_retries,
-            proxied=args.proxied,
-            dry_run=args.dry_run,
-            verify_resolution=not args.no_verify_resolution,
-        )
-        for s, job_target in jobs
-    ]
+    results = [_sync_job(s, job_target, cf_headers, args) for s, job_target in jobs]
 
     if args.verbose:
         for r in results:
@@ -239,6 +236,17 @@ def main() -> int:
         if leftovers:
             return 1
     return 1 if any(r.status == "failed" for r in results) else 0
+
+
+def _sync_job(service: dict, target: str, cf_headers: dict[str, str], args: argparse.Namespace):
+    """One name to one address (`sync_dns_record`) or, for a comma-separated target, to a set of addresses."""
+    common = {"proxied": args.proxied, "dry_run": args.dry_run, "verify_resolution": not args.no_verify_resolution}
+    name = service.get("name", "<unnamed>")
+    if "," in target:
+        return sync_dns_address_set(
+            name, service, target.split(","), cf_headers, args.timeout, args.max_retries, **common
+        )
+    return sync_dns_record(name, service, target, cf_headers, args.timeout, args.max_retries, **common)
 
 
 def _restore(args: argparse.Namespace) -> int:

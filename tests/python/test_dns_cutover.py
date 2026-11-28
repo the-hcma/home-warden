@@ -352,3 +352,41 @@ def test_find_stragglers_refuses_a_truncated_listing(monkeypatch) -> None:
     monkeypatch.setattr("app.dns_cutover._cf_request", fake)
     with pytest.raises(RuntimeError, match="incomplete"):
         find_stragglers(SERVICES, "198.51.100.7", HEADERS, 5, 1)
+
+
+def test_restore_of_a_name_that_gained_records_uses_the_set_sync_and_keeps_the_extra(monkeypatch) -> None:
+    calls: list[tuple] = []
+
+    def fake_set(name, service, targets, headers, timeout, retries, **kw):
+        calls.append((name, service["server_name"], targets, kw))
+        return SyncResult(name, "manual", "other record(s) remain")
+
+    def single_sync_must_not_run(*a, **kw):
+        raise AssertionError("single-record sync used for a name with several live records")
+
+    monkeypatch.setattr("app.dns_cutover.sync_dns_address_set", fake_set)
+    monkeypatch.setattr("app.dns_cutover.sync_dns_record", single_sync_must_not_run)
+    monkeypatch.setattr(
+        "app.dns_cutover.list_cloudflare_records",
+        lambda *a: [{"type": "A", "content": "192.0.2.30"}, {"type": "A", "content": "192.0.2.9"}],
+    )
+    snap = {
+        "version": 1,
+        "entries": [
+            {
+                "service": "m",
+                "name": "m.example.com",
+                "records": [{"content": "192.0.2.10", "ttl": 300, "proxied": False}],
+            }
+        ],
+    }
+    results = restore_snapshot(snap, HEADERS, 5, 1)
+    assert [r.status for r in results] == ["manual"]
+    assert calls == [
+        (
+            "m",
+            "m.example.com",
+            ["192.0.2.10"],
+            {"proxied": False, "dry_run": False, "verify_resolution": True, "ttl": 300, "allow_extra": True},
+        )
+    ]

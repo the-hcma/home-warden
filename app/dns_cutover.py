@@ -26,6 +26,7 @@ from app.catalog_checks import (
     list_cloudflare_records,
     sync_dns_record,
 )
+from app.dns_address_set import sync_dns_address_set
 
 SNAPSHOT_VERSION = 1
 # Hard bound on zone-listing pages, so a huge zone can't turn a report into an unbounded loop.
@@ -118,6 +119,25 @@ def restore_snapshot(
             )
             continue
         rec = records[0]
+        if _live_count(entry["name"], rec, cf_headers, timeout, max_retries) > 1:
+            # The name gained records since the snapshot (a sync to several addresses): put the original back on one
+            # of them and report the rest, which a restore never deletes.
+            results.append(
+                sync_dns_address_set(
+                    service,
+                    {"server_name": entry["name"]},
+                    [rec["content"]],
+                    cf_headers,
+                    timeout,
+                    max_retries,
+                    proxied=bool(rec.get("proxied", False)),
+                    dry_run=dry_run,
+                    verify_resolution=verify_resolution,
+                    ttl=rec.get("ttl"),
+                    allow_extra=True,
+                )
+            )
+            continue
         results.append(
             sync_dns_record(
                 service,
@@ -133,6 +153,17 @@ def restore_snapshot(
             )
         )
     return results
+
+
+def _live_count(name: str, snapshot_record: dict, cf_headers: dict[str, str], timeout: float, max_retries: int) -> int:
+    """How many records of the snapshotted record's type the name has now (0 when it can't be read, so the
+    ordinary single-record restore, which reports that problem itself, runs)."""
+    try:
+        live = list_cloudflare_records(name, cf_headers, timeout, max_retries) or []
+    except Exception:
+        return 0
+    kind = "AAAA" if ":" in str(snapshot_record.get("content", "")) else "A"
+    return len([r for r in live if r.get("type") == kind])
 
 
 def _normalize_target(target: str) -> str:

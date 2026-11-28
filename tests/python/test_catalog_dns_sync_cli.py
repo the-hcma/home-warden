@@ -391,3 +391,38 @@ def test_cli_dns_only_conflict_check_normalizes_the_catalog_name_too(monkeypatch
     assert main() == 2
     assert "already a catalog server_name" in capsys.readouterr().err
     assert synced == []
+
+
+def _address_set_setup(monkeypatch, tmp_path: Path, extra_args: list[str]) -> list[tuple[str, list[str]]]:
+    synced = _dns_only_setup(monkeypatch, tmp_path, extra_args)
+    sets: list[tuple[str, list[str]]] = []
+
+    def fake_set(name, service, targets, *a, **kw):
+        sets.append((service["server_name"], targets))
+        return SyncResult(name, "noop", "already correct")
+
+    monkeypatch.setattr("app.catalog_dns_sync_cli.sync_dns_address_set", fake_set)
+    assert synced == []
+    return sets
+
+
+def test_cli_a_comma_separated_dns_only_target_syncs_the_name_to_a_set(monkeypatch, tmp_path: Path, capsys) -> None:
+    sets = _address_set_setup(monkeypatch, tmp_path, ["--dns-only", "mail.example.com=203.0.113.11,203.0.113.12"])
+    assert main() == 0
+    assert sets == [("mail.example.com", ["203.0.113.11", "203.0.113.12"])]
+    assert [r["service"] for r in json.loads(capsys.readouterr().out)] == ["svc", "mail.example.com"]
+
+
+def test_cli_a_comma_separated_target_applies_to_every_job(monkeypatch, tmp_path: Path) -> None:
+    sets = _address_set_setup(monkeypatch, tmp_path, ["--dns-only", "mail.example.com"])
+    monkeypatch.setattr(sys, "argv", [a if a != "203.0.113.10" else "203.0.113.10,203.0.113.11" for a in sys.argv])
+    assert main() == 0
+    assert sorted(s for s, _ in sets) == ["app.example.com", "mail.example.com"]
+
+
+def test_cli_a_bad_address_set_is_a_usage_error_before_any_write(monkeypatch, tmp_path: Path, capsys) -> None:
+    for bad in ("mail.example.com=203.0.113.11,2001:db8::1", "mail.example.com=203.0.113.11,host.example.net"):
+        sets = _address_set_setup(monkeypatch, tmp_path, ["--dns-only", bad])
+        assert main() == 2, bad
+        assert "catalog-dns-sync:" in capsys.readouterr().err
+        assert sets == []
