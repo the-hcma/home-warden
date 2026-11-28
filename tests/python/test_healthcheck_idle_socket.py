@@ -131,11 +131,12 @@ def test_a_later_failure_keeps_the_first_failure_time_and_reason(tmp_path: Path)
     env = _stubs(tmp_path, service="inactive", socket="inactive")
     _run(env)
     state = tmp_path / "scratch" / "healthcheck.state"
-    first = _first(state.read_text().splitlines(), "first_fail_epoch=")
-    env = _stubs(tmp_path, service="failed", socket="active")
-    _run(env)
+    first_line = _first(state.read_text().splitlines(), "first_fail_epoch=")
+    earlier = f"first_fail_epoch={int(time.time()) - 300}"
+    state.write_text(state.read_text().replace(first_line, earlier))
+    _run(_stubs(tmp_path, service="failed", socket="active"))
     lines = state.read_text().splitlines()
-    assert first in lines
+    assert earlier in lines
     assert any(line.startswith("fail_detail=") and "nothing is listening" in line for line in lines)
 
 
