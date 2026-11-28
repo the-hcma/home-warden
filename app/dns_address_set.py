@@ -117,12 +117,14 @@ def sync_dns_address_set(
     creates = missing[len(moves) :]
     leftover = spare[len(moves) :]
     if leftover and not allow_extra:
-        extra = ", ".join(str(r.get("content")) for r in leftover)
+        extra = ", ".join(
+            f"{r.get('content')} (duplicate)" if r.get("content") in kept else str(r.get("content")) for r in leftover
+        )
         return SyncResult(
             name,
             "failed",
-            f"{len(leftover)} existing {record_type} record(s) for {domain} are not wanted ({extra}) and there is no "
-            "address to move them to -- refusing to delete; remove them by hand",
+            f"{len(leftover)} existing {record_type} record(s) for {domain} are duplicates or not wanted ({extra}) "
+            "and there is no address to move them to -- refusing to delete; remove them by hand",
         )
     retag = [
         r

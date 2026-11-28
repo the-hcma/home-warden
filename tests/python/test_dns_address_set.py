@@ -177,3 +177,32 @@ def test_restore_mode_dry_run_reports_the_records_it_would_leave(cloudflare) -> 
     assert result.status == "manual"
     assert "would-update" in result.detail and "would have to be deleted by hand" in result.detail
     assert fake.writes() == []
+
+
+def test_a_kept_record_whose_ttl_or_proxy_flag_differs_is_adjusted_with_one_patch(cloudflare) -> None:
+    fake = cloudflare([{"type": "A", "content": "192.0.2.10", "proxied": True, "ttl": 60}])
+    result = _sync(["192.0.2.10"], ttl=300, verify_resolution=False)
+    assert result.status == "updated", result.detail
+    assert fake.writes() == [("PATCH", {"proxied": False, "ttl": 300})]
+    assert fake.records[0]["ttl"] == 300 and fake.records[0]["proxied"] is False
+
+
+def test_a_duplicate_of_a_wanted_address_is_named_as_a_duplicate_and_not_deleted(cloudflare) -> None:
+    fake = cloudflare([{"type": "A", "content": "192.0.2.9"}, {"type": "A", "content": "192.0.2.9"}])
+    result = _sync(["192.0.2.9"])
+    assert result.status == "failed"
+    assert "192.0.2.9 (duplicate)" in result.detail and "refusing to delete" in result.detail
+    assert fake.writes() == []
+
+
+def test_restore_mode_puts_back_ttl_and_proxy_on_a_kept_record_and_reports_the_other(cloudflare) -> None:
+    fake = cloudflare(
+        [
+            {"type": "A", "content": "192.0.2.10", "proxied": True, "ttl": 60},
+            {"type": "A", "content": "192.0.2.9"},
+        ]
+    )
+    result = _sync(["192.0.2.10"], allow_extra=True, ttl=300, verify_resolution=False)
+    assert result.status == "manual"
+    assert fake.writes() == [("PATCH", {"proxied": False, "ttl": 300})]
+    assert "192.0.2.9" in result.detail
