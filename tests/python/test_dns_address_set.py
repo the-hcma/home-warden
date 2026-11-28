@@ -59,133 +59,11 @@ def cloudflare(monkeypatch):
     return install
 
 
-def _sync(targets, **kwargs):
-    return sync_dns_address_set(
-        "mail", {"server_name": "mail.example.com"}, targets, {"Authorization": "x"}, 5.0, 1, **kwargs
-    )
-
-
-def test_parse_address_set_normalizes_dedupes_and_keeps_order() -> None:
-    assert parse_address_set(["192.0.2.10", "192.0.2.9", "192.0.2.10"]) == ("A", ["192.0.2.10", "192.0.2.9"])
-    assert parse_address_set(["2001:DB8::1"]) == ("AAAA", ["2001:db8::1"])
-
-
-@pytest.mark.parametrize("bad", [[], ["mail.example.net"], ["192.0.2.1", "2001:db8::1"], ["192.0.2.999"]])
-def test_parse_address_set_rejects_names_mixed_families_and_nothing(bad) -> None:
-    with pytest.raises(ValueError):
-        parse_address_set(bad)
-
-
-def test_one_existing_record_is_moved_and_the_second_address_created(cloudflare) -> None:
-    fake = cloudflare([{"type": "A", "content": "192.0.2.10"}], dig=["192.0.2.30", "192.0.2.9"])
-    result = _sync(["192.0.2.30", "192.0.2.9"])
-    assert result.status == "updated", result.detail
-    assert fake.contents() == ["192.0.2.30", "192.0.2.9"]
-    assert [m for m, _ in fake.writes()] == ["PATCH", "POST"]
-
-
-def test_nothing_exists_so_both_addresses_are_created(cloudflare) -> None:
-    fake = cloudflare([])
-    result = _sync(["192.0.2.30", "192.0.2.9"], verify_resolution=False)
-    assert result.status == "created", result.detail
-    assert fake.contents() == ["192.0.2.30", "192.0.2.9"]
-    assert [m for m, _ in fake.writes()] == ["POST", "POST"]
-
-
-def test_a_name_already_holding_the_set_is_a_noop_and_writes_nothing(cloudflare) -> None:
-    fake = cloudflare([{"type": "A", "content": "192.0.2.30"}, {"type": "A", "content": "192.0.2.9"}])
-    result = _sync(["192.0.2.9", "192.0.2.30"])
-    assert result.status == "noop"
-    assert fake.writes() == []
-
-
-def test_a_wanted_address_that_already_exists_is_kept_not_rewritten(cloudflare) -> None:
-    fake = cloudflare([{"type": "A", "content": "192.0.2.9"}])
-    result = _sync(["192.0.2.30", "192.0.2.9"], verify_resolution=False)
-    assert result.status == "created"
-    assert [(m, d["content"]) for m, d in fake.writes()] == [("POST", "192.0.2.30")]
-
-
-def test_dry_run_reports_the_steps_and_writes_nothing(cloudflare) -> None:
-    fake = cloudflare([{"type": "A", "content": "192.0.2.10"}])
-    result = _sync(["192.0.2.30", "192.0.2.9"], dry_run=True)
-    assert result.status == "would-update"
-    assert "move 192.0.2.10 -> 192.0.2.30" in result.detail and "create 192.0.2.9" in result.detail
-    assert fake.writes() == []
-
-
-def test_more_unwanted_records_than_addresses_to_move_them_to_fails_and_deletes_nothing(cloudflare) -> None:
-    fake = cloudflare(
-        [
-            {"type": "A", "content": "192.0.2.10"},
-            {"type": "A", "content": "192.0.2.11"},
-            {"type": "A", "content": "192.0.2.12"},
-        ]
-    )
-    result = _sync(["192.0.2.30", "192.0.2.9"])
-    assert result.status == "failed"
-    assert "192.0.2.12" in result.detail and "refusing to delete" in result.detail
-    assert fake.writes() == []
-
-
 def test_a_different_record_type_at_the_name_is_refused(cloudflare) -> None:
     fake = cloudflare([{"type": "CNAME", "content": "other.example.net"}])
     result = _sync(["192.0.2.30", "192.0.2.9"])
     assert result.status == "failed" and "different type" in result.detail
     assert fake.writes() == []
-
-
-def test_a_read_back_missing_an_address_is_a_failure(cloudflare, monkeypatch) -> None:
-    fake = cloudflare([{"type": "A", "content": "192.0.2.10"}])
-    original = fake.__call__
-
-    def drop_post(url, headers, timeout, max_retries, *, method="GET", data=None):
-        result = original(url, headers, timeout, max_retries, method=method, data=data)
-        if method == "POST":
-            fake.records.pop()
-        return result
-
-    monkeypatch.setattr(dns_address_set, "_cf_request", drop_post)
-    result = _sync(["192.0.2.30", "192.0.2.9"], verify_resolution=False)
-    assert result.status == "failed" and "not found on read-back" in result.detail
-
-
-def test_an_authoritative_answer_missing_an_address_is_a_failure(cloudflare) -> None:
-    cloudflare([{"type": "A", "content": "192.0.2.10"}], dig=["192.0.2.30"])
-    result = _sync(["192.0.2.30", "192.0.2.9"])
-    assert result.status == "failed" and "missing 192.0.2.9" in result.detail
-
-
-def test_restore_mode_puts_the_original_back_and_reports_the_extra_record(cloudflare) -> None:
-    fake = cloudflare([{"type": "A", "content": "192.0.2.30"}, {"type": "A", "content": "192.0.2.9"}])
-    result = _sync(["192.0.2.10"], allow_extra=True, ttl=300, verify_resolution=False)
-    assert result.status == "manual"
-    assert "192.0.2.9" in result.detail or "192.0.2.30" in result.detail
-    assert "192.0.2.10" in fake.contents() and len(fake.contents()) == 2
-    assert [m for m, _ in fake.writes()] == ["PATCH"]
-
-
-def test_mixed_families_in_the_request_fail_before_any_call(cloudflare) -> None:
-    fake = cloudflare([])
-    result = _sync(["192.0.2.1", "2001:db8::1"])
-    assert result.status == "failed" and "cannot be mixed" in result.detail
-    assert fake.calls == []
-
-
-def test_restore_mode_dry_run_reports_the_records_it_would_leave(cloudflare) -> None:
-    fake = cloudflare([{"type": "A", "content": "192.0.2.30"}, {"type": "A", "content": "192.0.2.9"}])
-    result = _sync(["192.0.2.10"], allow_extra=True, dry_run=True)
-    assert result.status == "manual"
-    assert "would-update" in result.detail and "would have to be deleted by hand" in result.detail
-    assert fake.writes() == []
-
-
-def test_a_kept_record_whose_ttl_or_proxy_flag_differs_is_adjusted_with_one_patch(cloudflare) -> None:
-    fake = cloudflare([{"type": "A", "content": "192.0.2.10", "proxied": True, "ttl": 60}])
-    result = _sync(["192.0.2.10"], ttl=300, verify_resolution=False)
-    assert result.status == "updated", result.detail
-    assert fake.writes() == [("PATCH", {"proxied": False, "ttl": 300})]
-    assert fake.records[0]["ttl"] == 300 and fake.records[0]["proxied"] is False
 
 
 def test_a_duplicate_of_a_wanted_address_is_named_as_a_duplicate_and_not_deleted(cloudflare) -> None:
@@ -196,54 +74,12 @@ def test_a_duplicate_of_a_wanted_address_is_named_as_a_duplicate_and_not_deleted
     assert fake.writes() == []
 
 
-def test_restore_mode_puts_back_ttl_and_proxy_on_a_kept_record_and_reports_the_other(cloudflare) -> None:
-    fake = cloudflare(
-        [
-            {"type": "A", "content": "192.0.2.10", "proxied": True, "ttl": 60},
-            {"type": "A", "content": "192.0.2.9"},
-        ]
-    )
-    result = _sync(["192.0.2.10"], allow_extra=True, ttl=300, verify_resolution=False)
-    assert result.status == "manual"
+def test_a_kept_record_whose_ttl_or_proxy_flag_differs_is_adjusted_with_one_patch(cloudflare) -> None:
+    fake = cloudflare([{"type": "A", "content": "192.0.2.10", "proxied": True, "ttl": 60}])
+    result = _sync(["192.0.2.10"], ttl=300, verify_resolution=False)
+    assert result.status == "updated", result.detail
     assert fake.writes() == [("PATCH", {"proxied": False, "ttl": 300})]
-    assert "192.0.2.9" in result.detail
-
-
-def test_a_truncated_listing_is_never_reconciled(cloudflare) -> None:
-    fake = cloudflare([{"type": "A", "content": "192.0.2.10"}])
-    fake.total_pages = 2
-    result = _sync(["192.0.2.30", "192.0.2.9"])
-    assert result.status == "failed" and "partial list" in result.detail
-    assert fake.writes() == []
-
-
-def test_a_read_back_that_still_shows_an_unwanted_record_is_a_failure(cloudflare, monkeypatch) -> None:
-    fake = cloudflare([{"type": "A", "content": "192.0.2.10"}])
-    original = fake.__call__
-
-    def keep_old(url, headers, timeout, max_retries, *, method="GET", data=None):
-        result = original(url, headers, timeout, max_retries, method=method, data=data)
-        if method == "GET" and "/dns_records?name=" in url and fake.writes():
-            result = {**result, "result": [*result["result"], {"type": "A", "content": "192.0.2.10", "id": "old"}]}
-        return result
-
-    monkeypatch.setattr(dns_address_set, "_cf_request", keep_old)
-    result = _sync(["192.0.2.30", "192.0.2.9"], verify_resolution=False)
-    assert result.status == "failed" and "not exactly" in result.detail
-
-
-def test_an_authoritative_answer_that_still_includes_an_unwanted_address_is_a_failure(cloudflare) -> None:
-    cloudflare([{"type": "A", "content": "192.0.2.10"}], dig=["192.0.2.30", "192.0.2.9", "192.0.2.10"])
-    result = _sync(["192.0.2.30", "192.0.2.9"])
-    assert result.status == "failed" and "also answers 192.0.2.10" in result.detail
-
-
-def test_restore_mode_allows_extra_records_in_the_read_back_and_the_answer(cloudflare) -> None:
-    cloudflare(
-        [{"type": "A", "content": "192.0.2.30"}, {"type": "A", "content": "192.0.2.9"}], dig=["192.0.2.10", "192.0.2.9"]
-    )
-    result = _sync(["192.0.2.10"], allow_extra=True)
-    assert result.status == "manual"
+    assert fake.records[0]["ttl"] == 300 and fake.records[0]["proxied"] is False
 
 
 def test_a_listing_that_grows_a_second_page_after_the_write_is_a_failure(cloudflare, monkeypatch) -> None:
@@ -269,3 +105,167 @@ def test_a_missing_or_single_page_count_is_a_complete_listing(info) -> None:
 @pytest.mark.parametrize("info", [{"total_pages": 2}, {"total_pages": "many"}, {"total_pages": [3]}])
 def test_a_multi_page_or_unreadable_page_count_counts_as_truncated(info) -> None:
     assert dns_address_set._truncated({"result": [], "result_info": info}) is True
+
+
+def test_a_name_already_holding_the_set_is_a_noop_and_writes_nothing(cloudflare) -> None:
+    fake = cloudflare([{"type": "A", "content": "192.0.2.30"}, {"type": "A", "content": "192.0.2.9"}])
+    result = _sync(["192.0.2.9", "192.0.2.30"])
+    assert result.status == "noop"
+    assert fake.writes() == []
+
+
+def test_a_read_back_missing_an_address_is_a_failure(cloudflare, monkeypatch) -> None:
+    fake = cloudflare([{"type": "A", "content": "192.0.2.10"}])
+    original = fake.__call__
+
+    def drop_post(url, headers, timeout, max_retries, *, method="GET", data=None):
+        result = original(url, headers, timeout, max_retries, method=method, data=data)
+        if method == "POST":
+            fake.records.pop()
+        return result
+
+    monkeypatch.setattr(dns_address_set, "_cf_request", drop_post)
+    result = _sync(["192.0.2.30", "192.0.2.9"], verify_resolution=False)
+    assert result.status == "failed" and "not found on read-back" in result.detail
+
+
+def test_a_read_back_that_still_shows_an_unwanted_record_is_a_failure(cloudflare, monkeypatch) -> None:
+    fake = cloudflare([{"type": "A", "content": "192.0.2.10"}])
+    original = fake.__call__
+
+    def keep_old(url, headers, timeout, max_retries, *, method="GET", data=None):
+        result = original(url, headers, timeout, max_retries, method=method, data=data)
+        if method == "GET" and "/dns_records?name=" in url and fake.writes():
+            result = {**result, "result": [*result["result"], {"type": "A", "content": "192.0.2.10", "id": "old"}]}
+        return result
+
+    monkeypatch.setattr(dns_address_set, "_cf_request", keep_old)
+    result = _sync(["192.0.2.30", "192.0.2.9"], verify_resolution=False)
+    assert result.status == "failed" and "not exactly" in result.detail
+
+
+def test_a_truncated_listing_is_never_reconciled(cloudflare) -> None:
+    fake = cloudflare([{"type": "A", "content": "192.0.2.10"}])
+    fake.total_pages = 2
+    result = _sync(["192.0.2.30", "192.0.2.9"])
+    assert result.status == "failed" and "partial list" in result.detail
+    assert fake.writes() == []
+
+
+def test_a_wanted_address_that_already_exists_is_kept_not_rewritten(cloudflare) -> None:
+    fake = cloudflare([{"type": "A", "content": "192.0.2.9"}])
+    result = _sync(["192.0.2.30", "192.0.2.9"], verify_resolution=False)
+    assert result.status == "created"
+    assert [(m, d["content"]) for m, d in fake.writes()] == [("POST", "192.0.2.30")]
+
+
+def test_an_authoritative_answer_missing_an_address_is_a_failure(cloudflare) -> None:
+    cloudflare([{"type": "A", "content": "192.0.2.10"}], dig=["192.0.2.30"])
+    result = _sync(["192.0.2.30", "192.0.2.9"])
+    assert result.status == "failed" and "missing 192.0.2.9" in result.detail
+
+
+def test_an_authoritative_answer_that_still_includes_an_unwanted_address_is_a_failure(cloudflare) -> None:
+    cloudflare([{"type": "A", "content": "192.0.2.10"}], dig=["192.0.2.30", "192.0.2.9", "192.0.2.10"])
+    result = _sync(["192.0.2.30", "192.0.2.9"])
+    assert result.status == "failed" and "also answers 192.0.2.10" in result.detail
+
+
+def test_dry_run_reports_the_steps_and_writes_nothing(cloudflare) -> None:
+    fake = cloudflare([{"type": "A", "content": "192.0.2.10"}])
+    result = _sync(["192.0.2.30", "192.0.2.9"], dry_run=True)
+    assert result.status == "would-update"
+    assert "move 192.0.2.10 -> 192.0.2.30" in result.detail and "create 192.0.2.9" in result.detail
+    assert fake.writes() == []
+
+
+def test_mixed_families_in_the_request_fail_before_any_call(cloudflare) -> None:
+    fake = cloudflare([])
+    result = _sync(["192.0.2.1", "2001:db8::1"])
+    assert result.status == "failed" and "cannot be mixed" in result.detail
+    assert fake.calls == []
+
+
+def test_more_unwanted_records_than_addresses_to_move_them_to_fails_and_deletes_nothing(cloudflare) -> None:
+    fake = cloudflare(
+        [
+            {"type": "A", "content": "192.0.2.10"},
+            {"type": "A", "content": "192.0.2.11"},
+            {"type": "A", "content": "192.0.2.12"},
+        ]
+    )
+    result = _sync(["192.0.2.30", "192.0.2.9"])
+    assert result.status == "failed"
+    assert "192.0.2.12" in result.detail and "refusing to delete" in result.detail
+    assert fake.writes() == []
+
+
+def test_nothing_exists_so_both_addresses_are_created(cloudflare) -> None:
+    fake = cloudflare([])
+    result = _sync(["192.0.2.30", "192.0.2.9"], verify_resolution=False)
+    assert result.status == "created", result.detail
+    assert fake.contents() == ["192.0.2.30", "192.0.2.9"]
+    assert [m for m, _ in fake.writes()] == ["POST", "POST"]
+
+
+def test_one_existing_record_is_moved_and_the_second_address_created(cloudflare) -> None:
+    fake = cloudflare([{"type": "A", "content": "192.0.2.10"}], dig=["192.0.2.30", "192.0.2.9"])
+    result = _sync(["192.0.2.30", "192.0.2.9"])
+    assert result.status == "updated", result.detail
+    assert fake.contents() == ["192.0.2.30", "192.0.2.9"]
+    assert [m for m, _ in fake.writes()] == ["PATCH", "POST"]
+
+
+def test_parse_address_set_normalizes_dedupes_and_keeps_order() -> None:
+    assert parse_address_set(["192.0.2.10", "192.0.2.9", "192.0.2.10"]) == ("A", ["192.0.2.10", "192.0.2.9"])
+    assert parse_address_set(["2001:DB8::1"]) == ("AAAA", ["2001:db8::1"])
+
+
+@pytest.mark.parametrize("bad", [[], ["mail.example.net"], ["192.0.2.1", "2001:db8::1"], ["192.0.2.999"]])
+def test_parse_address_set_rejects_names_mixed_families_and_nothing(bad) -> None:
+    with pytest.raises(ValueError):
+        parse_address_set(bad)
+
+
+def test_restore_mode_allows_extra_records_in_the_read_back_and_the_answer(cloudflare) -> None:
+    cloudflare(
+        [{"type": "A", "content": "192.0.2.30"}, {"type": "A", "content": "192.0.2.9"}], dig=["192.0.2.10", "192.0.2.9"]
+    )
+    result = _sync(["192.0.2.10"], allow_extra=True)
+    assert result.status == "manual"
+
+
+def test_restore_mode_dry_run_reports_the_records_it_would_leave(cloudflare) -> None:
+    fake = cloudflare([{"type": "A", "content": "192.0.2.30"}, {"type": "A", "content": "192.0.2.9"}])
+    result = _sync(["192.0.2.10"], allow_extra=True, dry_run=True)
+    assert result.status == "manual"
+    assert "would-update" in result.detail and "would have to be deleted by hand" in result.detail
+    assert fake.writes() == []
+
+
+def test_restore_mode_puts_back_ttl_and_proxy_on_a_kept_record_and_reports_the_other(cloudflare) -> None:
+    fake = cloudflare(
+        [
+            {"type": "A", "content": "192.0.2.10", "proxied": True, "ttl": 60},
+            {"type": "A", "content": "192.0.2.9"},
+        ]
+    )
+    result = _sync(["192.0.2.10"], allow_extra=True, ttl=300, verify_resolution=False)
+    assert result.status == "manual"
+    assert fake.writes() == [("PATCH", {"proxied": False, "ttl": 300})]
+    assert "192.0.2.9" in result.detail
+
+
+def test_restore_mode_puts_the_original_back_and_reports_the_extra_record(cloudflare) -> None:
+    fake = cloudflare([{"type": "A", "content": "192.0.2.30"}, {"type": "A", "content": "192.0.2.9"}])
+    result = _sync(["192.0.2.10"], allow_extra=True, ttl=300, verify_resolution=False)
+    assert result.status == "manual"
+    assert "192.0.2.9" in result.detail or "192.0.2.30" in result.detail
+    assert "192.0.2.10" in fake.contents() and len(fake.contents()) == 2
+    assert [m for m, _ in fake.writes()] == ["PATCH"]
+
+
+def _sync(targets, **kwargs):
+    return sync_dns_address_set(
+        "mail", {"server_name": "mail.example.com"}, targets, {"Authorization": "x"}, 5.0, 1, **kwargs
+    )

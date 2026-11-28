@@ -20,18 +20,6 @@ from app.catalog_checks import (
     candidate_zone_names,
 )
 
-_PER_PAGE = 100
-
-
-def _truncated(data: dict) -> bool:
-    """True when Cloudflare says the listing has more pages than the one read: a partial view must never be
-    reconciled (a wanted address on a later page would be created twice, an unwanted one never seen)."""
-    info = data.get("result_info") or {}
-    try:
-        return int(info.get("total_pages") or 1) > 1
-    except (TypeError, ValueError):
-        return True
-
 
 def parse_address_set(targets: list[str]) -> tuple[str, list[str]]:
     """(record type, canonical addresses without duplicates, in the order given). Raises ValueError for a
@@ -231,3 +219,16 @@ def sync_dns_address_set(
             name, "manual", f"{verb} {record_type} {domain} -> {', '.join(wanted)}{left_note}: delete by hand"
         )
     return SyncResult(name, verb, f"{verb} {record_type} {domain} -> {', '.join(wanted)} in zone {zone_name}")
+
+
+_PER_PAGE = 100
+
+
+def _truncated(data: dict) -> bool:
+    """True when Cloudflare says the listing has more pages than the one read: a partial view must never be
+    reconciled (a wanted address on a later page would be created twice, an unwanted one never seen)."""
+    info = data.get("result_info") or {}
+    try:
+        return int(info.get("total_pages") or 1) > 1
+    except (TypeError, ValueError):
+        return True
