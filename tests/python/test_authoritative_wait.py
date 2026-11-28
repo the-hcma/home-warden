@@ -35,11 +35,6 @@ def test_an_answer_that_never_agrees_stops_at_the_configured_tries(monkeypatch) 
     assert answers == ["192.0.2.10"] and attempts == 4 and resolver.calls == 4
 
 
-def test_an_operators_tries_setting_in_the_environment_does_not_reach_the_tests() -> None:
-    assert catalog_checks._answer_tries() == 5
-    assert catalog_checks._answer_delay() == 0.0
-
-
 def test_no_answer_at_all_ends_the_wait_at_once(monkeypatch) -> None:
     resolver = _Resolver([None])
     answers, attempts = wait_for_authoritative_answer(resolver, lambda found: True)
@@ -115,6 +110,11 @@ def test_the_delay_setting_is_bounded_both_ways_and_ignores_non_finite_values(
 ) -> None:
     monkeypatch.setenv("DNS_SYNC_ANSWER_DELAY_S", value)
     assert catalog_checks._answer_delay() == expected
+
+
+def test_the_shared_fixture_pins_the_tries_to_a_non_default_value_and_the_delay_to_zero() -> None:
+    assert catalog_checks._answer_tries() == 7  # not the built-in default (5), so a missing pin is visible
+    assert catalog_checks._answer_delay() == 0.0
 
 
 @pytest.mark.parametrize(
