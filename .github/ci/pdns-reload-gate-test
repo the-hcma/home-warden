@@ -110,6 +110,9 @@ chmod +x "${stub_bin}/dig"
 
 export PATH="${stub_bin}:${PATH}"
 export HOME_WARDEN_SKIP_HOST_GUARD=1
+# seal the recursor-config step off from the machine: no real recursor.yml, state in the temp dir
+export PDNS_RECURSOR_YAML="${work_dir}/no-recursor.yml"
+export SCRATCH_DIR="${work_dir}/scratch"
 
 sentinel="${work_dir}/pdns_control.called"
 export STUB_PDNS_CONTROL_SENTINEL="${sentinel}"

@@ -37,6 +37,8 @@ fi
 source "${script_dir}/lib/nginx-pid"
 # shellcheck source=scripts/lib/service-group
 source "${script_dir}/lib/service-group"
+# shellcheck source=scripts/lib/config-fingerprint
+source "${script_dir}/lib/config-fingerprint"
 
 scratch_dir="${SCRATCH_DIR:-${HOME}/scratch/home-warden}"
 home_nginx_conf="${HOME_NGINX_CONF:-}"
@@ -78,10 +80,60 @@ if [[ -n "${owner}" ]]; then
   hw_fix_nginx_pid_ownership "${scratch_dir}" "${owner}" "${service_group}"
 fi
 
+listen_state="${scratch_dir}/nginx-listens.sha256"
+# `nginx -T` prints the whole effective config, included files too. A dump without the "configuration file" header is a
+# failed `nginx -T` (-t above passed, so this is unexpected): the listens are then unknown, which is neither a change nor
+# something to record, instead of the hash of an empty set.
+listens_known=0
+listens_changed=0
+listen_now=""
+nginx_dump="$(nginx -p "${scratch_dir}/" -T -c "${home_nginx_conf}" 2>/dev/null || true)"
+if [[ "${nginx_dump}" == *"# configuration file "* ]]; then
+  listens_known=1
+  listen_now="$(hw_fingerprint_listens <<<"${nginx_dump}")"
+  if hw_fingerprint_changed "${listen_state}" "${listen_now}"; then
+    listens_changed=1
+  fi
+else
+  log "WARN: nginx -T printed no configuration; the listen fingerprint is neither compared nor recorded this run"
+fi
+# this script runs as root: keep the state file (and a scratch directory it creates) the operator's
+HW_STATE_OWNER="${owner}"
+export HW_STATE_OWNER
+
 if systemctl is-active --quiet home-warden.service 2>/dev/null; then
+  main_pid="$(systemctl show --property=MainPID --value home-warden.service 2>/dev/null || true)"
+  running_conf="$(hw_nginx_master_conf "${main_pid}")"
+  unit_conf="$(hw_unit_nginx_conf home-warden.service)"
+  if ((listens_changed)); then
+    # nginx gets its privileged listening sockets (80, 443) from home-warden.socket as inherited fds, so neither a
+    # reload nor a restart of the service alone can add or move one (docs/architecture-socket-activation.md); that is
+    # setup-service's job (the IPv6 drop-ins), and it records the new fingerprint, which clears this. Until then the
+    # warning repeats, whichever of the branches below runs. Unprivileged ports nginx opens itself, so they are not here.
+    log "WARN: the privileged listen directives (ports below 1024) changed; run scripts/setup-service, which manages the socket"
+  fi
+  if [[ -n "${unit_conf}" && "${unit_conf}" != "${home_nginx_conf}" ]]; then
+    # a restart would start nginx with the unit's own -c path, so it cannot help; rewriting the unit can
+    log "WARN: home-warden.service starts nginx with -c ${unit_conf} but the config is ${home_nginx_conf}; run scripts/setup-service to rewrite the unit — reloading what is running"
+  elif ((listens_known && listens_changed == 0)) && [[ -n "${unit_conf}" && -n "${running_conf}" && "${running_conf}" != "${home_nginx_conf}" ]]; then
+    # only with the privileged listen set known and unchanged: a replacement master could not bind a new 80/443 listen
+    # (the socket unit supplies none, the service has no capabilities), so a path change that comes with one is left to
+    # setup-service, which rewrites the sockets and the unit together; the running nginx keeps serving meanwhile.
+    # unit_conf equals the config here (the branch above took any other value), so a restart starts nginx on it;
+    # when the unit's ExecStart could not be read it is empty and the reload fallback below is all that is safe
+    log "restarting home-warden.service (nginx runs ${running_conf}, the config is now ${home_nginx_conf}; a reload cannot change that)"
+    if systemctl restart home-warden.service; then
+      log "restart OK"
+      if ((listens_known && listens_changed == 0)); then hw_fingerprint_save "${listen_state}" "${listen_now}"; fi
+      exit 0
+    fi
+    log "FAIL: restart failed"
+    exit 1
+  fi
   log "reloading home-warden.service"
   if systemctl reload home-warden.service; then
     log "reload OK"
+    if ((listens_known && listens_changed == 0)); then hw_fingerprint_save "${listen_state}" "${listen_now}"; fi
   else
     log "reload failed — trying restart"
     if systemctl restart home-warden.service; then

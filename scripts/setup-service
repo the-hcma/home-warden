@@ -81,6 +81,9 @@ readonly legacy_service_account="home-warden"
 # shellcheck source=lib/host-guard
 source "${script_dir}/lib/host-guard"
 # shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/config-fingerprint
+source "${script_dir}/lib/config-fingerprint"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/nginx-pid
 source "${script_dir}/lib/nginx-pid"
 # shellcheck source-path=SCRIPTDIR
@@ -1522,6 +1525,11 @@ main() {
 
   if ((dry_run == 0)); then
     confirm_running
+    # the sockets and the service now match this config: clear the reload script's "listen directives changed" warning
+    # sudo like validate_nginx_config: the served config reads privileged paths (certs); never abort setup over this
+    if ! sudo nginx -p "${scratch_dir}/" -T -c "${home_nginx_conf}" 2>/dev/null | hw_nginx_record_listens "${scratch_dir}"; then
+      echo "WARN: could not record the nginx listen fingerprint; the reload script will keep warning about changed listens" >&2
+    fi
   fi
   remove_legacy_service_account
 

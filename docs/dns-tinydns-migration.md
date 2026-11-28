@@ -121,9 +121,10 @@ The reload unit runs as root (for `pdns_control`), but the syntax gate is a `uv 
 
 When `pdns-recursor.service` is installed and active, the same run then:
 
-1. runs `rec_control reload-zones`, which rereads `forward_zones` from the recursor's config, so a zone just added there takes effect without a restart;
-2. wipes the recursor's cache for each zone in `zones.yml` (`rec_control wipe-cache <zone>$`), so a removed record stops answering immediately instead of after its TTL;
-3. asks the recursor (on `127.0.0.1`, with the AD bit set) for each zone's SOA and compares it with the authoritative server's, and exits 3 if any zone doesn't match. A zone that also exists publicly would otherwise pass by resolving upstream. For each such zone it logs the exact fix: the `forward_zones` entry to add for `NXDOMAIN` or a different SOA, or a negative trust anchor for a DNSSEC `SERVFAIL` (see Recursor pitfalls above). A missing `dig` also exits 3, since the check can't run.
+1. when the recursor's own config (`recursor.yml` and `recursor.d/*.yml`, `PDNS_RECURSOR_YAML`) changed since the last run, validates it with `pdns_recursor --config=check` and restarts the recursor (the check failing exits 1 and nothing is restarted); this runs whenever the path unit fires, which watches the directory of `zones.yml`, so a `recursor.yml` edit is applied only when that file is in (or a symlink into) that directory; the first run only records the fingerprint;
+2. runs `rec_control reload-zones`, which rereads `forward_zones` from the recursor's config, so a zone just added there takes effect without a restart;
+3. wipes the recursor's cache for each zone in `zones.yml` (`rec_control wipe-cache <zone>$`), so a removed record stops answering immediately instead of after its TTL;
+4. asks the recursor (on `127.0.0.1`, with the AD bit set) for each zone's SOA and compares it with the authoritative server's, and exits 3 if any zone doesn't match. A zone that also exists publicly would otherwise pass by resolving upstream. For each such zone it logs the exact fix: the `forward_zones` entry to add for `NXDOMAIN` or a different SOA, or a negative trust anchor for a DNSSEC `SERVFAIL` (see Recursor pitfalls above). A missing `dig` also exits 3, since the check can't run.
 
 So adding a new zone apex to `zones.yml` fails the reload unit until the recursor forwards it. Add the zone to the recursor's config, then touch `zones.yml` to rerun the check. `PDNS_RECURSOR_SERVICE`, `PDNS_RECURSOR_ADDRESS` and `PDNS_AUTH_FORWARDER` override the unit name, the probe address and the suggested forwarder. A host with no recursor installed skips these steps.
 
