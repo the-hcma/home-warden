@@ -18,6 +18,7 @@ def test_cli_a_bad_address_set_is_a_usage_error_before_any_write(monkeypatch, tm
         "mail.example.com=203.0.113.11,2001:db8::1",
         "mail.example.com=203.0.113.11,host.example.net",
         "mail.example.com=2001:db8::1,2001:db8::2%eth0",
+        "mail.example.com=2001:db8::2%eth0",
     ):
         sets = _address_set_setup(monkeypatch, tmp_path, ["--dns-only", bad])
         assert main() == 2, bad
@@ -37,6 +38,14 @@ def test_cli_a_comma_separated_target_applies_to_every_job(monkeypatch, tmp_path
     monkeypatch.setattr(sys, "argv", [a if a != "203.0.113.10" else "203.0.113.10,203.0.113.11" for a in sys.argv])
     assert main() == 0
     assert sorted(s for s, _ in sets) == ["app.example.com", "mail.example.com"]
+
+
+def test_cli_a_single_ipv6_target_with_a_scope_identifier_is_a_usage_error(monkeypatch, tmp_path: Path, capsys) -> None:
+    synced = _dns_only_setup(monkeypatch, tmp_path, [])
+    monkeypatch.setattr(sys, "argv", [a if a != "203.0.113.10" else "fe80::1%eth0" for a in sys.argv])
+    assert main() == 2
+    assert "scope identifier" in capsys.readouterr().err
+    assert synced == []
 
 
 def test_cli_dns_only_accepts_punycode_labels_and_still_rejects_bad_final_labels(monkeypatch, tmp_path: Path) -> None:

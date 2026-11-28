@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import ipaddress
 import json
 import re
 import sys
@@ -157,8 +158,7 @@ def main() -> int:
     jobs = [(s, args.target) for s in services] + [(svc, target or args.target) for svc, target in extras]
     try:
         for _, job_target in jobs:
-            if "," in job_target:
-                parse_address_set(job_target.split(","))
+            _validate_target(job_target)
     except ValueError as e:
         print(f"catalog-dns-sync: {e}", file=sys.stderr)
         return 2
@@ -272,6 +272,20 @@ def _sync_job(service: dict, target: str, cf_headers: dict[str, str], args: argp
             name, service, target.split(","), cf_headers, args.timeout, args.max_retries, **common
         )
     return sync_dns_record(name, service, target, cf_headers, args.timeout, args.max_retries, **common)
+
+
+def _validate_target(target: str) -> None:
+    """Raise ValueError for a target that cannot be published, before anything is written: a bad address set, or an
+    IPv6 address with a scope identifier (`fe80::1%eth0` is node-local). A host name (a CNAME target) passes."""
+    if "," in target:
+        parse_address_set(target.split(","))
+        return
+    try:
+        parsed = ipaddress.ip_address(target)
+    except ValueError:
+        return
+    if parsed.version == 6 and getattr(parsed, "scope_id", None):
+        raise ValueError(f"{target!r}: an IPv6 scope identifier is node-local and cannot be published")
 
 
 if __name__ == "__main__":
