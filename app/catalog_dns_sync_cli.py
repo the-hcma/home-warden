@@ -6,6 +6,8 @@ Usage:
   catalog-dns-sync --target 203.0.113.10 --dry-run
   catalog-dns-sync --target 203.0.113.10 --service my-service
   catalog-dns-sync --target 203.0.113.10 --old-target 198.51.100.7   # also list leftovers
+  catalog-dns-sync --target 203.0.113.10 --dns-only mail.example.com   # a name with no catalog vhost
+  catalog-dns-sync --target 203.0.113.10 --dns-only mail.example.com=203.0.113.11
   catalog-dns-sync --restore ~/scratch/home-warden/dns-sync-snapshots/<file>.json [--dry-run]
 
 Before writing anything (unless --dry-run or --no-snapshot), the current records are saved to a
@@ -26,6 +28,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import re
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -67,6 +70,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Also list records in the catalog's zones still pointing at this IP/hostname that aren't in the catalog",
     )
     parser.add_argument("--service", action="append", dest="services", help="Limit to this service name (repeatable)")
+    parser.add_argument(
+        "--dns-only",
+        action="append",
+        default=[],
+        metavar="NAME[=TARGET]",
+        help=(
+            "Also sync this name, which has a Cloudflare record but no catalog vhost, to TARGET (default: --target). "
+            "Repeatable. --service limits catalog services only; names given here are always synced, "
+            "snapshotted and, with --old-target, not reported as leftovers"
+        ),
+    )
     parser.add_argument("--verbose", "-v", action="store_true")
     return parser
 
@@ -97,6 +111,7 @@ def main() -> int:
                 ("--service", bool(args.services)),
                 ("--old-target", bool(args.old_target)),
                 ("--proxied", args.proxied),
+                ("--dns-only", bool(args.dns_only)),
             )
             if given
         ]
@@ -129,9 +144,18 @@ def main() -> int:
             return 2
         services = matched
 
+    catalog_names = {_normalize_name(str(s.get("server_name", ""))) for s in catalog.get("services") or []}
+    try:
+        extras = parse_dns_only(args.dns_only, catalog_names)
+    except ValueError as e:
+        print(f"catalog-dns-sync: {e}", file=sys.stderr)
+        return 2
+    # (service, target) pairs: the catalog services at --target, then the --dns-only names at theirs.
+    jobs = [(s, args.target) for s in services] + [(svc, target or args.target) for svc, target in extras]
+
     if not args.dry_run and not args.no_snapshot:
         try:
-            snapshot = take_snapshot(services, cf_headers, args.timeout, args.max_retries)
+            snapshot = take_snapshot([svc for svc, _ in jobs], cf_headers, args.timeout, args.max_retries)
             stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
             snapshot_path = args.snapshot_dir / f"{stamp}.json"
             write_snapshot(snapshot_path, snapshot)
@@ -144,7 +168,7 @@ def main() -> int:
         sync_dns_record(
             s.get("name", "<unnamed>"),
             s,
-            args.target,
+            job_target,
             cf_headers,
             args.timeout,
             args.max_retries,
@@ -152,7 +176,7 @@ def main() -> int:
             dry_run=args.dry_run,
             verify_resolution=not args.no_verify_resolution,
         )
-        for s in services
+        for s, job_target in jobs
     ]
 
     if args.verbose:
@@ -164,7 +188,11 @@ def main() -> int:
         try:
             # The whole catalog, not the --service subset: a record of a service we didn't touch isn't a leftover.
             leftovers = find_stragglers(
-                catalog.get("services") or [], args.old_target, cf_headers, args.timeout, args.max_retries
+                (catalog.get("services") or []) + [svc for svc, _ in extras],
+                args.old_target,
+                cf_headers,
+                args.timeout,
+                args.max_retries,
             )
         except Exception as e:
             print(f"catalog-dns-sync: could not list records still pointing at {args.old_target}: {e}", file=sys.stderr)
@@ -180,6 +208,40 @@ def main() -> int:
         if leftovers:
             return 1
     return 1 if any(r.status == "failed" for r in results) else 0
+
+
+def parse_dns_only(specs: list[str], catalog_names: set[str]) -> list[tuple[dict, str | None]]:
+    """`--dns-only NAME[=TARGET]` -> [(service-like dict, target or None)]. A name with a Cloudflare record but no
+    vhost (no cert, no upstream) is synced like a catalog service. Raises ValueError for a malformed or repeated name,
+    or one that is already a catalog server_name (give that one to --service instead)."""
+    parsed: list[tuple[dict, str | None]] = []
+    seen: set[str] = set()
+    for spec in specs:
+        name, _, target = spec.partition("=")
+        name = _normalize_name(name)
+        target = target.strip()
+        if not _DNS_ONLY_NAME.match(name):
+            raise ValueError(f"--dns-only {spec!r}: {name!r} is not a fully qualified host name")
+        if "=" in spec and not target:
+            raise ValueError(f"--dns-only {spec!r}: nothing after '='")
+        if name in catalog_names:
+            raise ValueError(f"--dns-only {name}: already a catalog server_name; it is synced as a catalog service")
+        if name in seen:
+            raise ValueError(f"--dns-only {name}: given twice")
+        seen.add(name)
+        parsed.append(({"name": name, "server_name": name}, target or None))
+    return parsed
+
+
+_DNS_ONLY_NAME = re.compile(
+    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{0,58}[a-z0-9])$"
+)
+
+
+def _normalize_name(name: str) -> str:
+    """Lower-case and drop at most one trailing root dot (two dots stay malformed)."""
+    name = name.strip().lower()
+    return name[:-1] if name.endswith(".") else name
 
 
 def _restore(args: argparse.Namespace) -> int:
