@@ -279,3 +279,115 @@ if __name__ == "__main__":
     import pytest
 
     raise SystemExit(pytest.main([__file__]))
+
+
+def _dns_only_setup(
+    monkeypatch, tmp_path: Path, extra_args: list[str], catalog_name: str = "app.example.com"
+) -> list[tuple[str, str]]:
+    """Run main() with one catalog service and `extra_args`; returns the (server_name, target) pairs synced."""
+    catalog_path = tmp_path / "services.json"
+    catalog_path.write_text(json.dumps({"services": [{"name": "svc", "server_name": catalog_name}]}))
+    creds = _write_credentials(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "catalog-dns-sync",
+            "--target",
+            "203.0.113.10",
+            "--services-json",
+            str(catalog_path),
+            "--cloudflare-credentials",
+            str(creds),
+            *extra_args,
+        ],
+    )
+    monkeypatch.setattr("app.catalog_dns_sync_cli.enforce_host_guard", lambda caller: True)
+    synced: list[tuple[str, str]] = []
+
+    def fake_sync(name, service, target, *a, **kw):
+        synced.append((service["server_name"], target))
+        return SyncResult(name, "noop", "already correct")
+
+    monkeypatch.setattr("app.catalog_dns_sync_cli.sync_dns_record", fake_sync)
+    return synced
+
+
+def test_cli_dns_only_names_are_synced_at_the_default_and_their_own_target(monkeypatch, tmp_path: Path, capsys) -> None:
+    synced = _dns_only_setup(
+        monkeypatch, tmp_path, ["--dns-only", "mail.example.com", "--dns-only", "Relay.Example.com.=203.0.113.99"]
+    )
+    assert main() == 0
+    assert synced == [
+        ("app.example.com", "203.0.113.10"),
+        ("mail.example.com", "203.0.113.10"),
+        ("relay.example.com", "203.0.113.99"),
+    ]
+    assert [r["service"] for r in json.loads(capsys.readouterr().out)] == [
+        "svc",
+        "mail.example.com",
+        "relay.example.com",
+    ]
+
+
+def test_cli_service_filter_limits_catalog_services_but_not_dns_only_names(monkeypatch, tmp_path: Path) -> None:
+    synced = _dns_only_setup(monkeypatch, tmp_path, ["--service", "svc", "--dns-only", "mail.example.com"])
+    assert main() == 0
+    assert synced == [("app.example.com", "203.0.113.10"), ("mail.example.com", "203.0.113.10")]
+
+
+def test_cli_dns_only_rejects_bad_names_duplicates_and_catalog_names(monkeypatch, tmp_path: Path, capsys) -> None:
+    for args, message in (
+        (["--dns-only", "not a host"], "not a fully qualified host name"),
+        (["--dns-only", "localhost"], "not a fully qualified host name"),
+        (["--dns-only", "mail.example.com="], "nothing after '='"),
+        (["--dns-only", "mail.example.com", "--dns-only", "MAIL.example.com"], "given twice"),
+        (["--dns-only", "mail.example.com.."], "not a fully qualified host name"),
+        (["--dns-only", "app.example.com"], "already a catalog server_name"),
+        (["--dns-only", "APP.example.com."], "already a catalog server_name"),
+    ):
+        synced = _dns_only_setup(monkeypatch, tmp_path, args)
+        assert main() == 2, args
+        assert message in capsys.readouterr().err
+        assert synced == []
+
+
+def test_cli_dns_only_names_are_snapshotted_before_writing(monkeypatch, tmp_path: Path) -> None:
+    seen: list[list[str]] = []
+
+    def fake_snapshot(services, *a, **kw):
+        seen.append([s["server_name"] for s in services])
+        return {"version": 1, "taken_at": "t", "entries": []}
+
+    synced = _dns_only_setup(monkeypatch, tmp_path, ["--dns-only", "mail.example.com"])
+    monkeypatch.setattr("app.catalog_dns_sync_cli.take_snapshot", fake_snapshot)
+    assert main() == 0
+    assert seen == [["app.example.com", "mail.example.com"]]
+    assert len(synced) == 2
+
+
+def test_cli_dns_only_names_are_not_reported_as_leftovers(monkeypatch, tmp_path: Path) -> None:
+    given: list[list[str]] = []
+
+    def fake_stragglers(services, *a, **kw):
+        given.append([s["server_name"] for s in services])
+        return []
+
+    _dns_only_setup(monkeypatch, tmp_path, ["--old-target", "203.0.113.7", "--dns-only", "mail.example.com"])
+    monkeypatch.setattr("app.catalog_dns_sync_cli.find_stragglers", fake_stragglers)
+    assert main() == 0
+    assert given == [["app.example.com", "mail.example.com"]]
+
+
+def test_cli_restore_cannot_be_combined_with_dns_only(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["catalog-dns-sync", "--restore", "snap.json", "--dns-only", "mail.example.com"])
+    monkeypatch.setattr("app.catalog_dns_sync_cli.enforce_host_guard", lambda caller: True)
+    assert main() == 2
+    assert "--dns-only" in capsys.readouterr().err
+
+
+def test_cli_dns_only_conflict_check_normalizes_the_catalog_name_too(monkeypatch, tmp_path: Path, capsys) -> None:
+    synced = _dns_only_setup(monkeypatch, tmp_path, ["--dns-only", "app.example.com"], catalog_name="App.Example.com.")
+    assert main() == 2
+    assert "already a catalog server_name" in capsys.readouterr().err
+    assert synced == []
