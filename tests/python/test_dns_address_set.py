@@ -269,6 +269,18 @@ def test_parse_address_set_rejects_names_mixed_families_and_nothing(bad) -> None
         parse_address_set(bad)
 
 
+def test_records_of_other_types_at_the_name_count_toward_the_listing_size(cloudflare) -> None:
+    fake = cloudflare(
+        [{"type": "TXT", "content": f"note {i}"} for i in range(95)] + [{"type": "A", "content": "192.0.2.10"}]
+    )
+    result = _sync(
+        ["192.0.2.1", "192.0.2.2", "192.0.2.3", "192.0.2.4", "192.0.2.5", "192.0.2.6"], verify_resolution=False
+    )
+    assert result.status == "failed", result.detail
+    assert "of all types" in result.detail and "refusing before writing anything" in result.detail
+    assert fake.writes() == []
+
+
 def test_restore_mode_allows_extra_records_in_the_read_back_and_the_answer(cloudflare) -> None:
     cloudflare(
         [{"type": "A", "content": "192.0.2.30"}, {"type": "A", "content": "192.0.2.9"}], dig=["192.0.2.10", "192.0.2.9"]

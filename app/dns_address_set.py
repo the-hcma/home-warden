@@ -75,6 +75,7 @@ def sync_dns_address_set(
     nameservers: list[str] = []
     rec_url = ""
     existing: list[dict] = []
+    listed_total = 0
     try:
         for candidate in candidate_zone_names(domain):
             zone_url = f"{CF_API_BASE}/zones?name={urllib.parse.quote(candidate)}"
@@ -95,7 +96,9 @@ def sync_dns_address_set(
                     f"the listing for {domain} may be incomplete (it is paged or holds {_PER_PAGE} records or more); "
                     "refusing to reconcile a partial list",
                 )
-            existing = [r for r in (rec_data.get("result") or []) if r.get("type") in ("A", "AAAA", "CNAME")]
+            listed = rec_data.get("result") or []
+            existing = [r for r in listed if r.get("type") in ("A", "AAAA", "CNAME")]
+            listed_total = len(listed)  # every type at the name (TXT, MX, ...): they share the one page
             if existing:
                 break
     except Exception as e:
@@ -127,12 +130,13 @@ def sync_dns_address_set(
     moves = list(zip(spare, missing))
     creates = missing[len(moves) :]
     leftover = spare[len(moves) :]
-    final_size = len(existing) + len(creates)
+    # The confirming read lists every record at the name, of any type, so all of them count.
+    final_size = listed_total + len(creates)
     if final_size >= _PER_PAGE:
         return SyncResult(
             name,
             "failed",
-            f"{domain} would hold {final_size} records after this sync, more than the {_PER_PAGE - 1} that can be "
+            f"{domain} would hold {final_size} records of all types after this sync, more than the {_PER_PAGE - 1} that can be "
             "listed in full; refusing before writing anything",
         )
     if leftover and not allow_extra:
