@@ -35,6 +35,11 @@ def test_an_answer_that_never_agrees_stops_at_the_configured_tries(monkeypatch) 
     assert answers == ["192.0.2.10"] and attempts == 4 and resolver.calls == 4
 
 
+def test_an_operators_tries_setting_in_the_environment_does_not_reach_the_tests() -> None:
+    assert catalog_checks._answer_tries() == 5
+    assert catalog_checks._answer_delay() == 0.0
+
+
 def test_no_answer_at_all_ends_the_wait_at_once(monkeypatch) -> None:
     resolver = _Resolver([None])
     answers, attempts = wait_for_authoritative_answer(resolver, lambda found: True)
