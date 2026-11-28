@@ -30,8 +30,10 @@ def _stubs(tmp_path: Path, service: str, socket: str, http: str = "200") -> dict
     (bin_dir / "sendmail").write_text(f'#!/usr/bin/env bash\ncat >> "{mail_out}"\nprintf "=====\\n" >> "{mail_out}"\n')
     for stub in bin_dir.iterdir():
         stub.chmod(0o755)
+    # Under systemd (CI included) INVOCATION_ID makes the script print instead of appending to its log file.
+    base = {key: value for key, value in os.environ.items() if key != "INVOCATION_ID"}
     return {
-        **os.environ,
+        **base,
         "HEALTHCHECK_EMAIL_TO": "ops@example.test",
         "HOME_WARDEN_SKIP_HOST_GUARD": "1",
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
