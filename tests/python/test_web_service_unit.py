@@ -203,6 +203,12 @@ def test_setup_service_stops_instead_of_disabling_the_web_ui_when_it_cannot_read
     assert re.search(r"if ! web_ui_fqdn_value=\"\$\(web_ui_fqdn\)\"; then\n\s+echo .*\n\s+exit 1", text)
 
 
+def test_the_executable_path_is_quoted_so_a_directory_with_a_space_still_starts() -> None:
+    exec_lines = [line for line in UNIT.read_text().splitlines() if line.startswith("ExecStart=")]
+    assert len(exec_lines) == 1
+    assert re.fullmatch(r'ExecStart="[^"]*/scripts/catalog-health-server"', exec_lines[0])
+
+
 def test_the_unit_and_setup_service_pass_the_resolved_paths_to_the_backend() -> None:
     unit = UNIT.read_text()
     for line in (
@@ -221,6 +227,12 @@ def test_the_unit_does_not_set_no_new_privileges_because_the_pam_login_needs_the
     assert not any(line.startswith("NoNewPrivileges") for line in directives)
 
 
+def test_the_unit_names_no_group_so_the_owners_primary_group_is_used() -> None:
+    directives = [line for line in UNIT.read_text().splitlines() if not line.lstrip().startswith("#")]
+    assert "User=@@OWNER@@" in directives
+    assert not any(line.startswith("Group=") for line in directives)
+
+
 def test_the_unit_reads_the_same_config_directory_as_setup_service() -> None:
     assert 'Environment="XDG_CONFIG_HOME=@@XDG_CONFIG_HOME@@"' in UNIT.read_text()
     assert "@@XDG_CONFIG_HOME@@|${XDG_CONFIG_HOME:-${HOME}/.config}|g" in SETUP.read_text()
@@ -229,7 +241,7 @@ def test_the_unit_reads_the_same_config_directory_as_setup_service() -> None:
 def test_the_unit_runs_the_loopback_backend_as_the_owner() -> None:
     text = UNIT.read_text()
     assert "User=@@OWNER@@" in text
-    assert "ExecStart=@@REPO_DIR@@/scripts/catalog-health-server" in text
+    assert 'ExecStart="@@REPO_DIR@@/scripts/catalog-health-server"' in text
     assert f"HOME_WARDEN_LISTEN_HOST={BACKEND_LOOPBACK_HOST}" in text
     assert f"HOME_WARDEN_LISTEN_PORT={BACKEND_LOOPBACK_PORT}" in text
     assert "Restart=on-failure" in text

@@ -7,7 +7,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=@@OWNER@@
-Group=@@OWNER@@
+# No Group=: systemd then uses the owner's own primary group, whatever it is called on this host.
 WorkingDirectory=@@REPO_DIR@@
 Environment="PATH=@@HOME_DIR@@/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment="HOME=@@HOME_DIR@@"
@@ -20,7 +20,7 @@ Environment="PDNS_ZONES_YAML=@@WEB_PDNS_ZONES_YAML@@"
 Environment="HOME_WARDEN_PKI_STORE=@@CLIENT_PKI_STORE@@"
 Environment=HOME_WARDEN_LISTEN_HOST=127.0.0.1
 Environment=HOME_WARDEN_LISTEN_PORT=8090
-ExecStart=@@REPO_DIR@@/scripts/catalog-health-server
+ExecStart="@@REPO_DIR@@/scripts/catalog-health-server"
 Restart=on-failure
 RestartSec=5
 # Deliberately no NoNewPrivileges=: the web UI's PAM login runs the setgid unix_chkpwd helper, which a
