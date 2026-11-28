@@ -458,19 +458,24 @@ is_valid_fqdn() {
   [[ "${fqdn}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
 }
 
-# web_ui_fqdn — the fqdn set in config.toml, empty when the file is missing, unreadable or the UI is disabled.
+# web_ui_fqdn — the fqdn set in config.toml, empty when the file is missing, unreadable, unparseable or the UI is
+# disabled. Read with tomllib exactly as app/home_warden_config.load_config does (a top-level string, stripped; anything
+# else counts as unset), so this script and the backend never disagree about whether the web UI is enabled.
 web_ui_fqdn() {
-  local line value
   [[ -r "${home_warden_config_path}" ]] || return 0
-  while IFS= read -r line || [[ -n "${line}" ]]; do
-    if [[ "${line}" =~ ^[[:space:]]*fqdn[[:space:]]*=[[:space:]]*\"([^\"]*)\"[[:space:]]*(#.*)?$ ]]; then
-      value="${BASH_REMATCH[1]}"
-      if is_valid_fqdn "${value}"; then
-        printf '%s' "${value}"
-      fi
-      return 0
-    fi
-  done <"${home_warden_config_path}"
+  python3 - "${home_warden_config_path}" <<'PYEOF' 2>/dev/null || true
+import sys
+import tomllib
+
+try:
+    with open(sys.argv[1], "rb") as handle:
+        data = tomllib.load(handle)
+except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+    sys.exit(0)
+fqdn = data.get("fqdn", "") if isinstance(data, dict) else ""
+if isinstance(fqdn, str):
+    sys.stdout.write(fqdn.strip())
+PYEOF
 }
 
 write_home_warden_config() {
@@ -817,6 +822,7 @@ expand_unit() {
       -e "s|@@CLIENT_PKI_KEY_CREDENTIAL@@|${key_credential}|g" \
       -e "s|@@REPO_DIR@@|${repo_dir}|g" \
       -e "s|@@HOME_DIR@@|${HOME}|g" \
+      -e "s|@@XDG_CONFIG_HOME@@|${XDG_CONFIG_HOME:-${HOME}/.config}|g" \
       -e "s|@@DEPLOYED_COMMIT@@|${deployed_commit}|g" \
       -e "s|@@NGINX_EXTRA_READ_PATHS@@|${nginx_extra_read_paths}|g" \
       -e "s|@@SERVICE_USER@@|${service_user}|g" \
@@ -1442,8 +1448,12 @@ main() {
   fi
 
   maybe_create_web_ui_config
-  if [[ -n "$(web_ui_fqdn)" ]]; then
+  web_ui_fqdn_value="$(web_ui_fqdn)"
+  if [[ -n "${web_ui_fqdn_value}" ]]; then
     web_ui_enabled=1
+    if ! is_valid_fqdn "${web_ui_fqdn_value}"; then
+      echo "WARNING: fqdn ${web_ui_fqdn_value@Q} in ${home_warden_config_path} is not a valid host name; the web UI vhost will not work" >&2
+    fi
   fi
 
   require_sudo
@@ -1545,7 +1555,7 @@ main() {
     run sudo systemctl enable home-warden-web.service
     run sudo systemctl restart home-warden-web.service
   elif systemctl is-enabled --quiet home-warden-web.service 2>/dev/null; then
-    echo "web UI disabled in ${home_warden_config_path} (fqdn empty): stopping home-warden-web.service"
+    echo "no web UI fqdn set in ${home_warden_config_path}: stopping home-warden-web.service"
     run sudo systemctl disable --now home-warden-web.service
   fi
 

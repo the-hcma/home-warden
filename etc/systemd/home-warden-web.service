@@ -11,6 +11,7 @@ Group=@@OWNER@@
 WorkingDirectory=@@REPO_DIR@@
 Environment=PATH=@@HOME_DIR@@/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=HOME=@@HOME_DIR@@
+Environment=XDG_CONFIG_HOME=@@XDG_CONFIG_HOME@@
 Environment=SCRATCH_DIR=@@SCRATCH_DIR@@
 Environment=CONF_DIR=@@CONF_DIR@@
 Environment=CERTBOT_CONFIG_DIR=@@CONF_DIR@@/certs
