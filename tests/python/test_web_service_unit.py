@@ -97,6 +97,21 @@ def test_a_missing_interpreter_is_an_error_not_an_unset_fqdn(tmp_path: Path) -> 
     assert "python3 not found" in result.stderr and "3.11" not in result.stderr
 
 
+@pytest.mark.parametrize(
+    "path", ["/home/a&b/.config", "/home/a|b/.config", "/home/a\\b/.config", "/home/plain/.config", "/h/a b/c"]
+)
+def test_a_path_with_sed_metacharacters_survives_the_unit_template_substitution(path: str) -> None:
+    template = 'Environment="XDG_CONFIG_HOME=@@XDG_CONFIG_HOME@@"\n'
+    bash = shutil.which("bash")
+    assert bash
+    escape = _setup_function("sed_escape_replacement")
+    script = f'{escape}\ne="$(sed_escape_replacement "$1")"\nsed -e "s|@@XDG_CONFIG_HOME@@|${{e}}|g"\n'
+    result = subprocess.run(
+        [bash, "-c", script, "x", path], input=template, capture_output=True, text=True, timeout=20, check=True
+    )
+    assert result.stdout == f'Environment="XDG_CONFIG_HOME={path}"\n'
+
+
 def test_a_python_without_tomllib_names_that_cause(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text('fqdn = "warden.example.com"\n')
@@ -119,6 +134,14 @@ def test_a_unit_that_is_disabled_but_still_running_is_stopped_when_the_web_ui_is
         r"\s+systemctl is-active --quiet home-warden-web\.service"
     )
     assert re.search(pattern, text)
+
+
+def test_every_path_valued_environment_assignment_in_the_unit_is_quoted() -> None:
+    lines = [line for line in UNIT.read_text().splitlines() if line.startswith("Environment=")]
+    path_valued = [line for line in lines if "@@" in line or line.startswith("Environment=PATH")]
+    assert path_valued
+    for line in path_valued:
+        assert re.fullmatch(r'Environment="[A-Z_]+=[^"]*"', line), line
 
 
 def test_setup_service_checks_for_uv_before_installing_the_web_unit() -> None:
@@ -164,14 +187,14 @@ def test_setup_service_stops_instead_of_disabling_the_web_ui_when_it_cannot_read
 def test_the_unit_and_setup_service_pass_the_resolved_paths_to_the_backend() -> None:
     unit = UNIT.read_text()
     for line in (
-        "Environment=SERVICES_JSON_PATH=@@WEB_SERVICES_JSON_PATH@@",
-        "Environment=PDNS_ZONES_YAML=@@WEB_PDNS_ZONES_YAML@@",
-        "Environment=HOME_WARDEN_PKI_STORE=@@CLIENT_PKI_STORE@@",
+        'Environment="SERVICES_JSON_PATH=@@WEB_SERVICES_JSON_PATH@@"',
+        'Environment="PDNS_ZONES_YAML=@@WEB_PDNS_ZONES_YAML@@"',
+        'Environment="HOME_WARDEN_PKI_STORE=@@CLIENT_PKI_STORE@@"',
     ):
         assert line in unit
     setup = SETUP.read_text()
-    assert "@@WEB_SERVICES_JSON_PATH@@|${services_json:-${default_services_json}}" in setup
-    assert "@@WEB_PDNS_ZONES_YAML@@|${pdns_zones_yaml:-${default_pdns_zones_yaml}}" in setup
+    assert "@@WEB_SERVICES_JSON_PATH@@|${web_services_json}|g" in setup
+    assert "@@WEB_PDNS_ZONES_YAML@@|${web_pdns_zones_yaml}|g" in setup
 
 
 def test_the_unit_does_not_set_no_new_privileges_because_the_pam_login_needs_the_setgid_helper() -> None:
@@ -180,8 +203,8 @@ def test_the_unit_does_not_set_no_new_privileges_because_the_pam_login_needs_the
 
 
 def test_the_unit_reads_the_same_config_directory_as_setup_service() -> None:
-    assert "Environment=XDG_CONFIG_HOME=@@XDG_CONFIG_HOME@@" in UNIT.read_text()
-    assert "@@XDG_CONFIG_HOME@@|${XDG_CONFIG_HOME:-${HOME}/.config}" in SETUP.read_text()
+    assert 'Environment="XDG_CONFIG_HOME=@@XDG_CONFIG_HOME@@"' in UNIT.read_text()
+    assert "@@XDG_CONFIG_HOME@@|${web_xdg_config_home}|g" in SETUP.read_text()
 
 
 def test_the_unit_runs_the_loopback_backend_as_the_owner() -> None:
@@ -198,6 +221,15 @@ def _bash_function(name: str) -> str:
     match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", SETUP.read_text(), re.S | re.M)
     assert match, f"{name} not found in setup-service"
     return match.group(0)
+
+
+def _escape(text: str) -> str:
+    script = f'{_setup_function("sed_escape_replacement")}\nsed_escape_replacement "$1"\n'
+    bash = shutil.which("bash")
+    assert bash
+    return subprocess.run(
+        [bash, "-c", script, "x", text], capture_output=True, text=True, timeout=20, check=True
+    ).stdout
 
 
 def _python3_dir(tmp_path: Path) -> Path:
@@ -222,3 +254,9 @@ def _script_fqdn(config: Path) -> str:
     result = _run_fqdn(config, f"{_python3_dir(config.parent)}{os.pathsep}/usr/bin:/bin")
     assert result.returncode == 0, result.stderr
     return result.stdout
+
+
+def _setup_function(name: str) -> str:
+    match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", SETUP.read_text(), re.S | re.M)
+    assert match, f"{name} not found in setup-service"
+    return match.group(0)

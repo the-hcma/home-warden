@@ -828,6 +828,12 @@ validate_nginx_config() {
   echo "nginx -t OK"
 }
 
+# sed_escape_replacement <text> — text made safe to use as the replacement of a sed `s|...|...|` command: a backslash,
+# `&` (the whole match) and `|` (the delimiter) are escaped.
+sed_escape_replacement() {
+  printf '%s' "${1:-}" | sed -e 's/[\\&|]/\\&/g'
+}
+
 expand_unit() {
   local -r src="$1"
   local -r dest="$2"
@@ -846,6 +852,12 @@ expand_unit() {
 
   local key_credential
   key_credential="$(client_pki_key_credential_line)"
+  # Values that come from the operator's environment or config are escaped for sed's replacement text and `|` delimiter,
+  # so a path containing `&`, `|` or a backslash is installed unchanged.
+  local web_services_json web_pdns_zones_yaml web_xdg_config_home
+  web_services_json="$(sed_escape_replacement "${services_json:-${default_services_json}}")"
+  web_pdns_zones_yaml="$(sed_escape_replacement "${pdns_zones_yaml:-${default_pdns_zones_yaml}}")"
+  web_xdg_config_home="$(sed_escape_replacement "${XDG_CONFIG_HOME:-${HOME}/.config}")"
 
   generated="$(
     sed \
@@ -857,13 +869,13 @@ expand_unit() {
       -e "s|@@PDNS_ZONES_YAML@@|${pdns_zones_yaml}|g" \
       -e "s|@@PDNS_ZONES_YAML_DIR@@|${pdns_zones_yaml_dir}|g" \
       -e "s|@@SERVICES_JSON_PATH@@|${services_json}|g" \
-      -e "s|@@WEB_SERVICES_JSON_PATH@@|${services_json:-${default_services_json}}|g" \
-      -e "s|@@WEB_PDNS_ZONES_YAML@@|${pdns_zones_yaml:-${default_pdns_zones_yaml}}|g" \
+      -e "s|@@WEB_SERVICES_JSON_PATH@@|${web_services_json}|g" \
+      -e "s|@@WEB_PDNS_ZONES_YAML@@|${web_pdns_zones_yaml}|g" \
       -e "s|@@CLIENT_PKI_STORE@@|${client_pki_store}|g" \
       -e "s|@@CLIENT_PKI_KEY_CREDENTIAL@@|${key_credential}|g" \
       -e "s|@@REPO_DIR@@|${repo_dir}|g" \
       -e "s|@@HOME_DIR@@|${HOME}|g" \
-      -e "s|@@XDG_CONFIG_HOME@@|${XDG_CONFIG_HOME:-${HOME}/.config}|g" \
+      -e "s|@@XDG_CONFIG_HOME@@|${web_xdg_config_home}|g" \
       -e "s|@@DEPLOYED_COMMIT@@|${deployed_commit}|g" \
       -e "s|@@NGINX_EXTRA_READ_PATHS@@|${nginx_extra_read_paths}|g" \
       -e "s|@@SERVICE_USER@@|${service_user}|g" \
