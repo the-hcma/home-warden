@@ -31,6 +31,8 @@ from __future__ import annotations
 import datetime
 import ipaddress
 import json
+import math
+import os
 import random
 import re
 import socket
@@ -41,6 +43,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -137,6 +140,32 @@ def parse_cloudflare_credentials(path: Path) -> dict[str, str] | None:
         f"{path} exists but has no usable Cloudflare credentials "
         "(expected dns_cloudflare_api_token, or dns_cloudflare_email + dns_cloudflare_api_key)"
     )
+
+
+_ANSWER_DELAY_MAX_S = 30.0
+_ANSWER_TRIES_MAX = 20
+
+
+def _answer_delay() -> float:
+    """Seconds between authoritative-answer checks after a write (DNS_SYNC_ANSWER_DELAY_S, default 2, at most 30;
+    anything that is not a finite number falls back to the default)."""
+    try:
+        value = float(os.environ.get("DNS_SYNC_ANSWER_DELAY_S", "2"))
+    except ValueError:
+        return 2.0
+    if not math.isfinite(value):
+        return 2.0
+    return min(max(0.0, value), _ANSWER_DELAY_MAX_S)
+
+
+def _answer_tries() -> int:
+    """How many times the authoritative answer is checked after a write (DNS_SYNC_ANSWER_TRIES, default 5, from 1 to
+    20; anything that is not an integer falls back to the default)."""
+    try:
+        value = int(os.environ.get("DNS_SYNC_ANSWER_TRIES", "5"))
+    except ValueError:
+        return 5
+    return min(max(1, value), _ANSWER_TRIES_MAX)
 
 
 def _cf_request(
@@ -258,8 +287,9 @@ def _resolve_via_authoritative_ns(
 ) -> list[str] | None:
     """Query `nameserver` directly for `domain`'s `record_type` records via
     `dig`, bypassing any resolver cache -- a zone's own authoritative
-    nameservers answer a just-written record immediately, with none of a
-    public resolver's propagation/TTL-caching delay to account for.
+    nameservers skip a public resolver's TTL caching, but they can still
+    serve the old record for a moment after a write was accepted (see
+    `wait_for_authoritative_answer`, which asks again).
 
     `port` targets a non-standard port (e.g. the local PowerDNS
     authoritative server's loopback:853, per #108) -- omitted (the
@@ -866,16 +896,52 @@ def sync_dns_record(
     # origin `content` just written -- the API read-back above is already
     # this case's real validation.
     if verify_resolution and nameservers and not proxied:
-        answers = _resolve_via_authoritative_ns(domain, record_type, nameservers[0], timeout)
         # dig prints CNAME/NS-style answers as FQDNs with a trailing dot;
         # `target` never carries one -- normalize before comparing.
-        normalized = [a.rstrip(".") for a in answers] if answers is not None else None
-        if normalized is not None and target not in normalized:
+        def _has_target(answers: list[str]) -> bool:
+            return target in [a.rstrip(".") for a in answers]
+
+        answers, attempts = wait_for_authoritative_answer(
+            lambda: _resolve_via_authoritative_ns(domain, record_type, nameservers[0], timeout), _has_target
+        )
+        if answers is not None and not _has_target(answers):
             return SyncResult(
                 name,
                 "failed",
-                f"write accepted and read back but {nameservers[0]} answers {answers}, not {target}",
+                f"write accepted and read back but {nameservers[0]} answers {answers}, not {target} "
+                f"(checked {attempts} time(s)); the API has the record, so the nameserver may only be slow: "
+                f"ask it again with `dig +short {domain} {record_type} @{nameservers[0]}`",
             )
 
     verb = "updated" if action == "update" else "created"
     return SyncResult(name, verb, f"{verb} {record_type} {domain} -> {target} in zone {zone_name}")
+
+
+def wait_for_authoritative_answer(
+    resolve: Callable[[], list[str] | None], accepts: Callable[[list[str]], bool]
+) -> tuple[list[str] | None, int]:
+    """Ask `resolve` (one authoritative query) until `accepts` its answer, up to DNS_SYNC_ANSWER_TRIES times
+    DNS_SYNC_ANSWER_DELAY_S apart. A zone's nameserver can still serve the old record for a moment after the API
+    accepted a write, so one disagreeing answer right after a write is not a failure yet.
+
+    Returns (the last real answer, how many queries were made). An answer of None (no dig, no reply) before any real
+    answer ends the wait at once: there is nothing to wait for. A None after a real answer is one query that could not
+    be answered, not a pass: the wait goes on, and if no later query is accepted the last real answer is returned, so
+    a disagreement seen earlier is still reported as one."""
+    tries = _answer_tries()
+    delay = _answer_delay()
+    last_real: list[str] | None = None
+    attempts = 0
+    for attempt in range(tries):
+        if attempt:
+            time.sleep(delay)
+        answers = resolve()
+        attempts += 1
+        if answers is None:
+            if last_real is None:
+                return None, attempts
+            continue
+        last_real = answers
+        if accepts(answers):
+            break
+    return last_real, attempts
