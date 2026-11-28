@@ -446,3 +446,17 @@ def test_an_unreadable_unit_execstart_never_restarts_for_a_changed_config_path(t
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "reload home-warden.service" in calls.read_text() and "restart" not in calls.read_text()
+
+
+def test_quoted_listen_tokens_are_read_like_nginx_reads_them() -> None:
+    assert listens('server { listen "443" ssl; }\n') == listens("server { listen 443 ssl; }\n")
+    assert listens("server { 'listen' '[::]:80'; }\n") == listens("server { listen [::]:80; }\n")
+
+
+def test_a_datagram_listener_is_a_different_address_and_is_never_supported(tmp_path) -> None:
+    tcp = "server { listen 443 ssl; }\n"
+    assert listens(tcp) != listens(tcp + "server { listen 443 quic reuseport; }\n")
+    assert listens(tcp) != listens(tcp + "server { listen 443 udp; }\n")
+    scratch = tmp_path / "scratch"
+    result = bash(f'hw_nginx_record_listens "{scratch}"', stdin=dump_of(tcp + "server { listen 443 quic; }\n"))
+    assert result.returncode == 2 and "443/udp" in result.stderr

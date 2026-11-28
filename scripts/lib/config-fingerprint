@@ -18,21 +18,26 @@ source "$(dirname "${BASH_SOURCE[0]}")/nginx-conf-statements"
 # ssl; }` on one line, or a directive spread over several lines, counts. Only privileged ports matter here: nginx runs
 # unprivileged and gets ports 80 and 443 as inherited fds from home-warden.socket, which only setup-service can change,
 # while any other port nginx opens itself on a reload. It is a set: every vhost repeats its own `listen 443 ssl;`, and
-# flags such as ssl or default_server are not part of the address.
+# flags such as ssl or default_server are not part of the address. Quotes around a token are removed first, as nginx
+# does, and a datagram listener (`udp`, `quic`) is a different address than the TCP one on the same port: it carries a
+# `/udp` suffix, which also makes it unsupported by the sockets.
 hw_fingerprint_listen_specs() {
   local dump
 
   dump="$(cat)"
   nginx_conf_statements "${dump}" |
-    awk '$1 == "listen" && NF >= 2 {
+    awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^".*"$/ || $i ~ /^'"'"'.*'"'"'$/) $i = substr($i, 2, length($i) - 2) }
+    $1 == "listen" && NF >= 2 {
       spec = $2
+      transport = ""
+      for (i = 3; i <= NF; i++) if ($i == "udp" || $i == "quic") transport = "/udp"
       if (spec ~ /^unix:/) next
       if (spec ~ /^[0-9]+$/) { port = spec }
       else if (spec ~ /^\[.*\]:[0-9]+$/) { port = spec; sub(/^.*\]:/, "", port) }
       else if (spec ~ /^\[.*\]$/) { port = 80; spec = spec ":80" }
       else if (spec ~ /:[0-9]+$/) { port = spec; sub(/^.*:/, "", port) }
       else { port = 80; spec = spec ":80" }
-      if (port + 0 < 1024) print spec
+      if (port + 0 < 1024) print spec transport
     }' |
     sort -u
 }
