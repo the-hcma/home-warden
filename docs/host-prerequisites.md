@@ -241,6 +241,10 @@ Requires local MTA (`sendmail` or `mail`). Install if needed:
 openssl dhparam -out ~/conf/home-warden/dhparam.pem 2048
 ```
 
+## Web UI backend
+
+The admin web UI is a FastAPI backend (`scripts/catalog-health-server`) on loopback `127.0.0.1:8090`, with a PAM login and a per-source-IP rate limiter. It is on when `fqdn` is set in `~/.config/home-warden/config.toml`. `setup-service` then installs and restarts `home-warden-web.service`, a system unit run as the owner; with `fqdn` empty it stops and disables it. The unit deliberately sets no `NoNewPrivileges=`: the PAM login runs the setgid `unix_chkpwd` helper, which a no-new-privileges unit would block. The backend binds loopback only and nginx is its only public entrance, so the name also needs a vhost that proxies to `127.0.0.1:8090` (passing `X-Forwarded-For` and the `Host` header, which the rate limiter and the cookie domain depend on), a certificate and a DNS record. Log: `~/scratch/home-warden/web.log`.
+
 ## Operating units (status, start, stop)
 
 All units are **system** units installed by `setup-service` (need `sudo` for start/stop/reload where noted). Quick status:

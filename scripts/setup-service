@@ -116,6 +116,7 @@ ipv6_socket_dropins_changed=0
 rendered_units=()
 services_json="${SERVICES_JSON_PATH:-}"
 catalog_heal_enabled=0
+web_ui_enabled=0
 client_pki_store="$(realpath --canonicalize-missing "${HOME_WARDEN_PKI_STORE:-${repo_dir}/conf/pki}")"
 readonly client_pki_store
 client_pki_crl_enabled=0
@@ -457,6 +458,21 @@ is_valid_fqdn() {
   [[ "${fqdn}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
 }
 
+# web_ui_fqdn — the fqdn set in config.toml, empty when the file is missing, unreadable or the UI is disabled.
+web_ui_fqdn() {
+  local line value
+  [[ -r "${home_warden_config_path}" ]] || return 0
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    if [[ "${line}" =~ ^[[:space:]]*fqdn[[:space:]]*=[[:space:]]*\"([^\"]*)\"[[:space:]]*(#.*)?$ ]]; then
+      value="${BASH_REMATCH[1]}"
+      if is_valid_fqdn "${value}"; then
+        printf '%s' "${value}"
+      fi
+      return 0
+    fi
+  done <"${home_warden_config_path}"
+}
+
 write_home_warden_config() {
   local -r fqdn="${1:-}"
   run mkdir -p "${home_warden_config_dir}"
@@ -646,6 +662,16 @@ check_prerequisites() {
       missing=1
     fi
   fi
+  if ((web_ui_enabled)); then
+    if [[ ! -f "${unit_template_dir}/home-warden-web.service" ]]; then
+      echo "ERROR: missing web UI unit template under ${unit_template_dir}" >&2
+      missing=1
+    fi
+    if [[ ! -x "${repo_dir}/scripts/catalog-health-server" ]]; then
+      echo "ERROR: scripts/catalog-health-server missing or not executable" >&2
+      missing=1
+    fi
+  fi
   if ((client_pki_crl_enabled)); then
     if [[ ! -f "${unit_template_dir}/home-warden-client-pki-crl.service" ||
       ! -f "${unit_template_dir}/home-warden-client-pki-crl.timer" ]]; then
@@ -715,7 +741,7 @@ prepare_scratch() {
     run ln -sfn /usr/lib/nginx/modules "${scratch_dir}/modules"
   fi
   if ((dry_run)); then
-    echo "DRY-RUN: would touch ${scratch_dir}/{home-warden,cert-renewer,nginx-test-and-reload,healthcheck,catalog-heal,client-pki-crl}.log and logs/{error,access}.log"
+    echo "DRY-RUN: would touch ${scratch_dir}/{home-warden,cert-renewer,nginx-test-and-reload,healthcheck,catalog-heal,client-pki-crl,web}.log and logs/{error,access}.log"
   else
     local log
     for log in \
@@ -725,6 +751,7 @@ prepare_scratch() {
       "${scratch_dir}/healthcheck.log" \
       "${scratch_dir}/catalog-heal.log" \
       "${scratch_dir}/client-pki-crl.log" \
+      "${scratch_dir}/web.log" \
       "${scratch_dir}/logs/error.log" \
       "${scratch_dir}/logs/access.log"; do
       if ! touch "${log}"; then
@@ -1257,7 +1284,8 @@ print_status() {
       "pdns_reload_path:home-warden-pdns-reload.path" \
       "healthcheck_timer:home-warden-healthcheck.timer" \
       "catalog_heal_timer:home-warden-catalog-heal.timer" \
-      "client_pki_crl_timer:home-warden-client-pki-crl.timer"; do
+      "client_pki_crl_timer:home-warden-client-pki-crl.timer" \
+      "web_ui:home-warden-web.service"; do
       label="${pair%%:*}"
       unit="${pair##*:}"
       en="$(systemctl is-enabled "${unit}" 2>/dev/null || true)"
@@ -1414,6 +1442,9 @@ main() {
   fi
 
   maybe_create_web_ui_config
+  if [[ -n "$(web_ui_fqdn)" ]]; then
+    web_ui_enabled=1
+  fi
 
   require_sudo
   check_prerequisites
@@ -1455,6 +1486,9 @@ main() {
   if ((catalog_heal_enabled)); then
     expand_unit "${unit_template_dir}/home-warden-catalog-heal.service" "${system_unit_dir}/home-warden-catalog-heal.service"
     expand_unit "${unit_template_dir}/home-warden-catalog-heal.timer" "${system_unit_dir}/home-warden-catalog-heal.timer"
+  fi
+  if ((web_ui_enabled)); then
+    expand_unit "${unit_template_dir}/home-warden-web.service" "${system_unit_dir}/home-warden-web.service"
   fi
   if ((client_pki_crl_enabled)); then
     expand_unit "${unit_template_dir}/home-warden-client-pki-crl.service" \
@@ -1505,6 +1539,14 @@ main() {
   fi
   if ((client_pki_crl_enabled)); then
     run sudo systemctl enable --now home-warden-client-pki-crl.timer
+  fi
+  if ((web_ui_enabled)); then
+    # restart, not just enable --now: a unit already running keeps the code and environment it started with
+    run sudo systemctl enable home-warden-web.service
+    run sudo systemctl restart home-warden-web.service
+  elif systemctl is-enabled --quiet home-warden-web.service 2>/dev/null; then
+    echo "web UI disabled in ${home_warden_config_path} (fqdn empty): stopping home-warden-web.service"
+    run sudo systemctl disable --now home-warden-web.service
   fi
 
   if systemctl is-active --quiet home-warden.service 2>/dev/null; then
