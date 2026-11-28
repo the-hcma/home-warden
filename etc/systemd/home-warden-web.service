@@ -1,0 +1,32 @@
+[Unit]
+Description=home-warden web UI backend (loopback only)
+Documentation=https://github.com/the-hcma/home-warden/blob/main/docs/host-prerequisites.md
+After=network-online.target home-warden.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@@OWNER@@
+# No Group=: systemd then uses the owner's own primary group, whatever it is called on this host.
+WorkingDirectory=@@REPO_DIR@@
+Environment="PATH=@@HOME_DIR@@/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="HOME=@@HOME_DIR@@"
+Environment="XDG_CONFIG_HOME=@@XDG_CONFIG_HOME@@"
+Environment="SCRATCH_DIR=@@SCRATCH_DIR@@"
+Environment="CONF_DIR=@@CONF_DIR@@"
+Environment="CERTBOT_CONFIG_DIR=@@CONF_DIR@@/certs"
+Environment="SERVICES_JSON_PATH=@@WEB_SERVICES_JSON_PATH@@"
+Environment="PDNS_ZONES_YAML=@@WEB_PDNS_ZONES_YAML@@"
+Environment="HOME_WARDEN_PKI_STORE=@@CLIENT_PKI_STORE@@"
+Environment=HOME_WARDEN_LISTEN_HOST=127.0.0.1
+Environment=HOME_WARDEN_LISTEN_PORT=8090
+ExecStart="@@REPO_DIR@@/scripts/catalog-health-server"
+Restart=on-failure
+RestartSec=5
+# Deliberately no NoNewPrivileges=: the web UI's PAM login runs the setgid unix_chkpwd helper, which a
+# no-new-privileges unit would block (every login would fail).
+StandardOutput=append:@@SCRATCH_DIR@@/web.log
+StandardError=append:@@SCRATCH_DIR@@/web.log
+
+[Install]
+WantedBy=multi-user.target

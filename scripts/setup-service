@@ -116,6 +116,7 @@ ipv6_socket_dropins_changed=0
 rendered_units=()
 services_json="${SERVICES_JSON_PATH:-}"
 catalog_heal_enabled=0
+web_ui_enabled=0
 client_pki_store="$(realpath --canonicalize-missing "${HOME_WARDEN_PKI_STORE:-${repo_dir}/conf/pki}")"
 readonly client_pki_store
 client_pki_crl_enabled=0
@@ -457,6 +458,54 @@ is_valid_fqdn() {
   [[ "${fqdn}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
 }
 
+# web_ui_fqdn — the fqdn set in config.toml. A file that does not exist, or one that does not parse, is "unset" (empty
+# output, status 0), as app/home_warden_config.load_config treats them, and the value is read with tomllib exactly as
+# load_config does (a top-level string, stripped; anything else counts as unset), so this script and the backend never
+# disagree about whether the web UI is enabled. What is an error (status 1, nothing changed) is anything that stops this
+# script from knowing: a file that exists but cannot be read, a path that is not a regular file, or no python3 3.11+.
+# Reading any of those as "unset" would disable and stop a web UI that the operator turned on.
+web_ui_fqdn() {
+  # Only a path that is genuinely absent is "unset". Any other failure to look at it (a directory this user cannot
+  # search, say) is an error: reading it as unset would disable a web UI that the operator turned on.
+  local stat_err
+  if ! stat_err="$(LC_ALL=C stat -L -- "${home_warden_config_path}" 2>&1 >/dev/null)"; then
+    if [[ "${stat_err}" == *"No such file or directory"* ]]; then
+      return 0
+    fi
+    echo "ERROR: cannot look at ${home_warden_config_path}: ${stat_err}" >&2
+    return 1
+  fi
+  if [[ ! -f "${home_warden_config_path}" || ! -r "${home_warden_config_path}" ]]; then
+    echo "ERROR: ${home_warden_config_path} exists but is not a readable file" >&2
+    return 1
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "ERROR: python3 not found; it is needed to read ${home_warden_config_path}" >&2
+    return 1
+  fi
+  python3 - "${home_warden_config_path}" <<'PYEOF'
+import sys
+
+try:
+    import tomllib
+except ImportError:
+    sys.stderr.write("ERROR: python3 3.11 or newer (tomllib) is needed to read the web UI config\n")
+    sys.exit(1)
+
+try:
+    with open(sys.argv[1], "rb") as handle:
+        data = tomllib.load(handle)
+except (tomllib.TOMLDecodeError, UnicodeDecodeError):
+    sys.exit(0)
+except OSError as exc:
+    sys.stderr.write(f"ERROR: cannot read {sys.argv[1]}: {exc}\n")
+    sys.exit(1)
+fqdn = data.get("fqdn", "") if isinstance(data, dict) else ""
+if isinstance(fqdn, str):
+    sys.stdout.write(fqdn.strip())
+PYEOF
+}
+
 write_home_warden_config() {
   local -r fqdn="${1:-}"
   run mkdir -p "${home_warden_config_dir}"
@@ -574,6 +623,24 @@ package_installed() {
   dpkg-query -W -f='${Status}' "${pkg}" 2>/dev/null | grep -q 'install ok installed'
 }
 
+# unit_path_problem <path> — prints why a path cannot be written into a systemd unit through sed and returns 0;
+# prints nothing and returns 1 when it is fine. Refused, not escaped: sed and systemd read `&`, `|`, a backslash,
+# `%`, `$`, a double quote and a newline differently, so a path with one would reach the unit as a different path.
+unit_path_problem() {
+  local -r path="${1:-}"
+  local -r unsafe='[^A-Za-z0-9._/@:+,=~ -]'
+  if [[ -z "${path}" ]]; then
+    echo "is empty"
+    return 0
+  fi
+  if [[ "${path}" =~ ${unsafe} ]]; then
+    echo "contains a character that cannot be installed into a unit" \
+      "(allowed: letters, digits, space and . _ / @ : + , = ~ -)"
+    return 0
+  fi
+  return 1
+}
+
 check_prerequisites() {
   local missing=0
   local pkg
@@ -646,6 +713,41 @@ check_prerequisites() {
       missing=1
     fi
   fi
+  if ((web_ui_enabled)); then
+    if [[ ! -f "${unit_template_dir}/home-warden-web.service" ]]; then
+      echo "ERROR: missing web UI unit template under ${unit_template_dir}" >&2
+      missing=1
+    fi
+    local path_label path_value problem
+    for path_label in repo_dir HOME scratch_dir conf_dir home_warden_config_dir \
+      services_json pdns_zones_yaml client_pki_store; do
+      case "${path_label}" in
+        HOME) path_value="${HOME}" ;;
+        services_json) path_value="${services_json:-${default_services_json}}" ;;
+        pdns_zones_yaml) path_value="${pdns_zones_yaml:-${default_pdns_zones_yaml}}" ;;
+        *) path_value="${!path_label}" ;;
+      esac
+      if problem="$(unit_path_problem "${path_value}")"; then
+        echo "ERROR: ${path_label} (${path_value@Q}) ${problem}; the web UI unit cannot be installed with it" >&2
+        missing=1
+      fi
+    done
+    if [[ ! -x "${repo_dir}/scripts/catalog-health-server" ]]; then
+      echo "ERROR: scripts/catalog-health-server missing or not executable" >&2
+      missing=1
+    fi
+    if [[ ! -s "${repo_dir}/app/api/static/dist/main.js" ]]; then
+      # gitignored and built, not checked in: without it the UI is a blank page behind a working login
+      echo "ERROR: the web UI bundle ${repo_dir}/app/api/static/dist/main.js is missing;" \
+        "build it, then rerun this script:" >&2
+      echo "  cd ${repo_dir}/web && pnpm install --frozen-lockfile && pnpm run build" >&2
+      missing=1
+    fi
+    if [[ ! -x "${HOME}/.local/bin/uv" ]] && ! PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" command -v uv >/dev/null 2>&1; then
+      echo "ERROR: uv not found in ${HOME}/.local/bin or the system PATH; the web UI unit runs scripts/catalog-health-server through uv" >&2
+      missing=1
+    fi
+  fi
   if ((client_pki_crl_enabled)); then
     if [[ ! -f "${unit_template_dir}/home-warden-client-pki-crl.service" ||
       ! -f "${unit_template_dir}/home-warden-client-pki-crl.timer" ]]; then
@@ -715,7 +817,7 @@ prepare_scratch() {
     run ln -sfn /usr/lib/nginx/modules "${scratch_dir}/modules"
   fi
   if ((dry_run)); then
-    echo "DRY-RUN: would touch ${scratch_dir}/{home-warden,cert-renewer,nginx-test-and-reload,healthcheck,catalog-heal,client-pki-crl}.log and logs/{error,access}.log"
+    echo "DRY-RUN: would touch ${scratch_dir}/{home-warden,cert-renewer,nginx-test-and-reload,healthcheck,catalog-heal,client-pki-crl,web}.log and logs/{error,access}.log"
   else
     local log
     for log in \
@@ -725,6 +827,7 @@ prepare_scratch() {
       "${scratch_dir}/healthcheck.log" \
       "${scratch_dir}/catalog-heal.log" \
       "${scratch_dir}/client-pki-crl.log" \
+      "${scratch_dir}/web.log" \
       "${scratch_dir}/logs/error.log" \
       "${scratch_dir}/logs/access.log"; do
       if ! touch "${log}"; then
@@ -786,10 +889,13 @@ expand_unit() {
       -e "s|@@PDNS_ZONES_YAML@@|${pdns_zones_yaml}|g" \
       -e "s|@@PDNS_ZONES_YAML_DIR@@|${pdns_zones_yaml_dir}|g" \
       -e "s|@@SERVICES_JSON_PATH@@|${services_json}|g" \
+      -e "s|@@WEB_SERVICES_JSON_PATH@@|${services_json:-${default_services_json}}|g" \
+      -e "s|@@WEB_PDNS_ZONES_YAML@@|${pdns_zones_yaml:-${default_pdns_zones_yaml}}|g" \
       -e "s|@@CLIENT_PKI_STORE@@|${client_pki_store}|g" \
       -e "s|@@CLIENT_PKI_KEY_CREDENTIAL@@|${key_credential}|g" \
       -e "s|@@REPO_DIR@@|${repo_dir}|g" \
       -e "s|@@HOME_DIR@@|${HOME}|g" \
+      -e "s|@@XDG_CONFIG_HOME@@|${XDG_CONFIG_HOME:-${HOME}/.config}|g" \
       -e "s|@@DEPLOYED_COMMIT@@|${deployed_commit}|g" \
       -e "s|@@NGINX_EXTRA_READ_PATHS@@|${nginx_extra_read_paths}|g" \
       -e "s|@@SERVICE_USER@@|${service_user}|g" \
@@ -1257,7 +1363,8 @@ print_status() {
       "pdns_reload_path:home-warden-pdns-reload.path" \
       "healthcheck_timer:home-warden-healthcheck.timer" \
       "catalog_heal_timer:home-warden-catalog-heal.timer" \
-      "client_pki_crl_timer:home-warden-client-pki-crl.timer"; do
+      "client_pki_crl_timer:home-warden-client-pki-crl.timer" \
+      "web_ui:home-warden-web.service"; do
       label="${pair%%:*}"
       unit="${pair##*:}"
       en="$(systemctl is-enabled "${unit}" 2>/dev/null || true)"
@@ -1414,6 +1521,16 @@ main() {
   fi
 
   maybe_create_web_ui_config
+  if ! web_ui_fqdn_value="$(web_ui_fqdn)"; then
+    echo "ERROR: cannot tell whether the web UI is enabled (the reason is above); nothing was changed" >&2
+    exit 1
+  fi
+  if [[ -n "${web_ui_fqdn_value}" ]]; then
+    web_ui_enabled=1
+    if ! is_valid_fqdn "${web_ui_fqdn_value}"; then
+      echo "WARNING: fqdn ${web_ui_fqdn_value@Q} in ${home_warden_config_path} is not a valid host name; the web UI vhost will not work" >&2
+    fi
+  fi
 
   require_sudo
   check_prerequisites
@@ -1455,6 +1572,9 @@ main() {
   if ((catalog_heal_enabled)); then
     expand_unit "${unit_template_dir}/home-warden-catalog-heal.service" "${system_unit_dir}/home-warden-catalog-heal.service"
     expand_unit "${unit_template_dir}/home-warden-catalog-heal.timer" "${system_unit_dir}/home-warden-catalog-heal.timer"
+  fi
+  if ((web_ui_enabled)); then
+    expand_unit "${unit_template_dir}/home-warden-web.service" "${system_unit_dir}/home-warden-web.service"
   fi
   if ((client_pki_crl_enabled)); then
     expand_unit "${unit_template_dir}/home-warden-client-pki-crl.service" \
@@ -1505,6 +1625,16 @@ main() {
   fi
   if ((client_pki_crl_enabled)); then
     run sudo systemctl enable --now home-warden-client-pki-crl.timer
+  fi
+  if ((web_ui_enabled)); then
+    # restart, not just enable --now: a unit already running keeps the code and environment it started with
+    run sudo systemctl enable home-warden-web.service
+    run sudo systemctl restart home-warden-web.service
+  elif systemctl is-enabled --quiet home-warden-web.service 2>/dev/null ||
+    systemctl is-active --quiet home-warden-web.service 2>/dev/null; then
+    # enabled and active are independent: a unit disabled without --now can still be running
+    echo "no web UI fqdn set in ${home_warden_config_path}: stopping home-warden-web.service"
+    run sudo systemctl disable --now home-warden-web.service
   fi
 
   if systemctl is-active --quiet home-warden.service 2>/dev/null; then
