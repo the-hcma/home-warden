@@ -18,6 +18,7 @@ from app.catalog_checks import (
     _cf_request,
     _resolve_via_authoritative_ns,
     candidate_zone_names,
+    wait_for_authoritative_answer,
 )
 
 
@@ -236,11 +237,20 @@ def sync_dns_address_set(
     # check, and the result below is "manual" naming the retained record, not a failure.
     retained_proxied = allow_extra and any(bool(r.get("proxied", False)) for r in leftover)
     if verify_resolution and nameservers and not proxied and not retained_proxied:
-        answers = _resolve_via_authoritative_ns(domain, record_type, nameservers[0], timeout)
+
+        def _unexpected(answers: list[str]) -> list[str]:
+            return sorted({a.rstrip(".") for a in answers} - set(wanted)) if not allow_extra else []
+
+        def _missing(answers: list[str]) -> list[str]:
+            return [address for address in wanted if address not in {a.rstrip(".") for a in answers}]
+
+        answers, attempts = wait_for_authoritative_answer(
+            lambda: _resolve_via_authoritative_ns(domain, record_type, nameservers[0], timeout),
+            lambda found: not _missing(found) and not _unexpected(found),
+        )
         if answers is not None:
-            answered = {a.rstrip(".") for a in answers}
-            not_answered = [address for address in wanted if address not in answered]
-            unexpected = sorted(answered - set(wanted)) if not allow_extra else []
+            not_answered = _missing(answers)
+            unexpected = _unexpected(answers)
             if not_answered or unexpected:
                 problem = (
                     f"missing {', '.join(not_answered)}" if not_answered else f"also answers {', '.join(unexpected)}"
@@ -248,7 +258,8 @@ def sync_dns_address_set(
                 return SyncResult(
                     name,
                     "failed",
-                    f"write accepted and read back but {nameservers[0]} answers {answers}, {problem}",
+                    f"write accepted and read back but {nameservers[0]} answers {answers}, {problem} "
+                    f"(checked {attempts} time(s)); the write is likely fine, re-check with --dry-run",
                 )
 
     verb = "updated" if (moves or retag) else "created"

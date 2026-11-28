@@ -31,6 +31,7 @@ from __future__ import annotations
 import datetime
 import ipaddress
 import json
+import os
 import random
 import re
 import socket
@@ -41,6 +42,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -137,6 +139,22 @@ def parse_cloudflare_credentials(path: Path) -> dict[str, str] | None:
         f"{path} exists but has no usable Cloudflare credentials "
         "(expected dns_cloudflare_api_token, or dns_cloudflare_email + dns_cloudflare_api_key)"
     )
+
+
+def _answer_delay() -> float:
+    """Seconds between authoritative-answer checks after a write (DNS_SYNC_ANSWER_DELAY_S, default 2)."""
+    try:
+        return max(0.0, float(os.environ.get("DNS_SYNC_ANSWER_DELAY_S", "2")))
+    except ValueError:
+        return 2.0
+
+
+def _answer_tries() -> int:
+    """How many times the authoritative answer is checked after a write (DNS_SYNC_ANSWER_TRIES, default 5)."""
+    try:
+        return max(1, int(os.environ.get("DNS_SYNC_ANSWER_TRIES", "5")))
+    except ValueError:
+        return 5
 
 
 def _cf_request(
@@ -866,16 +884,42 @@ def sync_dns_record(
     # origin `content` just written -- the API read-back above is already
     # this case's real validation.
     if verify_resolution and nameservers and not proxied:
-        answers = _resolve_via_authoritative_ns(domain, record_type, nameservers[0], timeout)
         # dig prints CNAME/NS-style answers as FQDNs with a trailing dot;
         # `target` never carries one -- normalize before comparing.
-        normalized = [a.rstrip(".") for a in answers] if answers is not None else None
-        if normalized is not None and target not in normalized:
+        def _has_target(answers: list[str]) -> bool:
+            return target in [a.rstrip(".") for a in answers]
+
+        answers, attempts = wait_for_authoritative_answer(
+            lambda: _resolve_via_authoritative_ns(domain, record_type, nameservers[0], timeout), _has_target
+        )
+        if answers is not None and not _has_target(answers):
             return SyncResult(
                 name,
                 "failed",
-                f"write accepted and read back but {nameservers[0]} answers {answers}, not {target}",
+                f"write accepted and read back but {nameservers[0]} answers {answers}, not {target} "
+                f"(checked {attempts} time(s)); the write is likely fine, re-check with --dry-run",
             )
 
     verb = "updated" if action == "update" else "created"
     return SyncResult(name, verb, f"{verb} {record_type} {domain} -> {target} in zone {zone_name}")
+
+
+def wait_for_authoritative_answer(
+    resolve: Callable[[], list[str] | None], accepts: Callable[[list[str]], bool]
+) -> tuple[list[str] | None, int]:
+    """Ask `resolve` (one authoritative query) until `accepts` its answer, up to DNS_SYNC_ANSWER_TRIES times
+    DNS_SYNC_ANSWER_DELAY_S apart. A zone's nameserver can still serve the old record for a moment after the API
+    accepted a write, so one disagreeing answer right after a write is not a failure yet. Returns (the last answer,
+    how many queries were made); an answer of None (no dig, no reply) ends the wait at once: nothing to wait for."""
+    tries = _answer_tries()
+    delay = _answer_delay()
+    answers: list[str] | None = None
+    attempts = 0
+    for attempt in range(tries):
+        if attempt:
+            time.sleep(delay)
+        answers = resolve()
+        attempts += 1
+        if answers is None or accepts(answers):
+            break
+    return answers, attempts
