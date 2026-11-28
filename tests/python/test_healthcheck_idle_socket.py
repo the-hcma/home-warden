@@ -1,10 +1,12 @@
-"""scripts/healthcheck treats an idle socket-activated service as healthy when its probe answers, and its mail says why, since when and for how long.
+"""scripts/healthcheck: an idle socket-activated service is healthy when its probe answers.
 
-Runs the real script with stub systemctl, curl and sendmail on PATH (no network, no real units) and a fixed TZ.
+The mail says why it failed, since when and for how long. Runs the real script with stub systemctl, curl and sendmail
+on PATH (no network, no real units) and a fixed TZ.
 """
 
 import os
 import subprocess
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -24,7 +26,8 @@ def _stubs(tmp_path: Path, service: str, socket: str, http: str = "200") -> dict
         "  exit\nfi\nexit 0\n"
     )
     (bin_dir / "curl").write_text(f'#!/usr/bin/env bash\nprintf "{http}"\n')
-    (bin_dir / "sendmail").write_text(f'#!/usr/bin/env bash\ncat >> "{tmp_path}/mail.out"\nprintf "=====\\n" >> "{tmp_path}/mail.out"\n')
+    mail_out = tmp_path / "mail.out"
+    (bin_dir / "sendmail").write_text(f'#!/usr/bin/env bash\ncat >> "{mail_out}"\nprintf "=====\\n" >> "{mail_out}"\n')
     for stub in bin_dir.iterdir():
         stub.chmod(0o755)
     return {
@@ -91,13 +94,36 @@ def test_recovery_mail_says_when_it_started_and_how_long_and_what_was_wrong(tmp_
     state = tmp_path / "scratch" / "healthcheck.state"
     lines = state.read_text().splitlines()
     assert any(line.startswith("first_fail_epoch=") and line != "first_fail_epoch=0" for line in lines)
-    state.write_text(state.read_text().replace(_first(lines, "first_fail_epoch="), "first_fail_epoch=1700000000"))
+    five_minutes_ago = int(time.time()) - 300
+    state.write_text(state.read_text().replace(_first(lines, "first_fail_epoch="), f"first_fail_epoch={five_minutes_ago}"))
     env = _stubs(tmp_path, service="active", socket="active")
     _run(env)
     mail = _mail(tmp_path)
     assert "RECOVERED" in mail
     assert "Unhealthy from" in mail
+    assert "about 5 min" in mail
     assert "nothing is listening" in mail
+
+
+def test_a_restart_loop_is_not_mistaken_for_an_idle_start(tmp_path: Path) -> None:
+    env = _stubs(tmp_path, service="activating", socket="active")
+    assert _run(env, "--check-only").returncode == 1
+    _run(env)
+    mail = _mail(tmp_path)
+    assert "UNHEALTHY" in mail
+    assert "is not active (activating)" in mail
+    assert "this probe started it" not in (tmp_path / "scratch" / "healthcheck.log").read_text()
+
+
+def test_an_hour_and_a_half_outage_is_written_in_hours_and_minutes(tmp_path: Path) -> None:
+    env = _stubs(tmp_path, service="inactive", socket="inactive")
+    _run(env)
+    state = tmp_path / "scratch" / "healthcheck.state"
+    lines = state.read_text().splitlines()
+    long_ago = int(time.time()) - 5700
+    state.write_text(state.read_text().replace(_first(lines, "first_fail_epoch="), f"first_fail_epoch={long_ago}"))
+    _run(_stubs(tmp_path, service="active", socket="active"))
+    assert "about 1h 35min" in _mail(tmp_path)
 
 
 def test_a_later_failure_keeps_the_first_failure_time_and_reason(tmp_path: Path) -> None:

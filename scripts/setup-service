@@ -1481,7 +1481,8 @@ main() {
     run sudo systemctl stop home-warden.service home-warden.socket
   fi
   run sudo systemctl enable --now home-warden.socket
-  # Enabled (not just started below) so nginx is up right after a boot instead of waiting for the first connection to the socket.
+  # Enabled (not just started below): nginx is then up right after a boot,
+  # not only once the first connection reaches the socket.
   run sudo systemctl enable home-warden.service
   run sudo systemctl enable --now home-warden-certbot.timer
   run sudo systemctl enable --now home-warden-reload.path
