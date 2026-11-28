@@ -103,9 +103,11 @@ def restore_snapshot(
     verify_resolution: bool = True,
 ) -> list[SyncResult]:
     """Put each record back to its snapshotted content, proxied flag and TTL, via `sync_dns_record`
-    (same read-back and resolution checks as the original write). A name the restore can't handle
-    (none existed, or several did) gets status "manual": the rollback is not complete until a human
-    has dealt with it, so the CLI exits non-zero for it."""
+    (same read-back and resolution checks as the original write). A name that held several records when
+    the snapshot was taken, or none, is left to a human: status "manual". A name that held one record but
+    has several now (a sync to several addresses) goes back through `sync_dns_address_set(allow_extra=True)`:
+    the original is written onto one of the live records and the rest, which a restore never deletes, are
+    reported as "manual". Any "manual" means the rollback is not complete, so the CLI exits non-zero."""
     results: list[SyncResult] = []
     for entry in snapshot["entries"]:
         service = str(entry.get("service") or entry["name"])
