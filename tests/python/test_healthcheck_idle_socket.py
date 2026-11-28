@@ -95,14 +95,15 @@ def test_recovery_mail_says_when_it_started_and_how_long_and_what_was_wrong(tmp_
     lines = state.read_text().splitlines()
     assert any(line.startswith("first_fail_epoch=") and line != "first_fail_epoch=0" for line in lines)
     five_minutes_ago = int(time.time()) - 300
-    state.write_text(state.read_text().replace(_first(lines, "first_fail_epoch="), f"first_fail_epoch={five_minutes_ago}"))
+    first_line = _first(lines, "first_fail_epoch=")
+    state.write_text(state.read_text().replace(first_line, f"first_fail_epoch={five_minutes_ago}"))
     env = _stubs(tmp_path, service="active", socket="active")
     _run(env)
-    mail = _mail(tmp_path)
-    assert "RECOVERED" in mail
-    assert "Unhealthy from" in mail
-    assert "about 5 min" in mail
-    assert "nothing is listening" in mail
+    recovery = _mail(tmp_path).split("=====")[-2]
+    assert "RECOVERED" in recovery
+    assert "Unhealthy from" in recovery
+    assert "about 5 min" in recovery
+    assert "What was wrong: home-warden.service is inactive and home-warden.socket is inactive" in recovery
 
 
 def test_a_restart_loop_is_not_mistaken_for_an_idle_start(tmp_path: Path) -> None:
